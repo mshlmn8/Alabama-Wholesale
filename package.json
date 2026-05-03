@@ -1,0 +1,15 @@
+{
+  "name": "alabama-wholesale",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Alabama Wholesale order builder — single-file PWA served by a thin Express wrapper for Firebase App Hosting.",
+  "engines": {
+    "node": "20"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
