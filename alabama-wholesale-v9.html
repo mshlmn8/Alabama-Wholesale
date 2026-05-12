@@ -618,6 +618,45 @@ nav.bottom button.active { color: var(--orange); background: var(--orange-soft);
 /* PERMISSION HIDING */
 .perm-hide { display: none !important; }
 
+/* HISTORY CARDS */
+#historyList { display: grid; gap: 10px; }
+.history-card {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 14px 16px;
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  transition: transform .14s ease, box-shadow .14s ease, border-color .14s ease;
+}
+.history-card:hover { transform: translateY(-1px); box-shadow: var(--shadow); border-color: rgba(244,91,34,.28); }
+.history-card .hc-stamp {
+  text-align: center;
+  border-radius: 14px;
+  padding: 8px 4px;
+  background: var(--orange-soft);
+  color: var(--orange-2);
+}
+.history-card .hc-mo { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .14em; }
+.history-card .hc-day { font-size: 24px; font-weight: 900; line-height: 1; margin: 2px 0; letter-spacing: -.04em; color: var(--text); }
+.history-card .hc-yr { font-size: 10px; color: var(--text-3); font-weight: 700; }
+.history-card .hc-store { font-size: 16px; font-weight: 800; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-card .hc-meta { margin-top: 4px; font-size: 12px; color: var(--text-3); font-weight: 600; }
+.history-card .hc-edited { color: var(--warning); font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+.history-card .hc-right { display: flex; align-items: center; gap: 10px; }
+.history-card .hc-total { font-size: 17px; font-weight: 900; color: var(--text); letter-spacing: -.02em; }
+.history-card .hc-arrow { font-size: 22px; color: var(--text-3); font-weight: 800; }
+@media (max-width: 480px) {
+  .history-card { grid-template-columns: 56px minmax(0, 1fr) auto; gap: 10px; padding: 12px; }
+  .history-card .hc-day { font-size: 21px; }
+  .history-card .hc-total { font-size: 15px; }
+  .history-card .hc-arrow { display: none; }
+}
+
 /* Customers see Settings, but only the cards explicitly marked customer-allowed (currently just Appearance/Theme). */
 body.role-customer #view-settings .card:not([data-customer-allowed]) { display: none !important; }
 body.role-customer #view-settings .section-sub > span::after { content: ' · Theme only'; color: var(--text-3); font-weight: 700; }
@@ -7145,16 +7184,23 @@ async function loadState() {
   const data = await Storage.get(KEYS.data);
   if (data) {
     state.categories = data.categories || [];
-    // Items: ensure each has price, variantPrices, order, stockStatus
-    state.items = (data.items || []).map((it, i) => ({
-      ...it,
-      price: typeof it.price === 'number' ? it.price : null,
-      variantPrices: it.variantPrices || {},
-      order: typeof it.order === 'number' ? it.order : (i + 1),
-      stockStatus: it.stockStatus || 'in',
-      variantStock: it.variantStock || null,
-      taxable: typeof it.taxable === 'boolean' ? it.taxable : true   // default to taxable
-    }));
+    // Items: ensure each has price, variantPrices, order, stockStatus, categoryIds
+    state.items = (data.items || []).map((it, i) => {
+      const cids = Array.isArray(it.categoryIds) && it.categoryIds.length
+        ? it.categoryIds
+        : (it.categoryId ? [it.categoryId] : []);
+      return {
+        ...it,
+        categoryIds: cids,
+        categoryId: cids[0] || it.categoryId || null,
+        price: typeof it.price === 'number' ? it.price : null,
+        variantPrices: it.variantPrices || {},
+        order: typeof it.order === 'number' ? it.order : (i + 1),
+        stockStatus: it.stockStatus || 'in',
+        variantStock: it.variantStock || null,
+        taxable: typeof it.taxable === 'boolean' ? it.taxable : true   // default to taxable
+      };
+    });
     // Stores: ensure each has email, taxRate, ledger, address, county
     state.stores = (data.stores || []).map(s => ({
       ...s,
@@ -7250,7 +7296,23 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 function findItem(id) { return state.items.find(i => i.id === id); }
 function findCategory(id) { return state.categories.find(c => c.id === id); }
 function findStore(id) { return state.stores.find(s => s.id === id); }
-function itemsByCategory(catId) { return state.items.filter(i => i.categoryId === catId); }
+// Items can belong to one or many categories. `categoryIds` (array) is the
+// canonical field; older items use a single `categoryId` string. This helper
+// returns the full set, never empty if at least one is set.
+function itemCategoryIds(it) {
+  if (!it) return [];
+  if (Array.isArray(it.categoryIds) && it.categoryIds.length) return it.categoryIds.slice();
+  if (it.categoryId) return [it.categoryId];
+  return [];
+}
+function itemsByCategory(catId) {
+  return state.items.filter(i => itemCategoryIds(i).includes(catId));
+}
+// Alphabetical, case-insensitive. Returns a new array.
+function sortedVariants(item) {
+  const v = item?.variants || [];
+  return [...v].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+}
 
 function toast(msg, type = '') {
   const t = $('#toast');
@@ -7365,27 +7427,23 @@ function renderMenu() {
   `;
 }
 
-function menuAction(a) {
+async function menuAction(a) {
   if (a === 'new-order') {
-    if (state.currentOrder.lines?.length > 0) {
-      confirmDialog({
+    const lineCount = state.currentOrder.lines?.length || 0;
+    if (lineCount > 0) {
+      const choice = await _saveOrDiscardDialog({
         title: 'Start a new order?',
-        message: 'Your current order has ' + state.currentOrder.lines.length + ' lines.',
-        detail: 'Starting new will clear them. Compile and copy first if you want to keep a copy.',
-        okLabel: 'Start New',
-        danger: true
-      }).then(ok => {
-        if (ok) {
-          state.currentOrder = { storeId: state.currentStoreId, lines: [] };
-          saveOrder();
-          showView('builder');
-        }
+        message: `Your current order has ${lineCount} line${lineCount === 1 ? '' : 's'}.`,
+        detail: 'Save it to History first, or discard and start fresh?'
       });
-    } else {
-      state.currentOrder = { storeId: state.currentStoreId, lines: [] };
-      saveOrder();
-      showView('builder');
+      if (choice === 'cancel') return;
+      if (choice === 'save') {
+        try { await compileAndSaveQuiet(); } catch (e) { /* swallow — user can retry */ }
+      }
     }
+    state.currentOrder = { storeId: state.currentStoreId, lines: [] };
+    await saveOrder();
+    showView('builder');
   } else if (a === 'resume') {
     showView('builder');
   }
@@ -7524,10 +7582,16 @@ function openLineEditor(itemId, existingLineId) {
   if (!item) return;
   const existing = existingLineId ? state.currentOrder.lines.find(l => l.id === existingLineId) : null;
 
-  // Working copy
+  // Working copy. For new lines, record the category the user is currently
+  // browsing — this lets multi-category items appear under the right header
+  // in the compiled output (otherwise they'd always default to their first cat).
+  const cidNow = state.activeCategoryId && itemCategoryIds(item).includes(state.activeCategoryId)
+    ? state.activeCategoryId
+    : (itemCategoryIds(item)[0] || null);
   const working = existing ? JSON.parse(JSON.stringify(existing)) : {
     id: uid(),
     itemId: item.id,
+    categoryId: cidNow,
     entries: [],
     except: '',
     suffix: '',
@@ -7572,7 +7636,7 @@ function openLineEditor(itemId, existingLineId) {
           <label>Flavor (optional)</label>
           <select id="le-singleVariant">
             <option value="">— none —</option>
-            ${item.variants.map(v => `<option value="${esc(v)}" ${(working.entries[0].variant === v) ? 'selected' : ''}>${esc(v)}</option>`).join('')}
+            ${sortedVariants(item).map(v => `<option value="${esc(v)}" ${(working.entries[0].variant === v) ? 'selected' : ''}>${esc(v)}</option>`).join('')}
           </select>
         </div>`;
       }
@@ -7584,7 +7648,7 @@ function openLineEditor(itemId, existingLineId) {
     } else {
       // Mix mode
       html += `<div class="variant-list">
-        ${item.variants.map(v => {
+        ${sortedVariants(item).map(v => {
           const ent = working.entries.find(e => e.variant === v);
           const active = !!ent;
           return `<div class="variant-row ${active ? 'active' : ''}">
@@ -7911,13 +7975,60 @@ async function selectStore(id) {
       return;
     }
   }
-  state.currentOrder.storeId = id;
+  // If we're switching away from a store that has unsaved lines, ask first.
+  const hasLines = (state.currentOrder.lines || []).length > 0;
+  const switching = state.currentOrder.storeId && state.currentOrder.storeId !== id;
+  if (hasLines && switching) {
+    closeModal();
+    const choice = await _saveOrDiscardDialog({
+      title: 'Switch store?',
+      message: `Your current order has ${state.currentOrder.lines.length} line${state.currentOrder.lines.length === 1 ? '' : 's'} for ${esc(findStore(state.currentOrder.storeId)?.name || 'the previous store')}.`,
+      detail: 'Save it to History first, or discard and switch?'
+    });
+    if (choice === 'cancel') { openStorePicker(); return; }
+    if (choice === 'save') {
+      try { await compileAndSaveQuiet(); } catch (e) { /* swallow — user can retry */ }
+    }
+    state.currentOrder = { storeId: id, lines: [] };
+  } else {
+    state.currentOrder.storeId = id;
+  }
   state.currentStoreId = id;
   await saveOrder(); await saveData();
   closeModal();
   renderBuilder();
+  if (typeof renderMenu === 'function') renderMenu();
   $('#currentStoreName').textContent = findStore(id)?.name || '—';
   toast('Store selected');
+}
+
+// Three-way dialog: Save, Discard, Cancel. Returns 'save' | 'discard' | 'cancel'.
+function _saveOrDiscardDialog(opts) {
+  return new Promise(resolve => {
+    openModal({
+      title: opts.title || 'Save order?',
+      sub: opts.sub || '',
+      body: `<div class="confirm-msg">${esc(opts.message || '')}</div>${opts.detail ? `<div class="confirm-sub" style="margin-top:6px; color: var(--text-3);">${esc(opts.detail)}</div>` : ''}`,
+      actions: [
+        { label: 'Cancel',          type: 'ghost',   onClick: () => { closeModal(); resolve('cancel'); } },
+        { label: 'Discard',         type: 'danger',  onClick: () => { closeModal(); resolve('discard'); } },
+        { label: 'Save to History', type: 'primary', onClick: () => { closeModal(); resolve('save'); } }
+      ]
+    });
+  });
+}
+
+// Compile + save to history without showing the output panel — used by the
+// "save before switching/clearing" flows.
+async function compileAndSaveQuiet() {
+  if (!state.currentOrder.storeId || !state.currentOrder.lines.length) return null;
+  const out = compileOrder();
+  $('#outputBody').value = out;
+  $('#outputBody').dataset.edited = '0';
+  const bill = computeBill(state.currentOrder);
+  const billEl = document.getElementById('billBody');
+  if (billEl) billEl.textContent = renderBillText(bill);
+  return await saveOrderToHistory();
 }
 
 async function loadStoreTemplate() {
@@ -8042,15 +8153,32 @@ async function deleteCategory(id) {
   const c = findCategory(id);
   if (!c) return;
   const items = itemsByCategory(id);
+  // Items that LIVE ONLY in this category will be deleted; items that also
+  // belong to other categories are kept (just unhooked from this one).
+  const orphans = items.filter(it => itemCategoryIds(it).filter(x => x !== id).length === 0);
+  const kept = items.length - orphans.length;
+  const detailParts = [];
+  if (orphans.length) detailParts.push(`${orphans.length} item${orphans.length === 1 ? '' : 's'} only in this category will be deleted.`);
+  if (kept) detailParts.push(`${kept} item${kept === 1 ? '' : 's'} also live in other categories — those will stay.`);
   const ok = await confirmDialog({
     title: `Delete ${c.name}?`,
-    message: items.length > 0 ? `This will also delete ${items.length} item${items.length === 1 ? '' : 's'} in this category.` : 'This category is empty.',
+    message: items.length > 0 ? detailParts.join(' ') : 'This category is empty.',
     detail: 'Cannot be undone.',
     okLabel: 'Delete',
     danger: true
   });
   if (!ok) return;
-  state.items = state.items.filter(i => i.categoryId !== id);
+  // Remove orphaned items entirely
+  const orphanIds = new Set(orphans.map(o => o.id));
+  state.items = state.items.filter(i => !orphanIds.has(i.id));
+  // For surviving multi-cat items, strip this category from their lists
+  state.items.forEach(it => {
+    const cids = itemCategoryIds(it).filter(x => x !== id);
+    if (cids.length) {
+      it.categoryIds = cids;
+      it.categoryId = cids[0];
+    }
+  });
   state.categories = state.categories.filter(cc => cc.id !== id);
   // Drop lines whose category was deleted (both item-backed and literal)
   state.currentOrder.lines = state.currentOrder.lines.filter(l => {
@@ -8105,9 +8233,14 @@ function openAddItem(presetCatId) {
     sub: 'Add to catalog',
     body: `
       <div class="field"><label>Item name</label><input type="text" id="addItemName" placeholder="e.g., Vaseline"></div>
-      <div class="field"><label>Category</label><select id="addItemCat">
-        ${cats.map(c => `<option value="${c.id}" ${c.id === presetCatId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
-      </select></div>
+      <div class="field"><label>Categories (one or more)</label>
+        <div class="store-checklist">
+          ${cats.length === 0
+            ? '<div class="empty">No categories yet — add one first.</div>'
+            : cats.map(c => `<label><input type="checkbox" name="addItemCatId" value="${c.id}" ${c.id === presetCatId ? 'checked' : ''}> <span>${esc(c.name)}</span></label>`).join('')}
+        </div>
+        <div class="hint">Item will appear in every category you check.</div>
+      </div>
       <div class="field"><label>Variants / flavors (comma separated)</label>
         <input type="text" id="addItemVariants" placeholder="e.g., big, small, original">
         <div class="hint">Leave empty if this item has no flavors (like "Claritin" or "Kite").</div>
@@ -8125,16 +8258,19 @@ function openAddItem(presetCatId) {
       { label: 'Cancel', type: 'ghost', onClick: closeModal },
       { label: 'Add', type: 'primary', onClick: async () => {
         const name = $('#addItemName').value.trim();
-        const cat = $('#addItemCat').value;
-        const variants = $('#addItemVariants').value.split(',').map(s => s.trim()).filter(Boolean);
+        const catIds = Array.from(document.querySelectorAll('input[name="addItemCatId"]:checked')).map(c => c.value);
+        const variants = $('#addItemVariants').value
+          .split(',').map(s => s.trim()).filter(Boolean)
+          .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
         const hasColon = $('#addItemColon').checked;
         const taxable = $('#addItemTaxable').checked;
         const priceStr = $('#addItemPrice').value.trim();
         const price = priceStr ? parseFloat(priceStr) : null;
         if (!name) { toast('Enter a name', 'error'); return; }
-        const lastOrder = Math.max(0, ...itemsByCategory(cat).map(x => x.order || 0));
+        if (catIds.length === 0) { toast('Pick at least one category', 'error'); return; }
+        const lastOrder = Math.max(0, ...itemsByCategory(catIds[0]).map(x => x.order || 0));
         state.items.push({
-          id: 'itm-' + uid(), name, categoryId: cat, variants, hasColon,
+          id: 'itm-' + uid(), name, categoryId: catIds[0], categoryIds: catIds, variants, hasColon,
           price: isNaN(price) ? null : price,
           variantPrices: {},
           order: lastOrder + 1,
@@ -8156,7 +8292,7 @@ function editItem(id) {
   const it = findItem(id);
   if (!it) return;
   const cats = [...state.categories].sort((a,b) => a.order - b.order);
-  const variantPriceRows = (it.variants || []).map(v => `
+  const variantPriceRows = sortedVariants(it).map(v => `
     <div class="vprice-row">
       <div class="v-lbl">${esc(v)}</div>
       <input type="number" step="0.01" min="0" data-variant="${esc(v)}" value="${typeof it.variantPrices?.[v] === 'number' ? it.variantPrices[v] : ''}" placeholder="base">
@@ -8167,9 +8303,14 @@ function editItem(id) {
     sub: it.name,
     body: `
       <div class="field"><label>Item name</label><input type="text" id="ediItemName" value="${esc(it.name)}"></div>
-      <div class="field"><label>Category</label><select id="ediItemCat">
-        ${cats.map(c => `<option value="${c.id}" ${c.id === it.categoryId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
-      </select></div>
+      <div class="field"><label>Categories (one or more)</label>
+        <div class="store-checklist">
+          ${cats.length === 0
+            ? '<div class="empty">No categories yet.</div>'
+            : (() => { const owned = new Set(itemCategoryIds(it)); return cats.map(c => `<label><input type="checkbox" name="ediItemCatId" value="${c.id}" ${owned.has(c.id) ? 'checked' : ''}> <span>${esc(c.name)}</span></label>`).join(''); })()}
+        </div>
+        <div class="hint">Item will appear in every category you check.</div>
+      </div>
       <div class="field"><label>Stock status</label>
         <select id="ediItemStock">
           <option value="in" ${(it.stockStatus || 'in') === 'in' ? 'selected' : ''}>In Stock</option>
@@ -8178,7 +8319,8 @@ function editItem(id) {
         </select>
       </div>
       <div class="field"><label>Variants (comma separated)</label>
-        <input type="text" id="ediItemVariants" value="${esc((it.variants || []).join(', '))}">
+        <input type="text" id="ediItemVariants" value="${esc(sortedVariants(it).join(', '))}">
+        <div class="hint">Saved in alphabetical order.</div>
       </div>
       <div class="field"><label>Base price</label>
         <input type="number" id="ediItemPrice" step="0.01" min="0" value="${typeof it.price === 'number' ? it.price : ''}" placeholder="0.00">
@@ -8208,8 +8350,13 @@ function editItem(id) {
         const name = $('#ediItemName').value.trim();
         if (!name) { toast('Enter a name', 'error'); return; }
         it.name = name;
-        it.categoryId = $('#ediItemCat').value;
-        it.variants = $('#ediItemVariants').value.split(',').map(s => s.trim()).filter(Boolean);
+        const catIds = Array.from(document.querySelectorAll('input[name="ediItemCatId"]:checked')).map(c => c.value);
+        if (catIds.length === 0) { toast('Pick at least one category', 'error'); return; }
+        it.categoryIds = catIds;
+        it.categoryId = catIds[0]; // keep legacy field as the "primary" category
+        it.variants = $('#ediItemVariants').value
+          .split(',').map(s => s.trim()).filter(Boolean)
+          .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
         it.hasColon = $('#ediItemColon').checked;
         it.taxable = $('#ediItemTaxable').checked;
         it.stockStatus = $('#ediItemStock').value;
@@ -8724,15 +8871,25 @@ function renderHistory() {
     const mo = d.toLocaleDateString('en-US', { month: 'short' });
     const day = d.getDate();
     const yr = d.getFullYear();
+    const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    const lineCount = h.lines.length;
+    const totalQty = h.lines.reduce((sum, l) => {
+      if (Array.isArray(l.entries)) return sum + l.entries.reduce((s, e) => s + (parseInt(e.qty, 10) || 0), 0);
+      return sum + (parseInt(l.qty, 10) || 0);
+    }, 0);
     return `<div class="history-card" onclick="viewHistoryItem('${h.id}')">
-      <div class="date-stamp">
-        <div class="month">${esc(mo)}</div>
-        <div class="day">${day}</div>
-        <div class="year">${yr}</div>
+      <div class="hc-stamp">
+        <div class="hc-mo">${esc(mo)}</div>
+        <div class="hc-day">${day}</div>
+        <div class="hc-yr">${yr}</div>
       </div>
-      <div class="h-body">
-        <div class="h-store">${esc(h.storeName)}</div>
-        <div class="h-meta">${h.lines.length} line${h.lines.length === 1 ? '' : 's'}${h.total != null ? ' · <span class="total">' + esc(fmtMoney(h.total)) + '</span>' : ''}</div>
+      <div class="hc-body">
+        <div class="hc-store">${esc(h.storeName)}</div>
+        <div class="hc-meta">${time} · ${lineCount} line${lineCount === 1 ? '' : 's'}${totalQty ? ' · ' + totalQty + ' pcs' : ''}${h.edited ? ' · <span class="hc-edited">edited</span>' : ''}</div>
+      </div>
+      <div class="hc-right">
+        ${h.total != null ? `<div class="hc-total">${esc(fmtMoney(h.total))}</div>` : ''}
+        <div class="hc-arrow">›</div>
       </div>
     </div>`;
   }).join('');
@@ -9903,7 +10060,7 @@ function openBulkStockTool() {
 
 function _bulkMatchScope(item, scope) {
   if (scope === 'all') return true;
-  if (scope.startsWith('cat:')) return item.categoryId === scope.slice(4);
+  if (scope.startsWith('cat:')) return itemCategoryIds(item).includes(scope.slice(4));
   if (['in','low','out'].includes(scope)) return (item.stockStatus || 'in') === scope;
   return false;
 }
@@ -10144,7 +10301,7 @@ function _matchesBulkScope(item, scope) {
   if (scope === 'all') return true;
   if (scope === 'missing') return typeof item.price !== 'number';
   if (scope === 'set') return typeof item.price === 'number';
-  if (scope.startsWith('cat:')) return item.categoryId === scope.slice(4);
+  if (scope.startsWith('cat:')) return itemCategoryIds(item).includes(scope.slice(4));
   return false;
 }
 
@@ -11125,8 +11282,43 @@ body.menu-screen .app-menu-btn{display:none!important}
     return subs[0]||'General';
   }
   window.getItemSubcategory = getItemSubcategory;
-  function isFav(itemId){return (state.settings?.favorites||[]).includes(itemId);}
-  window.toggleFav = async function(itemId, ev){ if(ev){ev.stopPropagation();ev.preventDefault();} state.settings=state.settings||{}; state.settings.favorites=state.settings.favorites||[]; if(state.settings.favorites.includes(itemId)) state.settings.favorites=state.settings.favorites.filter(x=>x!==itemId); else state.settings.favorites.push(itemId); await saveData(); renderBuilder(); toast(state.settings.favorites.includes(itemId)?'Added to favorites':'Removed from favorites'); };
+  // Per-store favorites. Each store has its own list of favorite item IDs.
+  // Migrates the old global state.settings.favorites once, into the current store's bucket.
+  function _currentFavStoreId(){ return state.currentOrder?.storeId || state.currentStoreId || null; }
+  function _migrateGlobalFavoritesIfNeeded(){
+    const sid = _currentFavStoreId();
+    if (!sid) return;
+    state.settings = state.settings || {};
+    state.settings.favoritesByStore = state.settings.favoritesByStore || {};
+    if (Array.isArray(state.settings.favorites) && state.settings.favorites.length) {
+      const bucket = state.settings.favoritesByStore[sid] || [];
+      const merged = Array.from(new Set([...bucket, ...state.settings.favorites]));
+      state.settings.favoritesByStore[sid] = merged;
+      delete state.settings.favorites;
+    }
+  }
+  function isFav(itemId){
+    const sid = _currentFavStoreId();
+    if (!sid) return false;
+    const map = state.settings?.favoritesByStore || {};
+    return (map[sid] || []).includes(itemId);
+  }
+  window.toggleFav = async function(itemId, ev){
+    if(ev){ev.stopPropagation();ev.preventDefault();}
+    const sid = _currentFavStoreId();
+    if (!sid) { toast('Pick a store first', 'error'); return; }
+    state.settings = state.settings || {};
+    state.settings.favoritesByStore = state.settings.favoritesByStore || {};
+    _migrateGlobalFavoritesIfNeeded();
+    const list = state.settings.favoritesByStore[sid] || [];
+    const idx = list.indexOf(itemId);
+    if (idx >= 0) list.splice(idx, 1);
+    else list.push(itemId);
+    state.settings.favoritesByStore[sid] = list;
+    await saveData();
+    renderBuilder();
+    toast(list.includes(itemId) ? 'Added to favorites' : 'Removed from favorites');
+  };
   function ensureAppMenu(){
     if(document.getElementById('appMenuBtn'))return;
     document.body.insertAdjacentHTML('beforeend',`<button class="app-menu-btn" id="appMenuBtn" onclick="toggleAppMenu()">☰</button><div class="app-menu-panel" id="appMenuPanel"><div class="menu-title">Alabama Wholesale</div><div class="menu-grid"><button onclick="closeAppMenu();showView('menu')"><span class="ico">⌂</span>Home</button><button onclick="closeAppMenu();showView('builder')"><span class="ico">＋</span>Builder</button><button onclick="closeAppMenu();showView('ledger')"><span class="ico">$</span>Ledger</button><button onclick="closeAppMenu();showView('history')"><span class="ico">↺</span>History</button><button onclick="closeAppMenu();showView('submit-payment')"><span class="ico">✓</span>Submit Payment</button><button onclick="closeAppMenu();showView('salesman-info')"><span class="ico">☎</span>Salesman Information</button><button onclick="closeAppMenu();showView('stores')"><span class="ico">◎</span>Stores</button><button onclick="closeAppMenu();showView('settings')"><span class="ico">⚙</span>Settings</button></div></div>`);
