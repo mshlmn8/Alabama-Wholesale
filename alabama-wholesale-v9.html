@@ -11230,6 +11230,35 @@ init().catch(e => {
   console.error(e);
   alert('Failed to initialize: ' + e.message);
 });
+
+// ---- SERVICE WORKER REGISTRATION ----
+// Caches the app shell + images so it loads instantly and works offline.
+// Skipped on file:// (local previews) since SWs need a real origin.
+if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/service-worker.js').then(reg => {
+      // When a new SW finishes installing, surface a small toast so the
+      // user can grab the update on their next interaction.
+      reg.addEventListener('updatefound', () => {
+        const sw = reg.installing;
+        if (!sw) return;
+        sw.addEventListener('statechange', () => {
+          if (sw.state === 'installed' && navigator.serviceWorker.controller) {
+            if (typeof toast === 'function') toast('Update available — reload to apply', 'success');
+            sw.postMessage('SKIP_WAITING');
+          }
+        });
+      });
+    }).catch(err => console.warn('SW register failed', err));
+    // Reload once the new SW takes over.
+    let reloading = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloading) return; reloading = true;
+      // Tiny delay so the toast is visible if it just fired.
+      setTimeout(() => location.reload(), 600);
+    });
+  });
+}
 </script>
 
 <style id="v6-mobile-flow-css">
