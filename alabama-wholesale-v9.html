@@ -1182,13 +1182,14 @@ nav.bottom .ico .icon-svg { width: 22px; height: 22px; }
     </div>
 
     <div class="card">
-      <div class="card-head"><h3>Backup & Restore</h3></div>
-      <div class="hint" style="margin-bottom: 12px;">Your data lives in this browser. Export regularly to keep backups.</div>
+      <div class="card-head"><h3>Backup & Restore</h3><span class="tag" id="backupAgeTag">Never backed up</span></div>
+      <div class="hint" style="margin-bottom: 12px;">Your data lives in this browser. <b>iPhone Safari can clear data after 7 days of no visits</b> — export regularly. Backup file now includes every saved order, user, and ledger entry.</div>
       <div class="btn-row">
-        <button class="btn" onclick="exportData()">⇩ Export JSON</button>
+        <button class="btn primary" onclick="exportData()">⇩ Export JSON</button>
         <label class="btn ghost" for="importFile">⇧ Import JSON</label>
         <input type="file" id="importFile" accept="application/json,.json">
       </div>
+      <div id="backupStatusHint" class="hint" style="margin-top: 10px;"></div>
     </div>
 
     <div class="card">
@@ -8653,6 +8654,24 @@ function renderSettings() {
   const fsEl = document.getElementById('firebaseStatus');
   if (fsEl) fsEl.textContent = FIREBASE_CONFIG ? 'Firebase config found' : 'Local mode';
   $('#storageMode').textContent = Storage.mode;
+  // Backup freshness indicator
+  const tag = document.getElementById('backupAgeTag');
+  const hint = document.getElementById('backupStatusHint');
+  if (tag && hint) {
+    const last = state.settings?.lastExportAt || 0;
+    const histCount = (state.orderHistory || []).length;
+    if (!last) {
+      tag.className = 'tag muted'; tag.textContent = 'Never backed up';
+      hint.textContent = histCount ? `${histCount} order${histCount === 1 ? '' : 's'} on this device — back up now.` : '';
+    } else {
+      const days = Math.floor((Date.now() - last) / (24 * 60 * 60 * 1000));
+      if (days <= 1) { tag.className = 'tag success'; tag.textContent = days === 0 ? 'Backed up today' : 'Backed up yesterday'; }
+      else if (days < 7) { tag.className = 'tag info'; tag.textContent = `Backed up ${days}d ago`; }
+      else { tag.className = 'tag'; tag.textContent = `Stale — ${days}d ago`; }
+      const when = new Date(last).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+      hint.textContent = `Last backup: ${when} · ${histCount} order${histCount === 1 ? '' : 's'} in storage`;
+    }
+  }
   applyPermissions();
 }
 
@@ -8669,22 +8688,80 @@ async function saveSettings() {
   toast('Settings saved', 'success');
 }
 
-function exportData() {
-  const blob = new Blob([JSON.stringify({
+// Defer the stale-backup nag until after login + a beat, so it doesn't
+// shoulder its way through the first paint.
+function scheduleStaleBackupCheck() {
+  setTimeout(checkStaleBackup, 3500);
+}
+
+async function checkStaleBackup() {
+  // Don't pester users with no orders to lose.
+  const histCount = (state.orderHistory || []).length;
+  if (histCount === 0) return;
+  // Only show after they're signed in.
+  if (state.accountsEnabled && !state.session) return;
+  // Snooze for 24h after dismissal.
+  const snoozedUntil = state.settings?.backupNagSnoozedUntil || 0;
+  if (Date.now() < snoozedUntil) return;
+  const last = state.settings?.lastExportAt || 0;
+  const days = last ? Math.floor((Date.now() - last) / (24 * 60 * 60 * 1000)) : null;
+  // Never exported, but has orders → prompt immediately. Older than 7 days → prompt.
+  if (last && days < 7) return;
+  const msg = last
+    ? `Your last backup was ${days} day${days === 1 ? '' : 's'} ago, and you have ${histCount} saved order${histCount === 1 ? '' : 's'}.`
+    : `You have ${histCount} saved order${histCount === 1 ? '' : 's'} and no backup on file yet.`;
+  openModal({
+    title: 'Time to back up?',
+    sub: 'Protect your order history',
+    body: `<div class="confirm-msg">${esc(msg)}</div>
+      <div class="confirm-sub" style="margin-top:6px; color: var(--text-3);">
+        Browser data can disappear on iPhone Safari without warning. One quick export keeps every order safe.
+      </div>`,
+    actions: [
+      { label: 'Remind me tomorrow', type: 'ghost', onClick: async () => {
+          state.settings = state.settings || {};
+          state.settings.backupNagSnoozedUntil = Date.now() + 24 * 60 * 60 * 1000;
+          await saveData(); closeModal();
+      }},
+      { label: 'Back up now', type: 'primary', onClick: async () => {
+          closeModal();
+          await exportData();
+      }}
+    ]
+  });
+}
+
+async function exportData() {
+  const payload = {
+    // Catalog + setup
     categories: state.categories,
     items: state.items,
     stores: state.stores,
     settings: state.settings,
+    currentStoreId: state.currentStoreId,
+    // Order data (was missing!) — this is the data users were losing
+    orderHistory: state.orderHistory || [],
+    currentOrder: state.currentOrder || null,
+    // Branding + auth
+    logo: state.logo || null,
+    users: state.users || [],
+    session: state.session || null,
+    accountsEnabled: !!state.accountsEnabled,
     exportedAt: new Date().toISOString(),
-    version: 1
-  }, null, 2)], { type: 'application/json' });
+    version: 2
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = `alabama-wholesale-backup-${new Date().toISOString().slice(0,10)}.json`;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 500);
-  toast('Backup downloaded', 'success');
+  // Remember the last successful export so we can nag if it gets stale
+  state.settings = state.settings || {};
+  state.settings.lastExportAt = Date.now();
+  await saveData();
+  toast(`Backup downloaded — ${payload.orderHistory.length} orders included`, 'success');
 }
 
 async function importData(file) {
@@ -8692,10 +8769,19 @@ async function importData(file) {
     const text = await file.text();
     const data = JSON.parse(text);
     if (!data.categories || !data.items || !data.stores) throw new Error('Invalid file');
+    const histCount = Array.isArray(data.orderHistory) ? data.orderHistory.length : 0;
+    const userCount = Array.isArray(data.users) ? data.users.length : 0;
+    const detailParts = [
+      `${data.categories.length} categories`,
+      `${data.items.length} items`,
+      `${data.stores.length} stores`
+    ];
+    if (histCount) detailParts.push(`${histCount} saved orders`);
+    if (userCount) detailParts.push(`${userCount} users`);
     const ok = await confirmDialog({
       title: 'Import backup?',
-      message: 'This replaces all your current categories, items, and stores.',
-      detail: `Found ${data.categories.length} categories, ${data.items.length} items, ${data.stores.length} stores.`,
+      message: 'This replaces all your current data.',
+      detail: 'Found: ' + detailParts.join(' · '),
       danger: true,
       okLabel: 'Replace'
     });
@@ -8704,11 +8790,22 @@ async function importData(file) {
     state.items = data.items;
     state.stores = data.stores;
     state.settings = data.settings || state.settings;
-    state.currentStoreId = state.stores[0]?.id || null;
-    state.currentOrder = { storeId: state.currentStoreId, lines: [], creditsReturns: '' };
+    state.currentStoreId = data.currentStoreId || state.stores[0]?.id || null;
+    state.currentOrder = data.currentOrder || { storeId: state.currentStoreId, lines: [], creditsReturns: '' };
+    if (Array.isArray(data.orderHistory)) state.orderHistory = data.orderHistory;
+    if (data.logo) state.logo = data.logo;
+    if (Array.isArray(data.users)) state.users = data.users;
+    if (data.session) state.session = data.session;
+    if (typeof data.accountsEnabled === 'boolean') state.accountsEnabled = data.accountsEnabled;
     await saveData(); await saveOrder();
+    if (typeof saveHistory === 'function') await saveHistory();
+    if (typeof saveUsers === 'function') await saveUsers();
+    if (typeof saveSession === 'function') await saveSession();
+    if (typeof saveAccFlag === 'function') await saveAccFlag();
+    if (typeof saveLogo === 'function' && data.logo) await saveLogo();
     renderCatalog(); renderStores(); renderSettings();
-    toast('Imported', 'success');
+    if (typeof renderHistory === 'function') renderHistory();
+    toast(`Imported${histCount ? ' (' + histCount + ' orders restored)' : ''}`, 'success');
   } catch (e) {
     toast('Import failed: ' + e.message, 'error');
   }
@@ -10702,7 +10799,20 @@ async function cloudSyncEnable() {
   try {
     const sdk = await _loadFirebaseSDK();
     const app = sdk.app.initializeApp(cfg, 'aw-sync');
-    const db = sdk.firestore.getFirestore(app);
+    // Initialize Firestore with IndexedDB persistence so writes queue while
+    // offline and replay automatically when the device reconnects. If
+    // initialize fails (e.g. another instance already exists) fall back to
+    // plain getFirestore.
+    let db;
+    try {
+      const { initializeFirestore, persistentLocalCache, persistentMultipleTabManager } = sdk.firestore;
+      db = initializeFirestore(app, {
+        localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+      });
+    } catch (e) {
+      console.warn('Persistent cache init failed, falling back:', e);
+      db = sdk.firestore.getFirestore(app);
+    }
     const auth = sdk.auth.getAuth(app);
     const cred = await sdk.auth.signInAnonymously(auth);
     CLOUD.app = app; CLOUD.db = db; CLOUD.auth = auth;
@@ -10756,9 +10866,35 @@ async function _cloudPushKey(key, value) {
   const ref = _cloudDocRef(key);
   if (!ref) return;
   const { setDoc } = window._fbSDK.firestore;
-  try { await setDoc(ref, { value, updatedAt: Date.now(), by: CLOUD.uid }); }
-  catch (e) { console.warn('cloud push failed', key, e); }
+  // With persistent local cache enabled, setDoc returns immediately and the
+  // SDK queues the write to IndexedDB. The promise resolves when the server
+  // ACKs — if we're offline that's later, but the write is durable.
+  try {
+    // Don't await — let it resolve in the background. The queue handles
+    // ordering and replay. This keeps order-save UI snappy even when offline.
+    setDoc(ref, { value, updatedAt: Date.now(), by: CLOUD.uid }).catch(err => {
+      // Permission errors and config errors still surface here; queue
+      // overflow is rare.
+      console.warn('cloud push failed', key, err?.code || err?.message || err);
+    });
+  } catch (e) { console.warn('cloud push throw', key, e); }
 }
+
+// Surface online/offline transitions in the Cloud Sync status badge.
+window.addEventListener('online', () => {
+  if (CLOUD.enabled) {
+    setFirebaseStatus(`Live · device ${(CLOUD.uid || '').slice(0,6)}`);
+    const tag = document.getElementById('firebaseTag');
+    if (tag) { tag.className = 'tag success'; tag.textContent = 'Live'; }
+  }
+});
+window.addEventListener('offline', () => {
+  if (CLOUD.enabled) {
+    setFirebaseStatus('Offline — changes will sync when reconnected');
+    const tag = document.getElementById('firebaseTag');
+    if (tag) { tag.className = 'tag info'; tag.textContent = 'Offline (queued)'; }
+  }
+});
 
 async function _cloudPullAll() {
   if (!CLOUD.enabled) return;
@@ -11049,9 +11185,13 @@ async function init() {
   // If cloud sync was previously enabled, reconnect.
   _cloudAutoConnect();
 
+  // Nudge the user to back up if it's been more than a week. This is a
+  // safety net for iOS Safari evicting localStorage and similar surprises.
+  state.settings = state.settings || {};
+  scheduleStaleBackupCheck();
+
   // Auto-apply image pack on first launch (and any time new items show up
   // without a picture). Use a settings flag so we don't keep overwriting.
-  state.settings = state.settings || {};
   if (!state.settings.imagePackAppliedV1) {
     try {
       const n = await applyImagePack({ override: false });
