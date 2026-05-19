@@ -10670,11 +10670,33 @@ async function _loadFirebaseSDK() {
   return window._fbSDK;
 }
 
+// Accept any of these paste formats:
+//   - pure JSON: { "apiKey": "…", … }
+//   - JS object literal: { apiKey: "…", … }
+//   - the full Firebase snippet (const firebaseConfig = { … };)
+function _parseFirebaseConfig(raw) {
+  if (!raw) return null;
+  let txt = String(raw).trim();
+  // If they pasted the full snippet, extract the object literal.
+  const m = txt.match(/(\{[\s\S]*\})/);
+  if (m) txt = m[1];
+  // Try strict JSON first.
+  try { return JSON.parse(txt); } catch (_) {}
+  // Fall back to JS object literal — quote unquoted keys, normalize quotes.
+  try {
+    let normalized = txt
+      .replace(/([{,]\s*)([A-Za-z_$][\w$]*)(\s*:)/g, '$1"$2"$3')  // quote bare keys
+      .replace(/'/g, '"')                                           // single → double quotes
+      .replace(/,(\s*[}\]])/g, '$1');                               // trim trailing commas
+    return JSON.parse(normalized);
+  } catch (_) { return null; }
+}
+
 async function cloudSyncEnable() {
   const txt = document.getElementById('cloudConfigInput')?.value.trim();
   if (!txt) { toast('Paste your Firebase config first', 'error'); return; }
-  let cfg;
-  try { cfg = JSON.parse(txt); } catch (e) { toast('Config is not valid JSON', 'error'); return; }
+  const cfg = _parseFirebaseConfig(txt);
+  if (!cfg) { toast('Couldn’t parse that config — copy the full firebaseConfig snippet from Firebase', 'error'); return; }
   if (!cfg.apiKey || !cfg.projectId) { toast('Config needs at least apiKey + projectId', 'error'); return; }
   setFirebaseStatus('Connecting…');
   try {
