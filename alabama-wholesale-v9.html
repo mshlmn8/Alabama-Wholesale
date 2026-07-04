@@ -10968,11 +10968,26 @@ function setFirebaseStatus(s) {
 // NOTE: 'history' is intentionally NOT here — order history syncs as one
 // document PER ORDER (see _cloudPushHistory/_cloudPullHistory) so a single bad
 // write can never overwrite the whole history array again.
-const CLOUD_DOC_KEYS = ['data', 'order', 'logo', 'users', 'session', 'accFlag'];
+// 'session' is also NOT here — who is logged in is a per-device fact; syncing
+// it would let one person's login overwrite everyone else's.
+const CLOUD_DOC_KEYS = ['data', 'order', 'logo', 'users', 'accFlag'];
+
+// Stable per-device id so each device gets its own cloud draft-order doc.
+// Two people can then build orders at the same time without clobbering
+// each other; saved orders and history stay shared.
+const DEVICE_ID = (() => {
+  try {
+    let id = localStorage.getItem('aw_device_id');
+    if (!id) { id = 'dev-' + Math.random().toString(36).slice(2, 10); localStorage.setItem('aw_device_id', id); }
+    return id;
+  } catch (e) { return 'dev-local'; }
+})();
+
 function _cloudDocRef(key) {
   if (!CLOUD.db) return null;
   const { doc } = window._fbSDK.firestore;
-  return doc(CLOUD.db, 'apps', 'alabama-wholesale', 'state', key);
+  const docId = key === 'order' ? ('order-' + DEVICE_ID) : key;
+  return doc(CLOUD.db, 'apps', 'alabama-wholesale', 'state', docId);
 }
 
 async function _cloudPushKey(key, value) {
@@ -11201,7 +11216,6 @@ async function _cloudAutoConnect() {
           else if (key === 'order') val = state.currentOrder;
           else if (key === 'logo') val = state.logo;
           else if (key === 'users') val = state.users;
-          else if (key === 'session') val = state.session;
           else if (key === 'accFlag') val = state.accountsEnabled ? 1 : null;
           _cloudPushKey(key, val);
         }
@@ -11216,7 +11230,6 @@ async function _cloudAutoConnect() {
     wrap('saveLogo', 'logo');
     wrap('saveHistory', 'history');
     wrap('saveUsers', 'users');
-    wrap('saveSession', 'session');
     wrap('saveAccFlag', 'accFlag');
   };
 })();
