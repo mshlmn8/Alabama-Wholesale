@@ -1,0 +1,20 @@
+rules_version = '2';
+
+// Alabama Wholesale ordering app — Firestore security rules.
+// These are version-controlled here and deployed with:
+//     firebase deploy --only firestore:rules
+// (or automatically via CI). They live on Google's servers once deployed and
+// NEVER expire — unlike Firebase's default test-mode rules.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // All app data (catalog, stores, orders, per-device drafts, history,
+    // backups) lives under apps/alabama-wholesale/**. Any signed-in app user
+    // — including the app's anonymous sign-in — may read and write it.
+    match /apps/alabama-wholesale/{document=**} {
+      allow read, write: if request.auth != null;
+    }
+
+    // Everything else is denied by default.
+  }
+}

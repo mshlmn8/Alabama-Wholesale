@@ -1,0 +1,38 @@
+name: Deploy Firestore rules
+
+# Deploys firestore.rules to the Firebase project automatically whenever the
+# rules change on main. Also runnable by hand from the Actions tab.
+# Requires one repo secret: FIREBASE_SERVICE_ACCOUNT (a Firebase service-account
+# JSON key). Setup steps are in the README / chat.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'firestore.rules'
+      - 'firebase.json'
+  workflow_dispatch: {}
+
+jobs:
+  deploy-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Write service account credentials
+        env:
+          SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: printf '%s' "$SA" > "$RUNNER_TEMP/firebase-sa.json"
+
+      - name: Deploy Firestore rules
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/firebase-sa.json
+        run: firebase deploy --only firestore:rules --project alabama-wholesale-ordering-app --non-interactive
