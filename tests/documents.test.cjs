@@ -45,6 +45,14 @@ test('unknown historical date and total stay unknown',async()=>{
   const pdf=await renderDocument(fixture({status:'legacy',createdAt:null,submittedAt:null,totalCents:null,subtotalCents:null,taxCents:null,legacy:{needsPriceReview:true}}),currentStore,'historical-copy');
   assert.ok(normalized(pdf).includes('daterecorded:unknown'));assert.ok(normalized(pdf).includes('recordedtotalunknown'));
 });
+test('historical text preserves horizontal separators as printable PDF rules',async()=>{
+  const billText='Saved total: $25.98\n────────────────────\nOriginal items';
+  const pdf=await renderDocument(fixture({status:'legacy',legacy:{needsPriceReview:true},billText}),currentStore,'historical-copy');
+  const text=pdfText(pdf);
+  assert.ok(normalized(pdf).includes('--------------------'));
+  assert.ok(!text.includes('\u0000'),'Unsupported line glyphs must not turn into percent/NUL characters.');
+  assert.ok(normalized(pdf).includes('savedtotal:$25.98'));
+});
 test('pick list and delivery note use explicit case and each quantities without selling prices',async()=>{
   for(const kind of ['pick-list','delivery-note']) {
     const pdf=await renderDocument(fixture(),currentStore,kind),content=normalized(pdf);
