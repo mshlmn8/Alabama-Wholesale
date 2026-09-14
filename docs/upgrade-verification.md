@@ -17,7 +17,7 @@ The September 14 upgrade replaces browser-owned permissions and shared-document 
 
 ## Verification performed before release
 
-- Full Node 22.23.2 test suite: **142 tests passed** at the pre-release checkpoint. Includes money, permission isolation, concurrency, migration, PDFs, AI validation, email outbox, upload validation, persistence and delayed-response regressions.
+- Full Node 22.23.2 test suite: **147 tests passed** at the latest checkpoint. Includes money, permission isolation, concurrency, migration, PDFs, AI validation, email outbox, upload validation, persistence and delayed-response regressions.
 - Firebase Firestore emulator: browser/anonymous/forged-admin reads and writes denied; simultaneous orders cannot oversell stock; duplicate submissions create one charge; large private archives preserve all bytes.
 - A private copy of the real legacy database migrated successfully in the emulator: 628 products, 75 stores, 85 history documents (84 active plus one tombstone), four saved drafts, 2,556 unknown-stock variant records, 11 pending enrollment profiles. All **3,582 planned records** verified; repeated migration created zero duplicates.
 - The source preview produced 134 review notices, primarily missing historical price snapshots. These preserve source evidence and do not invent prices, stock quantities or fulfillment state.
@@ -29,7 +29,13 @@ The September 14 upgrade replaces browser-owned permissions and shared-document 
 
 ## Release gates
 
-Production deployment, final snapshot checksum, migration verification, owner sign-in and live API/AI checks will be appended after cutover. Normal writes are blocked until `settings/migrationGate.complete` records successful migration verification.
+Production cutover is complete. All 3,582 imported records matched their planned canonical values, all 75 opening balances matched the source, and repeated migration created zero duplicates or conflicts. All nine indexes were READY before the migration gate opened. The private source archive passed byte-for-byte verification; the final source checksum is `f70d68d9654fb2176bf4c7659945843930b9137ca72a073ca7714dad2b11fa05`.
+
+Authenticated production follow-up confirmed the configured Google owner has active master access and can reload the workspace. The live Gemini assistant returned an exact product/variant/quantity proposal, which was closed without adding or submitting an order. A live business backup downloaded successfully and its SHA-256 matched. Its catalog, store, history and ledger counts matched the migration.
+
+The historical PDF walkthrough found and corrected two display issues: imported records now request Historical copy rather than an unsupported final invoice, and legacy horizontal divider glyphs render as printable hyphens. Regression tests exercise the UI-selected document kinds through the real renderer. The live historical download retains its original date, saved total and missing-price warnings. No new live orders, payments, credits, invitations or emails were created during verification.
+
+Live `/health` returns HTTP 200 with version 2, unauthenticated `/api/state` returns 401, and private source paths return 404. `/health` avoids Cloud Run's reserved paths ending in `z`; `/healthz` remains a local compatibility alias. Email sending remains the only unconfigured integration, pending the owner's sender/service details.
 
 ## Email configuration
 
