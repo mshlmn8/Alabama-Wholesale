@@ -13,6 +13,18 @@ const publicOrder = (order) => {
   }
   return result;
 };
+const ORDER_SUMMARY_FIELDS = [
+  "id", "storeId", "storeName", "status", "version", "deleted",
+  "createdAt", "updatedAt", "submittedAt", "date", "invoiceNumber",
+  "total", "totalCents", "subtotalCents", "taxCents", "paidCents",
+  "creditedCents", "netTotalCents", "amountDueCents", "creditBalanceCents",
+  "paymentStatus", "missingSnapshots", "missingPriceSnapshots", "migrationBlocked",
+  "legacy.date", "legacy.needsPriceReview", "legacy.requiresReview",
+];
+const publicCatalogRecord = (record) => {
+  const { migration, legacy, ...result } = record;
+  return result;
+};
 const PUBLIC = path.join(__dirname, "public");
 const BACKUP_COLLECTIONS = [
   "categories",
@@ -143,7 +155,7 @@ function createApp({
   async function catalog(collection) {
     const cached = catalogCache.get(collection);
     if (cached && cached.expires > now()) return cached.value;
-    const value = await repo.list(collection);
+    const value = (await repo.list(collection)).map(publicCatalogRecord);
     catalogCache.set(collection, { value, expires: now() + 15000 });
     return value;
   }
@@ -222,7 +234,7 @@ function createApp({
       )
       .slice(0, 100);
   }
-  async function history(actor, { storeId, status, cursor, limit = 50 } = {}) {
+  async function history(actor, { storeId, status, cursor, limit = 50, drafts } = {}) {
     if (storeId) access(actor, storeId);
     if (cursor) {
       const order = await repo.get("orders", cursor);
@@ -233,6 +245,7 @@ function createApp({
     const orders = [];
     let scanCursor = cursor;
     while (orders.length <= limit) {
+      const needed = limit + 1 - orders.length;
       const options = {
         where: [
           ...(storeId ? [["storeId", "==", storeId]] : []),
@@ -242,17 +255,24 @@ function createApp({
           ["createdAt", "desc"],
           ["id", "desc"],
         ],
-        limit: limit + 1,
+        limit: needed,
+        fields: ORDER_SUMMARY_FIELDS,
         ...(scanCursor ? { startAfter: scanCursor } : {}),
       };
       const page = await scoped("orders", actor, options);
       if (!page.length) break;
       orders.push(...page.filter((order) => order.deleted !== true));
-      if (page.length < limit + 1) break;
+      if (page.length < needed) break;
       scanCursor = page[page.length - 1].id;
     }
+    const draftMap = drafts && new Map((await drafts).map(order => [order.id, order]));
+    const visible = await Promise.all(orders.slice(0, limit).map(async order => {
+      if (order.status !== "draft") return { ...order, summary: true };
+      const full = draftMap?.get(order.id) || await repo.get("orders", order.id);
+      return full && !full.deleted ? publicOrder(full) : null;
+    }));
     return {
-      orders: orders.slice(0, limit).map(publicOrder),
+      orders: visible.filter(Boolean),
       nextCursor: orders.length > limit ? orders[limit - 1].id : null,
     };
   }
@@ -268,10 +288,7 @@ function createApp({
         "upgrade_in_progress",
         "The app upgrade is being completed. Your existing records are protected. Please try again shortly.",
       );
-    const [contactUsers, contactLegacy] = await Promise.all([
-      repo.list("users"),
-      repo.list("legacyProfiles"),
-    ]);
+    const drafts = scoped("orders", actor, { where: [["status", "==", "draft"]] });
     const [
       categories,
       products,
@@ -282,11 +299,12 @@ function createApp({
       payments,
       returns,
       notifications,
-      users,
+      contactUsers,
       preferences,
       migration,
-      legacyProfiles,
+      contactLegacy,
       audit,
+      allDrafts,
     ] = await Promise.all([
       catalog("categories"),
       catalog("products"),
@@ -295,19 +313,20 @@ function createApp({
         : Promise.all(actor.storeIds.map((id) => repo.get("stores", id))).then(
             (r) => r.filter(Boolean),
           ),
-      history(actor),
+      history(actor, { drafts }),
       repo.list("inventory", { where: [["onHand", ">=", 0]] }),
       scoped("ledger", actor),
       scoped("payments", actor),
       scoped("returns", actor),
       notificationsFor(actor),
-      actor.role === "master" ? repo.list("users") : [],
+      repo.list("users"),
       repo.get("preferences", actor.uid),
       actor.role === "master" ? repo.list("migrations") : [],
-      actor.role === "master" ? repo.list("legacyProfiles") : [],
+      repo.list("legacyProfiles"),
       actor.role === "master"
         ? repo.list("audit", { orderBy: [["createdAt", "desc"]], limit: 100 })
         : [],
+      drafts,
     ]);
     const stores = allStores.map((store) => {
       const result = {
@@ -343,7 +362,10 @@ function createApp({
       categories,
       products,
       stores,
-      orders: orderPage.orders,
+      orders: [...new Map([
+        ...orderPage.orders.map(order => [order.id, order]),
+        ...allDrafts.filter(order => !order.deleted).map(order => [order.id, publicOrder(order)]),
+      ]).values()],
       nextCursor: orderPage.nextCursor,
       inventory,
       ledger: ledger.map((row) => {
@@ -360,8 +382,8 @@ function createApp({
         (row) =>
           !row.userId || row.userId === actor.uid || actor.role === "master",
       ),
-      users: users.map(safeProfile),
-      legacyProfiles: legacyProfiles.map((p) => {
+      users: actor.role === "master" ? contactUsers.map(safeProfile) : [],
+      legacyProfiles: (actor.role === "master" ? contactLegacy : []).map((p) => {
         const r = { ...p };
         delete r.legacy;
         delete r.passwordHash;
@@ -382,6 +404,13 @@ function createApp({
       }),
     ),
   );
+  app.get("/api/orders/:id", async (req, res) => {
+    const order = await repo.get("orders", req.params.id);
+    if (!order) throw error(404, "order_not_found", "This order was not found.");
+    access(req.actor, order.storeId);
+    if (order.deleted) throw error(404, "order_not_found", "This order was not found.");
+    res.json({ order: publicOrder(order) });
+  });
   app.post("/api/commands", async (req, res) => {
     if (
       config.requireMigration &&

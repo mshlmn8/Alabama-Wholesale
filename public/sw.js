@@ -1,4 +1,4 @@
-const VERSION = "aw-v2-20260914-1";
+const VERSION = "aw-v2-20260914-2";
 const SHELL = [
   "/",
   "/app.js",

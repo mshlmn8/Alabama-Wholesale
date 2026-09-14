@@ -412,3 +412,148 @@ test("history pagination with equal dates and mixed-case IDs never duplicates or
   );
   assert.equal(second.nextCursor, null);
 });
+
+test("history reads only the missing lookahead row after an archived record", async (t) => {
+  const { request, repo } = await fixture(t);
+  await repo.transaction(async (tx) => {
+    for (const row of await tx.list("orders")) await tx.delete("orders", row.id);
+    for (let i = 0; i < 89; i++) {
+      const id = `history-${String(i).padStart(2, "0")}`;
+      await tx.set("orders", id, {
+        id, storeId: "one", status: "legacy", createdAt: 100 - i,
+        deleted: i === 0,
+      });
+    }
+  });
+  const list = repo.list.bind(repo);
+  const fetched = [];
+  repo.list = async (collection, options) => {
+    const rows = await list(collection, options);
+    if (collection === "orders") fetched.push(rows.length);
+    return rows;
+  };
+  const first = JSON.parse((await request("/api/orders", "customer")).body);
+  assert.equal(first.orders.length, 50);
+  assert.equal(first.nextCursor, "history-50");
+  assert.equal(fetched.reduce((sum, value) => sum + value, 0), 52,
+    "Only one additional live row is needed to establish the next page.");
+  const second = JSON.parse((await request(`/api/orders?cursor=${first.nextCursor}`, "customer")).body);
+  assert.equal(second.orders.length, 38);
+  assert.equal(new Set([...first.orders, ...second.orders].map(row => row.id)).size, 88);
+  assert.equal(second.nextCursor, null);
+});
+
+test("state reuses one fresh profile snapshot for contact details and team access", async (t) => {
+  const { request, repo } = await fixture(t);
+  await repo.put("users", "sales", { id: "sales", role: "salesman", active: true, name: "Current salesperson" });
+  await repo.put("stores", "one", { id: "one", name: "One", salesmanId: "sales" });
+  const list = repo.list.bind(repo);
+  const counts = {};
+  repo.list = async (collection, options) => {
+    counts[collection] = (counts[collection] || 0) + 1;
+    return list(collection, options);
+  };
+  const result = await request("/api/state");
+  const state = JSON.parse(result.body);
+  assert.equal(result.status, 200, result.body);
+  assert.equal(counts.users, 1);
+  assert.equal(counts.legacyProfiles, 1);
+  assert.equal(state.stores.find(store => store.id === "one").assignedSalesman.name, "Current salesperson");
+  assert.equal(state.users.find(user => user.id === "sales").name, "Current salesperson");
+});
+
+test("history summaries avoid loading original line and bill data while authorized detail stays complete", async (t) => {
+  const { request, repo } = await fixture(t);
+  const order = {
+    id: "o1", storeId: "one", status: "legacy", createdAt: 2, version: 7,
+    lines: [{ id: "line", productId: "p", quantity: 3, unit: "each", name: "Original item" }],
+    billText: "Original recorded bill " + "x".repeat(50000), orderText: "Original order text",
+    totalCents: 2598, paidCents: 1000, creditedCents: 200, amountDueCents: 1398,
+    missingSnapshots: true, legacy: { date: "2020-05-06", needsPriceReview: true, rawLines: [{ original: true }] },
+    migration: { sourceHash: "original fingerprint" },
+  };
+  await repo.put("orders", "o1", order);
+  const list = repo.list.bind(repo);
+  let loadedOriginalBody = false;
+  repo.list = async (collection, options) => {
+    const rows = await list(collection, options);
+    if (collection === "orders" && rows.some(row => row.id === "o1" && (row.lines || row.billText))) loadedOriginalBody = true;
+    return rows;
+  };
+  const history = JSON.parse((await request("/api/orders", "customer")).body);
+  const summary = history.orders.find(row => row.id === "o1");
+  assert.equal(loadedOriginalBody, false, "Large bodies must be omitted by the repository query, not after loading.");
+  assert.equal(summary.summary, true);
+  assert.equal(summary.lines, undefined);
+  assert.equal(summary.billText, undefined);
+  assert.equal(summary.migration, undefined);
+  assert.equal(summary.legacy.rawLines, undefined);
+  for (const field of ["totalCents", "paidCents", "creditedCents", "amountDueCents", "version", "missingSnapshots"])
+    assert.equal(summary[field], order[field]);
+  assert.deepEqual(summary.legacy, { date: "2020-05-06", needsPriceReview: true });
+  const detail = await request("/api/orders/o1", "customer");
+  assert.equal(detail.status, 200, detail.body);
+  assert.match(detail.headers.get("cache-control"), /private, no-store/);
+  const full = JSON.parse(detail.body).order;
+  assert.deepEqual(full.lines, order.lines);
+  assert.equal(full.billText, order.billText);
+  assert.equal(full.orderText, order.orderText);
+  assert.equal(full.summary, undefined);
+  assert.equal(full.legacy.rawLines, undefined);
+  assert.equal((await request("/api/orders/o2", "customer")).status, 403);
+  assert.equal((await request("/api/orders/missing", "customer")).status, 404);
+  await repo.put("orders", "o1", { ...order, deleted: true });
+  assert.equal((await request("/api/orders/o1", "customer")).status, 404);
+});
+
+test("state keeps older authorized drafts complete alongside compact recent history", async (t) => {
+  const { request, repo } = await fixture(t);
+  await repo.transaction(async (tx) => {
+    for (const row of await tx.list("orders")) await tx.delete("orders", row.id);
+    for (let i = 0; i < 60; i++) {
+      const id = `recent-${i}`;
+      await tx.set("orders", id, { id, storeId: "one", status: "submitted", createdAt: i + 1, lines: [{ productId: "p", quantity: 1 }] });
+    }
+    await tx.set("orders", "older-draft", { id: "older-draft", storeId: "one", status: "draft", createdAt: null, version: 3, lines: [{ productId: "p", quantity: 2 }], legacy: { requiresReview: true } });
+    await tx.set("orders", "other-draft", { id: "other-draft", storeId: "two", status: "draft", createdAt: 99, lines: [{ productId: "secret", quantity: 1 }] });
+  });
+  const state = JSON.parse((await request("/api/state", "customer")).body);
+  const draft = state.orders.find(order => order.id === "older-draft");
+  assert.ok(draft, "Cloud drafts must remain available even when outside the first history page.");
+  assert.equal(draft.summary, undefined);
+  assert.deepEqual(draft.lines, [{ productId: "p", quantity: 2 }]);
+  assert.equal(draft.legacy.requiresReview, true);
+  assert.equal(state.orders.some(order => order.id === "other-draft"), false);
+  assert.equal(state.orders.filter(order => order.summary === true).length, 50);
+  const history = JSON.parse((await request("/api/orders?status=draft", "customer")).body);
+  assert.deepEqual(history.orders[0].lines, draft.lines);
+});
+
+test("catalog responses omit source archives while backup preserves original records", async (t) => {
+  const { request, repo } = await fixture(t);
+  const product = { id: "p", name: "Product", version: 4, priceCents: 0, image: "/images/product.png", variants: ["Original"], packSize: 12, legacy: { price: 0, source: "saved" }, migration: { sourceHash: "fingerprint" } };
+  await repo.put("products", "p", product);
+  await repo.put("categories", "c", { id: "c", name: "Category", legacy: { original: true }, migration: { sourceHash: "category" } });
+  const state = JSON.parse((await request("/api/state", "customer")).body);
+  assert.deepEqual(state.products[0], Object.fromEntries(Object.entries(product).filter(([key]) => !["legacy", "migration"].includes(key))));
+  assert.equal(state.categories[0].migration, undefined);
+  assert.equal(state.categories[0].legacy, undefined);
+  const backup = JSON.parse((await request("/api/admin/backup")).body);
+  assert.deepEqual(backup.collections.products[0], product);
+});
+
+test("repeated state reads keep financial values, assignments and revocation fresh", async (t) => {
+  const { request, repo } = await fixture(t);
+  await repo.put("ledger", "opening", { id: "opening", storeId: "one", type: "opening", deltaCents: 1000 });
+  const first = await request("/api/state", "customer");
+  assert.equal(JSON.parse(first.body).stores[0].balanceCents, 1000);
+  assert.match(first.headers.get("cache-control"), /private, no-store/);
+  await repo.put("ledger", "paid", { id: "paid", storeId: "one", type: "payment", deltaCents: -400 });
+  assert.equal(JSON.parse((await request("/api/state", "customer")).body).stores[0].balanceCents, 600);
+  await repo.put("users", "customer", { id: "customer", uid: "customer", role: "customer", active: true, storeIds: ["two"] });
+  const changed = JSON.parse((await request("/api/state", "customer")).body);
+  assert.deepEqual(changed.stores.map(store => store.id), ["two"]);
+  assert.equal(changed.ledger.length, 0);
+  await repo.put("users", "customer", { id: "customer", uid: "customer", role: "customer", active: false, storeIds: ["two"] });
+  assert.equal((await request("/api/state", "customer")).status, 403);
+});
