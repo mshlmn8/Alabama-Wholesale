@@ -1,0 +1,13 @@
+{
+  "name": "Alabama Wholesale",
+  "short_name": "Alabama Wholesale",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#141922",
+  "theme_color": "#141922",
+  "icons": [
+    {"src": "/assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"}
+  ]
+}

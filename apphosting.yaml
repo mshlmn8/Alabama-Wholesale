@@ -1,0 +1,31 @@
+scripts:
+  buildCommand: npm run build
+  runCommand: node server.js
+outputFiles:
+  serverApp:
+    include:
+      [
+        server.js,
+        lib,
+        config,
+        public,
+        package.json,
+        package-lock.json,
+        node_modules,
+      ]
+runConfig:
+  minInstances: 0
+  maxInstances: 5
+  concurrency: 80
+  cpu: 1
+  memoryMiB: 512
+env:
+  - variable: OWNER_EMAIL
+    value: mshlalmnswb@gmail.com
+    availability: [RUNTIME]
+  - variable: APP_ORIGIN
+    value: https://alabama-wholesale--alabama-wholesale-ordering-app.us-east4.hosted.app
+    availability: [RUNTIME]
+  - variable: LEGACY_WRITES_FROZEN
+    value: "true"
+    availability: [RUNTIME]
