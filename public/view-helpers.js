@@ -12,6 +12,29 @@ export function formatSavedDate(value, locale = "en-US") {
         year: "numeric",
       });
 }
+export function isHistoricalOrder(order) {
+  return Boolean(
+    order.status === "legacy" ||
+    order.legacy?.needsPriceReview ||
+    order.missingSnapshots ||
+    order.missingPriceSnapshots,
+  );
+}
+export function orderDocumentOptions(order) {
+  if (order.status === "draft") return [];
+  if (isHistoricalOrder(order)) return [["historical-copy", "Historical copy"]];
+  if (
+    !["submitted", "approved", "picking", "delivered", "cancelled"].includes(
+      order.status,
+    )
+  )
+    return [];
+  return [
+    ["invoice", "Invoice PDF"],
+    ["pick-list", "Pick list"],
+    ["delivery-note", "Delivery note"],
+  ];
+}
 export function safeProductImage(value) {
   if (typeof value !== "string") return null;
   if (/^(images|assets)\//.test(value)) value = `/${value}`;

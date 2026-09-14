@@ -363,3 +363,72 @@ test("legacy recovery keeps variant quantities exact and flags malformed lines",
   assert.ok(result.warnings.some((w) => w.includes("2x")));
   assert.ok(result.warnings.some((w) => w.includes("unit")));
 });
+
+test("historical order action produces a historical PDF without requiring frozen prices", async () => {
+  const { orderDocumentOptions } = await helpers();
+  const { renderDocument } = require("../lib/documents.cjs");
+  const legacy = {
+    id: "hist-example",
+    storeId: "store1",
+    status: "legacy",
+    legacy: { needsPriceReview: true, date: "2025-01-10" },
+    lines: [{ productId: "p1", name: "Saved item", quantity: 2 }],
+    totalCents: 1234,
+    billText: "Original saved bill: $12.34",
+  };
+  const options = orderDocumentOptions(legacy);
+  assert.deepEqual(options, [["historical-copy", "Historical copy"]]);
+  const pdf = await renderDocument(
+    legacy,
+    { id: "store1", name: "Example Market" },
+    options[0][0],
+  );
+  assert.equal(pdf.subarray(0, 5).toString(), "%PDF-");
+  assert.deepEqual(
+    orderDocumentOptions({ ...legacy, status: "delivered" }),
+    options,
+  );
+});
+
+test("finalized orders retain valid invoice and fulfillment documents while drafts expose none", async () => {
+  const { orderDocumentOptions } = await helpers();
+  const { renderDocument } = require("../lib/documents.cjs");
+  const order = {
+    id: "order1",
+    storeId: "store1",
+    status: "submitted",
+    invoiceNumber: "AW-2026-000001",
+    lines: [
+      {
+        productId: "p1",
+        name: "Saved item",
+        quantity: 2,
+        unit: "each",
+        unitPriceCents: 500,
+        lineTotalCents: 1000,
+        taxCents: 80,
+      },
+    ],
+    subtotalCents: 1000,
+    taxCents: 80,
+    totalCents: 1080,
+  };
+  const options = orderDocumentOptions(order);
+  assert.deepEqual(
+    options.map(([kind]) => kind),
+    ["invoice", "pick-list", "delivery-note"],
+  );
+  for (const [kind] of options) {
+    const pdf = await renderDocument(
+      order,
+      { id: "store1", name: "Store" },
+      kind,
+    );
+    assert.equal(pdf.subarray(0, 5).toString(), "%PDF-");
+  }
+  assert.deepEqual(orderDocumentOptions({ ...order, status: "draft" }), []);
+  assert.deepEqual(
+    orderDocumentOptions({ ...order, missingPriceSnapshots: true }),
+    [["historical-copy", "Historical copy"]],
+  );
+});

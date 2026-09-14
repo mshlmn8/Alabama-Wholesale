@@ -10,6 +10,8 @@ import {
   formatSavedDate as date,
   safeProductImage as safeImage,
   recoverLegacyLines,
+  isHistoricalOrder,
+  orderDocumentOptions,
 } from "./view-helpers.js";
 
 const $ = (id) => document.getElementById(id);
@@ -1994,11 +1996,7 @@ function renderOrders() {
 }
 function showOrder(order) {
   const store = storeById(order.storeId);
-  const legacy =
-    order.status === "legacy" ||
-    order.legacy?.needsPriceReview ||
-    order.missingSnapshots ||
-    order.missingPriceSnapshots;
+  const legacy = isHistoricalOrder(order);
   const m = modal(
     order.invoiceNumber || `Order ${order.id.slice(0, 8)}`,
     `${store?.name || order.storeName || "Store"} · ${date(order.date || order.legacy?.date || order.createdAt)}`,
@@ -2145,11 +2143,7 @@ function showOrder(order) {
       ),
     );
   const docs = el("div", { class: "actions mt" });
-  for (const [kind, label] of [
-    ["invoice", "Invoice PDF"],
-    ["pick-list", "Pick list"],
-    ["delivery-note", "Delivery note"],
-  ])
+  for (const [kind, label] of orderDocumentOptions(order))
     append(
       docs,
       button(
