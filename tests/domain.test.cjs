@@ -328,3 +328,14 @@ test('retrying the same allocation command is durable and does not change invoic
   const first=await f.run('payment.allocate',payload,salesman,'same-allocation'),version=f.get('orders',o.id).version;
   const second=await f.run('payment.allocate',payload,salesman,'same-allocation');assert.deepEqual(first,second);assert.equal(f.get('orders',o.id).version,version);assert.equal(f.list('audit').filter(a=>a.type==='payment.allocate').length,1);
 });
+test('catalog images accept uploaded media and normalize legacy image paths safely',async()=>{
+  const f=fixture();let p=f.get('products','p1');
+  for(const path of ['/media/products/'+ 'a'.repeat(64)+'.png','/images/Orange%20Drink.jpg','images/Flavor%20%2812%20Pack%29.webp']){
+    p=await f.run('product.save',{id:p.id,image:path,expectedVersion:p.version});assert.equal(p.image,path.startsWith('images/')?'/'+path:path);
+  }
+});
+test('image paths reject traversal, encoded separators and private or unsupported media paths',async()=>{
+  for(const image of ['/images/../server.js','/images/%2e%2e/server.js','/images/a%2fb.jpg','images/..%5csecret.png','/images/%252e%252e/secret.png','/images/%252Fsecret.png','/media/products/'+ 'a'.repeat(64)+'.svg','/media/products/../../server.js','/config/firebase-web.json']){
+    const f=fixture();await rejectsCode(()=>f.run('product.save',{id:'p1',image,expectedVersion:1}),'INVALID_INPUT');
+  }
+});
