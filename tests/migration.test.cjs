@@ -243,3 +243,19 @@ test('large migration batches use all reads before writes and match domain inven
   assert.ok(repo.values.has('inventory/product-0~Blue%20%2F%20White'));
   assert.equal(repo.values.get('inventory/product-0~Blue%20%2F%20White').onHand, null);
 });
+
+test('migrated opening balance integrates with repository and verified-payment workflow', async () => {
+  const { MemoryRepository } = require('../lib/repository.cjs');
+  const { executeCommand, storeBalance } = require('../lib/domain.cjs');
+  const repo = new MemoryRepository();
+  await migrate(repo, fixture(), { now });
+  const actor = { uid: 'owner', role: 'master', active: true, storeIds: [] };
+  let sequence = 0;
+  const context = { now, id: () => `new-${++sequence}` };
+  const payment = await repo.transaction(tx => executeCommand(tx, actor, { id: 'report-payment', type: 'payment.report', payload: { storeId: 'shop', amountCents: 2000, method: 'cash' } }, context));
+  assert.equal(storeBalance(await repo.list('ledger'), 'shop'), 9000);
+  await repo.transaction(tx => executeCommand(tx, actor, { id: 'verify-payment', type: 'payment.verify', payload: { paymentId: payment.id } }, context));
+  assert.equal(storeBalance(await repo.list('ledger'), 'shop'), 7000);
+  await migrate(repo, fixture(), { now });
+  assert.equal(storeBalance(await repo.list('ledger'), 'shop'), 7000);
+});
