@@ -29,6 +29,21 @@ export async function afterConfirmation(result, refresh, onWarning) {
   }
   return result;
 }
+export async function loadOrderDetails(order, read) {
+  if (!order.summary) return order;
+  const result = await read(order.id);
+  const complete = result?.order;
+  if (
+    !complete ||
+    complete.id !== order.id ||
+    complete.summary ||
+    !Array.isArray(complete.lines)
+  )
+    throw new Error(
+      "The complete order could not be loaded. Retry before reviewing or reordering it.",
+    );
+  return complete;
+}
 
 // Read-only requests are discarded when their view changes or a newer read starts.
 export function createRequestGate() {

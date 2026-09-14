@@ -5,6 +5,7 @@ import {
   afterConfirmation,
   SessionChanged,
   createRequestGate,
+  loadOrderDetails,
 } from "./session.js";
 import {
   formatSavedDate as date,
@@ -17,12 +18,13 @@ import {
 const $ = (id) => document.getElementById(id);
 const uuid = () => crypto.randomUUID();
 const clone = (value) => structuredClone(value);
+const currencyFormatter = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+});
 const cash = (value) =>
   Number.isSafeInteger(value)
-    ? new Intl.NumberFormat("en-US", {
-        style: "currency",
-        currency: "USD",
-      }).format(value / 100)
+    ? currencyFormatter.format(value / 100)
     : "Price needed";
 const titleCase = (value) =>
   String(value || "")
@@ -584,7 +586,7 @@ async function command(type, payload, metadata = {}) {
     if (!scopeCurrent(scope)) throw new SessionChanged();
     return await afterConfirmation(
       result,
-      () => refresh(),
+      () => refresh({ renderPage: false }),
       () =>
         toast(
           "Your action was confirmed. The latest workspace could not be refreshed; use Refresh workspace before making another change.",
@@ -631,7 +633,7 @@ function beginDraft() {
   redo = [];
   setView("build");
 }
-function editDraft(change) {
+function editDraft(change, { renderPage = true } = {}) {
   if (!draft) beginDraft();
   const previous = clone(draft);
   const next = clone(draft);
@@ -641,7 +643,7 @@ function editDraft(change) {
   if (undo.length > 50) undo.shift();
   redo = [];
   draft = saved;
-  render();
+  if (renderPage) render();
   announce("Draft saved on this device.");
 }
 function undoDraft(forward = false) {
@@ -1228,43 +1230,57 @@ function orderList(orders) {
   );
 }
 function renderCatalog() {
-  const categoryOptions = [
-    ["", "All categories"],
-    ...state.categories.map((item) => [item.id, item.name]),
-  ];
   const fav =
     preferences().favorites?.[storeId] ??
     currentStore()?.favoriteProductIds ??
     [];
-  const query = search.trim().toLowerCase();
-  const products = state.products.filter(
-    (product) =>
-      product.active !== false &&
-      (!category || product.categoryIds?.includes(category)) &&
-      (!favoritesOnly || fav.includes(product.id)) &&
-      (!query ||
-        [
-          product.name,
-          product.id,
-          product.sku,
-          product.barcode,
-          ...(product.variants || []),
-          ...Object.values(product.variantBarcodes || {}),
-        ].some((value) =>
-          String(value || "")
-            .toLowerCase()
-            .includes(query),
-        )),
-  );
+  const cardCache = new Map();
+  const candidates = state.products
+    .filter((product) => product.active !== false)
+    .map((product) => ({
+      product,
+      terms: [
+        product.name,
+        product.id,
+        product.sku,
+        product.barcode,
+        ...(product.variants || []),
+        ...Object.values(product.variantBarcodes || {}),
+      ].map((value) => String(value || "").toLowerCase()),
+    }));
   const searchField = input("search", search, {
     id: "catalog-search",
     placeholder: "Search product, flavor, SKU or barcode",
     onInput: (event) => {
       search = event.target.value;
-      render();
+      drawResults();
     },
     "aria-label": "Search catalog",
   });
+  const categoryField = select(
+    [
+      ["", "All categories"],
+      ...state.categories.map((item) => [item.id, item.name]),
+    ],
+    category,
+    {
+      "aria-label": "Filter category",
+      onChange: (event) => {
+        category = event.target.value;
+        drawResults();
+      },
+    },
+  );
+  const favoritesButton = button(
+    "",
+    () => {
+      favoritesOnly = !favoritesOnly;
+      drawResults();
+    },
+    "pill",
+  );
+  const count = el("p", { class: "small muted mb", role: "status" });
+  const results = el("div", { class: "catalog-results" });
   const root = el(
     "div",
     {},
@@ -1283,136 +1299,132 @@ function renderCatalog() {
       "div",
       { class: "filters" },
       el("div", { class: "search" }, searchField),
-      select(categoryOptions, category, {
-        "aria-label": "Filter category",
-        onChange: (event) => {
-          category = event.target.value;
-          render();
-        },
-      }),
-      button(
-        favoritesOnly ? "★ Favorites" : "☆ Favorites",
-        () => {
-          favoritesOnly = !favoritesOnly;
-          render();
-        },
-        favoritesOnly ? "pill active" : "pill",
-      ),
+      categoryField,
+      favoritesButton,
     ),
-    el(
-      "p",
-      { class: "small muted mb" },
-      `${products.length} matching product${products.length === 1 ? "" : "s"}`,
-    ),
+    count,
+    results,
   );
-  if (!products.length)
-    return el(
-      "div",
-      {},
-      root,
-      empty(
-        "No matching products",
-        "Try another spelling, category, or barcode.",
-        [
-          button("Clear filters", () => {
-            search = "";
-            category = "";
-            favoritesOnly = false;
-            render();
-          }),
-        ],
-        "search",
-      ),
-    );
-  append(
-    root,
-    el(
-      "div",
-      { class: "catalog-grid" },
-      products.slice(0, 120).map((product) => {
-        const image = safeImage(product.image || product.imageUrl);
-        const thumbnail = image
-          ? el("img", {
-              src: image,
-              width: 180,
-              height: 145,
-              alt: product.name,
-              loading: "lazy",
-              decoding: "async",
-              onError: (event) =>
-                event.target.replaceWith(
-                  el(
-                    "span",
-                    { class: "no-image", "aria-label": "Image unavailable" },
-                    "AW",
-                  ),
-                ),
-            })
-          : el(
-              "span",
-              { class: "no-image", "aria-label": "No product image" },
-              "AW",
-            );
-        const favorite = iconButton(`Favorite ${product.name}`, "star", () =>
-          toggleFavorite(product.id),
-        );
-        favorite.className = "favorite";
-        favorite.setAttribute("aria-pressed", fav.includes(product.id));
-        const base = linePrice({
-          productId: product.id,
-          variant: "",
-          unit: "each",
-        });
-        return el(
-          "article",
-          { class: "product-card" },
-          favorite,
-          el("div", { class: "product-image" }, thumbnail),
-          el(
-            "div",
-            { class: "product-content" },
-            el("h3", {}, product.name),
-            el(
-              "p",
-              {},
-              product.variants?.length
-                ? `${product.variants.length} variants`
-                : "Single product",
-              product.packSize ? ` · ${product.packSize} per case` : "",
-            ),
-            el(
-              "div",
-              { class: "product-bottom" },
-              el(
-                "strong",
-                { class: base == null ? "muted" : "" },
-                base == null
-                  ? "Choose variant / price"
-                  : `${cash(base)} / each`,
-              ),
-              button("Add to order", () => showAddProduct(product), "primary"),
-            ),
-            master()
-              ? button(
-                  "Edit details",
-                  () => showProductEditor(product),
-                  "text-button",
-                )
-              : null,
-          ),
-        );
-      }),
-    ),
-  );
-  if (products.length > 120)
-    append(
-      root,
-      notice(
-        "Showing the first 120 matches. Narrow your search to find a specific product.",
-      ),
-    );
+  function drawResults() {
+    const query = search.trim().toLowerCase();
+    const products = candidates
+      .filter(
+        ({ product, terms }) =>
+          (!category || product.categoryIds?.includes(category)) &&
+          (!favoritesOnly || fav.includes(product.id)) &&
+          (!query || terms.some((term) => term.includes(query))),
+      )
+      .map(({ product }) => product);
+    favoritesButton.textContent = favoritesOnly ? "★ Favorites" : "☆ Favorites";
+    favoritesButton.className = favoritesOnly ? "pill active" : "pill";
+    favoritesButton.setAttribute("aria-pressed", favoritesOnly);
+    count.textContent = `${products.length} matching product${products.length === 1 ? "" : "s"}`;
+    if (!products.length) {
+      results.replaceChildren(
+        empty(
+          "No matching products",
+          "Try another spelling, category, or barcode.",
+          [
+            button("Clear filters", () => {
+              search = "";
+              category = "";
+              favoritesOnly = false;
+              searchField.value = "";
+              categoryField.value = "";
+              drawResults();
+              searchField.focus();
+            }),
+          ],
+          "search",
+        ),
+      );
+      return;
+    }
+    const cards = products.slice(0, 120).map((product) => {
+      if (!cardCache.has(product.id))
+        cardCache.set(product.id, renderProductCard(product, fav));
+      return cardCache.get(product.id);
+    });
+    results.replaceChildren(el("div", { class: "catalog-grid" }, cards));
+    if (products.length > 120)
+      append(
+        results,
+        notice(
+          "Showing the first 120 matches. Narrow your search to find a specific product.",
+        ),
+      );
+  }
+  drawResults();
   return root;
 }
+function renderProductCard(product, fav) {
+  const image = safeImage(product.image || product.imageUrl);
+  const thumbnail = image
+    ? el("img", {
+        src: image,
+        width: 180,
+        height: 145,
+        alt: product.name,
+        loading: "lazy",
+        decoding: "async",
+        onError: (event) =>
+          event.target.replaceWith(
+            el(
+              "span",
+              { class: "no-image", "aria-label": "Image unavailable" },
+              "AW",
+            ),
+          ),
+      })
+    : el("span", { class: "no-image", "aria-label": "No product image" }, "AW");
+  const favorite = iconButton(`Favorite ${product.name}`, "star", () =>
+    toggleFavorite(product.id),
+  );
+  favorite.className = "favorite";
+  favorite.setAttribute("aria-pressed", fav.includes(product.id));
+  const base = linePrice({
+    productId: product.id,
+    variant: "",
+    unit: "each",
+  });
+  return el(
+    "article",
+    { class: "product-card" },
+    favorite,
+    el("div", { class: "product-image" }, thumbnail),
+    el(
+      "div",
+      { class: "product-content" },
+      el("h3", { class: "product-name" }, product.name),
+      el(
+        "p",
+        { class: "product-meta" },
+        product.variants?.length
+          ? `${product.variants.length} variants`
+          : "Single product",
+        product.packSize ? ` · ${product.packSize} per case` : "",
+      ),
+      el(
+        "div",
+        { class: "product-bottom" },
+        el(
+          "strong",
+          { class: `product-price${base == null ? " muted" : ""}` },
+          base == null ? "Choose variant / price" : `${cash(base)} / each`,
+        ),
+        button("Add to order", () => showAddProduct(product), "primary"),
+      ),
+      master()
+        ? button(
+            "Edit details",
+            () => showProductEditor(product),
+            "text-button",
+          )
+        : null,
+    ),
+  );
+}
+
 async function toggleFavorite(id) {
   const fav = { ...preferences().favorites };
   const set = new Set(fav[storeId] ?? currentStore()?.favoriteProductIds ?? []);
@@ -1643,26 +1655,34 @@ function renderBuilder() {
     placeholder: "Delivery instructions, packing notes or substitutions…",
     maxlength: 5000,
     onInput: (event) =>
-      act(() =>
-        editDraft((d) => {
-          d.notes = event.target.value;
-        }),
-      ),
+      act(() => {
+        editDraft(
+          (d) => {
+            d.notes = event.target.value;
+          },
+          { renderPage: false },
+        );
+        draftSyncDot.className = "sync-dot warning";
+        draftSyncMessage.textContent = "Draft saved on this device";
+        draftStatus.querySelectorAll("button")[0].disabled = !undo.length;
+        draftStatus.querySelectorAll("button")[1].disabled = !redo.length;
+      }),
   });
   note.value = draft.notes || "";
+  const draftSyncDot = el("span", {
+    class: `sync-dot${draft.syncState === "synced" ? "" : " warning"}`,
+  });
+  const draftSyncMessage = el(
+    "span",
+    {},
+    draft.syncState === "synced"
+      ? `Synced ${new Date(draft.lastSyncedAt || draft.updatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+      : "Draft saved on this device",
+  );
   const draftStatus = el(
     "div",
     { class: "split mb" },
-    el(
-      "div",
-      { class: "sync-bar" },
-      el("span", {
-        class: `sync-dot${draft.syncState === "synced" ? "" : " warning"}`,
-      }),
-      draft.syncState === "synced"
-        ? `Synced ${new Date(draft.lastSyncedAt || draft.updatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
-        : "Draft saved on this device",
-    ),
+    el("div", { class: "sync-bar" }, draftSyncDot, draftSyncMessage),
     el(
       "div",
       { class: "actions" },
@@ -1994,7 +2014,40 @@ function renderOrders() {
   );
   return root;
 }
-function showOrder(order) {
+async function showOrder(order) {
+  if (order.summary) {
+    const loading = modal(
+      order.invoiceNumber || "Open order",
+      "Loading the saved order details…",
+    );
+    const read = async () => {
+      loading.content.replaceChildren(
+        el(
+          "p",
+          { role: "status" },
+          "Loading saved items, prices and order history…",
+        ),
+      );
+      loading.footer.replaceChildren(button("Cancel", loading.close));
+      try {
+        const complete = await loadOrderDetails(order, (id) =>
+          api(`/api/orders/${encodeURIComponent(id)}`),
+        );
+        if (!loading.dialog.open) return;
+        loading.close();
+        await showOrder(complete);
+      } catch (error) {
+        if (!loading.dialog.open) return;
+        loading.content.replaceChildren(notice(friendlyError(error), true));
+        loading.footer.replaceChildren(
+          button("Close", loading.close),
+          button("Retry loading order", read, "primary"),
+        );
+      }
+    };
+    await read();
+    return;
+  }
   const store = storeById(order.storeId);
   const legacy = isHistoricalOrder(order);
   const m = modal(
@@ -2851,42 +2904,42 @@ function renderInventory() {
       "Staff access required",
       "Inventory adjustments are available to authorized staff.",
     );
+  const inventoryByVariant = new Map(
+    state.inventory.map((item) => [
+      JSON.stringify([item.productId, item.variant || ""]),
+      item,
+    ]),
+  );
+  const candidates = state.products.flatMap((product) =>
+    (product.variants?.length ? product.variants : [""]).map((variant) => ({
+      product,
+      variant,
+      key: JSON.stringify([product.id, variant]),
+      inventory: inventoryByVariant.get(JSON.stringify([product.id, variant])),
+      terms: [
+        product.name,
+        product.sku,
+        product.barcode,
+        product.variantBarcodes?.[variant],
+        variant,
+      ].map((value) => String(value || "").toLowerCase()),
+    })),
+  );
+  const rowCache = new Map();
   const searchNode = input("search", search, {
     id: "inventory-search",
     placeholder: "Search name, variant, SKU or barcode",
     "aria-label": "Search inventory",
     onInput: (event) => {
       search = event.target.value;
-      render();
+      drawResults();
     },
   });
-  const query = search.trim().toLowerCase();
-  const records = state.products
-    .flatMap((product) =>
-      (product.variants?.length ? product.variants : [""]).map((variant) => ({
-        product,
-        variant,
-        inventory: state.inventory.find(
-          (item) =>
-            item.productId === product.id && (item.variant || "") === variant,
-        ),
-      })),
-    )
-    .filter(
-      ({ product, variant }) =>
-        !query ||
-        [
-          product.name,
-          product.sku,
-          product.barcode,
-          product.variantBarcodes?.[variant],
-          variant,
-        ].some((value) =>
-          String(value || "")
-            .toLowerCase()
-            .includes(query),
-        ),
-    );
+  const resultTable = table(
+    ["Product / variant", "On hand", "Reserved", "Available", "Reorder at", ""],
+    [],
+  );
+  const count = el("p", { class: "small muted mb", role: "status" });
   const root = el(
     "div",
     {},
@@ -2896,60 +2949,62 @@ function renderInventory() {
       [button("Scan barcode", showScanner, "", "scan")],
     ),
     el("div", { class: "filters" }, el("div", { class: "search" }, searchNode)),
+    count,
+    resultTable,
   );
-  append(
-    root,
-    table(
-      [
-        "Product / variant",
-        "On hand",
-        "Reserved",
-        "Available",
-        "Reorder at",
-        "",
-      ],
-      records
-        .slice(0, 150)
-        .map(({ product, variant, inventory }) =>
-          el(
-            "tr",
-            {},
-            td(
-              el("strong", {}, product.name),
-              el("p", { class: "small" }, variant || "Standard"),
-              el(
-                "p",
-                { class: "small" },
-                product.variantBarcodes?.[variant] ||
-                  product.barcode ||
-                  product.sku ||
-                  "",
-              ),
-            ),
-            td(inventory?.onHand ?? "Unknown"),
-            td(inventory?.reserved ?? 0),
-            td(
-              inventory?.onHand == null
-                ? "Unknown"
-                : inventory.onHand - (inventory.reserved || 0),
-            ),
-            td(inventory?.reorderPoint ?? "Not set"),
-            td(
-              button("Adjust", () =>
-                showInventoryAdjustment(product, variant, inventory),
-              ),
-            ),
-          ),
-        ),
-    ),
-  );
-  if (records.length > 150)
-    append(
-      root,
-      notice("Showing 150 matches. Use search to narrow the inventory list."),
+  function drawResults() {
+    const query = search.trim().toLowerCase();
+    const records = candidates.filter(
+      ({ terms }) => !query || terms.some((value) => value.includes(query)),
     );
+    const rows = records
+      .slice(0, 150)
+      .map(({ key, product, variant, inventory }) => {
+        if (!rowCache.has(key))
+          rowCache.set(key, renderInventoryRow(product, variant, inventory));
+        return rowCache.get(key);
+      });
+    resultTable.querySelector("tbody").replaceChildren(...rows);
+    count.textContent =
+      records.length > 150
+        ? `Showing 150 of ${records.length} matches. Use search to narrow the inventory list.`
+        : `${records.length} matching inventory records`;
+  }
+  drawResults();
   return root;
 }
+function renderInventoryRow(product, variant, inventory) {
+  return el(
+    "tr",
+    {},
+    td(
+      el("strong", {}, product.name),
+      el("p", { class: "small" }, variant || "Standard"),
+      el(
+        "p",
+        { class: "small" },
+        product.variantBarcodes?.[variant] ||
+          product.barcode ||
+          product.sku ||
+          "",
+      ),
+    ),
+    td(inventory?.onHand ?? "Unknown"),
+    td(inventory?.reserved ?? 0),
+    td(
+      inventory?.onHand == null
+        ? "Unknown"
+        : inventory.onHand - (inventory.reserved || 0),
+    ),
+    td(inventory?.reorderPoint ?? "Not set"),
+    td(
+      button("Adjust", () =>
+        showInventoryAdjustment(product, variant, inventory),
+      ),
+    ),
+  );
+}
+
 function showInventoryAdjustment(product, variant, inventory = {}) {
   const m = modal(
     "Adjust inventory",
@@ -3283,6 +3338,7 @@ function renderReturns() {
           "Choose delivered order",
           () => {
             orderFilter = "delivered";
+            resetOrderHistory();
             setView("orders");
           },
           "primary",
@@ -3302,6 +3358,7 @@ function renderReturns() {
         [
           button("View delivered orders", () => {
             orderFilter = "delivered";
+            resetOrderHistory();
             setView("orders");
           }),
         ],
@@ -5186,7 +5243,7 @@ async function onIdentity(user) {
     }
     session = result.me;
     storeId = ws.preferences().storeId || "";
-    await refresh();
+    await refresh({ renderPage: false });
     if (generation !== identityGeneration) return;
     if (!state.me.preferences?.theme && ws.preferences().theme === undefined)
       ws.setPreferences({ theme: "dark" });

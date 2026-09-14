@@ -230,6 +230,82 @@ test("late private state response cannot apply after switching accounts", async 
   await assert.rejects(pending, /account changed/);
   assert.equal(applied, false);
 });
+test("order summaries fetch complete saved lines before reorder and return review", async () => {
+  const { loadOrderDetails } = await sessions();
+  const summary = {
+    id: "history-one",
+    storeId: "store",
+    status: "delivered",
+    summary: true,
+  };
+  const original = {
+    ...summary,
+    summary: undefined,
+    lines: [
+      {
+        id: "line",
+        productId: "p",
+        quantity: 2,
+        unit: "case",
+        packSize: 12,
+        unitPriceCents: 500,
+      },
+    ],
+  };
+  let calls = 0;
+  const result = await loadOrderDetails(summary, async (id) => {
+    calls++;
+    assert.equal(id, summary.id);
+    return { order: original };
+  });
+  assert.equal(result, original);
+  assert.equal(result.lines[0].quantity, 2);
+  assert.equal(calls, 1);
+  assert.equal(
+    await loadOrderDetails(original, () => {
+      throw new Error("unexpected read");
+    }),
+    original,
+  );
+  assert.equal(summary.lines, undefined);
+});
+test("failed or mismatched order detail cannot become an empty reorder", async () => {
+  const { loadOrderDetails, runSessionTask } = await sessions();
+  const summary = { id: "history-one", summary: true };
+  await assert.rejects(
+    () =>
+      loadOrderDetails(summary, async () => {
+        throw new Error("Offline");
+      }),
+    /Offline/,
+  );
+  await assert.rejects(
+    () =>
+      loadOrderDetails(summary, async () => ({
+        order: { id: "another", lines: [] },
+      })),
+    /complete order/i,
+  );
+  await assert.rejects(
+    () => loadOrderDetails(summary, async () => ({ order: summary })),
+    /complete order/i,
+  );
+  let current = "alice",
+    resolveRequest;
+  const pending = loadOrderDetails(summary, () =>
+    runSessionTask(
+      "alice",
+      (uid) => uid === current,
+      () =>
+        new Promise((resolve) => {
+          resolveRequest = resolve;
+        }),
+    ),
+  );
+  current = "bob";
+  resolveRequest({ order: { id: summary.id, lines: [] } });
+  await assert.rejects(pending, /account changed/);
+});
 test("late command acknowledgment cannot mutate the next account workspace", async () => {
   const { runSessionTask } = await sessions();
   const store = memory();
