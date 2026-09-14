@@ -1,0 +1,147 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "v2_orders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "storeId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "id",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "v2_orders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "id",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "v2_orders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "storeId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "id",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "v2_notifications",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "storeId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "v2_payments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "storeId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "v2_returns",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "storeId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "v2_ledger",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "storeId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "v2_orders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        },
+        {
+          "fieldPath": "id",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "v2_notifications",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "audience",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

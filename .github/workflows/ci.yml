@@ -1,0 +1,24 @@
+name: Verify app
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --omit=dev
+      - run: npx --yes firebase-tools@15.30.0 emulators:exec --only firestore --project demo-alabama-wholesale 'node --test tests/rules.integration.cjs'

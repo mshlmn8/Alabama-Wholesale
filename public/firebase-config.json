@@ -1,0 +1,13 @@
+{
+  "firebaseConfig": {
+    "apiKey": "AIzaSyBY0P1GC_p9KjOJ3AyhbPqR6WxiY0apkX8",
+    "authDomain": "alabama-wholesale-ordering-app.firebaseapp.com",
+    "projectId": "alabama-wholesale-ordering-app",
+    "storageBucket": "alabama-wholesale-ordering-app.firebasestorage.app",
+    "messagingSenderId": "320395494706",
+    "appId": "1:320395494706:web:4d76783fcee475905b432b",
+    "measurementId": "G-RVKPL9SFHB"
+  },
+  "recaptchaSiteKey": "6Lf3U7otAAAAACGbmjPfLkPpdP3KUyo4-36lLq7T",
+  "appOrigin": "https://alabama-wholesale--alabama-wholesale-ordering-app.us-east4.hosted.app"
+}
