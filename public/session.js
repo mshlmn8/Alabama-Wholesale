@@ -29,3 +29,24 @@ export async function afterConfirmation(result, refresh, onWarning) {
   }
   return result;
 }
+
+// Read-only requests are discarded when their view changes or a newer read starts.
+export function createRequestGate() {
+  let generation = 0;
+  return {
+    invalidate() {
+      generation += 1;
+    },
+    async run(request, apply) {
+      const requestGeneration = ++generation;
+      let result;
+      try {
+        result = await request();
+      } catch (error) {
+        if (requestGeneration === generation) throw error;
+        return;
+      }
+      if (requestGeneration === generation) return apply(result);
+    },
+  };
+}

@@ -269,6 +269,57 @@ test("confirmed mutation remains successful when its following state refresh fai
   assert.equal(result, confirmed);
   assert.equal(warned, true);
 });
+test("late history pages cannot replace the active store, status, or refreshed cursor", async () => {
+  const { createRequestGate } = await sessions();
+  for (const reason of [
+    "store changed",
+    "status changed",
+    "workspace refreshed",
+  ]) {
+    const gate = createRequestGate();
+    let resolvePage;
+    let orders = ["current-order"],
+      cursor = "current-cursor";
+    const pending = gate.run(
+      () =>
+        new Promise((resolve) => {
+          resolvePage = resolve;
+        }),
+      (page) => {
+        orders = page.orders;
+        cursor = page.nextCursor;
+      },
+    );
+    gate.invalidate();
+    resolvePage({ orders: ["stale-order"], nextCursor: "stale-cursor" });
+    await pending;
+    assert.deepEqual(orders, ["current-order"], reason);
+    assert.equal(cursor, "current-cursor", reason);
+  }
+});
+test("only the newest simultaneous history request applies its page", async () => {
+  const { createRequestGate } = await sessions();
+  const gate = createRequestGate();
+  let resolveFirst, cursor;
+  const first = gate.run(
+    () =>
+      new Promise((resolve) => {
+        resolveFirst = resolve;
+      }),
+    (value) => {
+      cursor = value;
+    },
+  );
+  await gate.run(
+    async () => "newer-cursor",
+    (value) => {
+      cursor = value;
+    },
+  );
+  resolveFirst("older-cursor");
+  await first;
+  assert.equal(cursor, "newer-cursor");
+});
 test("a draft being submitted cannot gain edits that acknowledgment would delete", async () => {
   const { Workspace } = await load();
   const storage = memory(),

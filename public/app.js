@@ -4,6 +4,7 @@ import {
   runSessionTask,
   afterConfirmation,
   SessionChanged,
+  createRequestGate,
 } from "./session.js";
 import {
   formatSavedDate as date,
@@ -386,6 +387,11 @@ let config,
 let lastRefresh = 0,
   orderCursor = undefined,
   cameraCleanup = null;
+const orderHistoryRequests = createRequestGate();
+function resetOrderHistory() {
+  orderHistoryRequests.invalidate();
+  orderCursor = undefined;
+}
 const staff = () =>
   state?.me?.role === "master" || state?.me?.role === "salesman";
 const master = () => state?.me?.role === "master";
@@ -475,6 +481,7 @@ async function api(path, { method = "GET", body, raw = false } = {}) {
 }
 async function refresh({ renderPage = true } = {}) {
   if (!session) return;
+  resetOrderHistory();
   const scope = operationScope();
   return runSessionTask(
     scope,
@@ -496,7 +503,7 @@ async function refresh({ renderPage = true } = {}) {
         next[key] = Array.isArray(next[key]) ? next[key] : [];
       state = next;
       state.me = next.me || scope.session;
-      orderCursor = undefined;
+      resetOrderHistory();
       scope.workspace.mergeRemoteDrafts(
         state.orders.filter((order) => order.status === "draft"),
       );
@@ -604,7 +611,7 @@ function persistPreferences(values) {
 }
 function changeStore(id) {
   storeId = id;
-  orderCursor = undefined;
+  resetOrderHistory();
   const prefs = preferences();
   ws.setPreferences({ storeId: id });
   draft = ws.getDraft(prefs.activeDraftIds?.[id]);
@@ -1932,7 +1939,7 @@ function renderOrders() {
           "aria-label": "Filter order status",
           onChange: (event) => {
             orderFilter = event.target.value;
-            orderCursor = undefined;
+            resetOrderHistory();
             render();
           },
         },
@@ -1956,23 +1963,30 @@ function renderOrders() {
       "div",
       { class: "actions mt" },
       button("Load older orders", async () => {
+        const queryStoreId = storeId;
+        const queryStatus = orderFilter;
         const params = new URLSearchParams();
-        if (storeId) params.set("storeId", storeId);
-        if (orderFilter) params.set("status", orderFilter);
+        if (queryStoreId) params.set("storeId", queryStoreId);
+        if (queryStatus) params.set("status", queryStatus);
         if (orderCursor === null) {
           toast("You’ve reached the end of this order history.");
           return;
         }
         const cursor = orderCursor;
         if (cursor) params.set("cursor", cursor);
-        const result = await api(`/api/orders?${params}`);
-        const map = new Map(state.orders.map((order) => [order.id, order]));
-        for (const order of result.orders || []) map.set(order.id, order);
-        state.orders = [...map.values()];
-        orderCursor = result.nextCursor || null;
-        render();
-        if (!result.nextCursor)
-          toast("You’ve reached the end of order history.");
+        await orderHistoryRequests.run(
+          () => api(`/api/orders?${params}`),
+          (result) => {
+            if (queryStoreId !== storeId || queryStatus !== orderFilter) return;
+            const map = new Map(state.orders.map((order) => [order.id, order]));
+            for (const order of result.orders || []) map.set(order.id, order);
+            state.orders = [...map.values()];
+            orderCursor = result.nextCursor || null;
+            render();
+            if (!result.nextCursor)
+              toast("You’ve reached the end of order history.");
+          },
+        );
       }),
     ),
   );
