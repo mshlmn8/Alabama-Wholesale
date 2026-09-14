@@ -16,7 +16,7 @@
  * so users pick up the new build; the activate handler purges old caches.
  */
 
-const CACHE_VERSION = 'aw-2026-05-19-1';
+const CACHE_VERSION = 'aw-2026-09-14-firebase-ai';
 const CACHE_NAME = 'aw-cache-' + CACHE_VERSION;
 
 // Files cached up front so the app boots offline even on first cold start

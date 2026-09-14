@@ -1207,6 +1207,13 @@ nav.bottom .ico .icon-svg { width: 22px; height: 22px; }
     </div>
 
     <div class="card">
+      <div class="card-head"><h3>Gemini connection</h3></div>
+      <div class="hint" style="margin-bottom: 12px;">Check that Gemini is available with a short test message. This check does not send customer or order data.</div>
+      <button class="btn small" id="firebaseAITestButton" onclick="testFirebaseAIConnection()">Check connection</button>
+      <div class="hint" id="firebaseAIStatus" role="status" style="margin-top: 10px;">Connect cloud sync to use Gemini.</div>
+    </div>
+
+    <div class="card">
       <div class="card-head"><h3>Backup & Restore</h3><span class="tag" id="backupAgeTag">Never backed up</span></div>
       <div class="hint" style="margin-bottom: 12px;">Your data lives in this browser. <b>iPhone Safari can clear data after 7 days of no visits</b> — export regularly. Backup file now includes every saved order, user, and ledger entry.</div>
       <div class="btn-row">
@@ -10853,6 +10860,10 @@ const CLOUD = {
   app: null,
   db: null,
   auth: null,
+  appCheck: null,
+  ai: null,
+  aiModel: null,
+  aiError: null,
   uid: null,
   ready: false,
   unsubscribers: []
@@ -10860,15 +10871,79 @@ const CLOUD = {
 
 async function _loadFirebaseSDK() {
   if (window._fbSDK) return window._fbSDK;
+  // Browser-module setup: keep every Firebase library on the same SDK version.
+  // cloudSyncEnable initializes the shared app with the project configuration.
   const mods = await Promise.all([
-    import('https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js'),
-    import('https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js'),
-    import('https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js')
+    import('https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js'),
+    import('https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js'),
+    import('https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js'),
+    import('https://www.gstatic.com/firebasejs/12.19.0/firebase-ai.js'),
+    import('https://www.gstatic.com/firebasejs/12.19.0/firebase-app-check.js')
   ]);
   window._fbSDK = {
-    app: mods[0], firestore: mods[1], auth: mods[2]
+    app: mods[0], firestore: mods[1], auth: mods[2],
+    ai: mods[3], appCheck: mods[4]
   };
   return window._fbSDK;
+}
+
+// Public site key restricted to this app's production domain in Google Cloud.
+const FIREBASE_APPCHECK_SITE_KEY = '6Lf3U7otAAAAACGbmjPfLkPpdP3KUyo4-36lLq7T';
+
+function _setFirebaseAIStatus(message) {
+  const status = document.getElementById('firebaseAIStatus');
+  if (status) status.textContent = message;
+}
+
+function _prepareFirebaseAI(app, sdk) {
+  CLOUD.appCheck = null; CLOUD.ai = null; CLOUD.aiModel = null; CLOUD.aiError = null;
+  try {
+    if (app.options.appId !== FIREBASE_CONFIG?.appId) {
+      throw new Error('Gemini is configured for the Alabama Wholesale Firebase app.');
+    }
+    const appCheck = sdk.appCheck.initializeAppCheck(app, {
+      provider: new sdk.appCheck.ReCaptchaEnterpriseProvider(FIREBASE_APPCHECK_SITE_KEY),
+      isTokenAutoRefreshEnabled: true
+    });
+    const { ai, model } = _initializeFirebaseAI(app, sdk);
+    CLOUD.appCheck = appCheck; CLOUD.ai = ai; CLOUD.aiModel = model;
+    _setFirebaseAIStatus('Ready to check the Gemini connection.');
+    return true;
+  } catch (error) {
+    CLOUD.aiError = error.message || 'Gemini setup failed.';
+    _setFirebaseAIStatus('Gemini is unavailable. Cloud sync can still connect.');
+    console.warn('Gemini setup:', error);
+    return false;
+  }
+}
+
+// Call after App Check has been initialized on this same Firebase app.
+// Creating the model does not send a prompt or access any order data.
+function _initializeFirebaseAI(app, sdk) {
+  const ai = sdk.ai.getAI(app, { backend: new sdk.ai.GoogleAIBackend() });
+  const model = sdk.ai.getGenerativeModel(ai, { model: 'gemini-3.8-flash' });
+  return { ai, model };
+}
+
+async function testFirebaseAIConnection() {
+  const button = document.getElementById('firebaseAITestButton');
+  if (button?.disabled) return;
+  if (button) button.disabled = true;
+  _setFirebaseAIStatus('Checking Gemini…');
+  try {
+    if (!CLOUD.enabled) throw new Error('Connect cloud sync first, then try again.');
+    if (!CLOUD.aiModel || !CLOUD.appCheck) throw new Error(CLOUD.aiError || 'Gemini is not ready yet.');
+    const sdk = await _loadFirebaseSDK();
+    await sdk.appCheck.getToken(CLOUD.appCheck, false);
+    const result = await CLOUD.aiModel.generateContent('Reply with exactly: Alabama Wholesale Gemini connection OK.');
+    const text = result.response.text();
+    if (!text.trim()) throw new Error('Gemini returned no text. Please try again.');
+    _setFirebaseAIStatus('Connected. Gemini replied: ' + text);
+  } catch (error) {
+    _setFirebaseAIStatus('Connection check failed: ' + (error.message || 'Please try again.'));
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 
 // Accept any of these paste formats:
@@ -10906,6 +10981,8 @@ async function cloudSyncEnable(cfgOverride) {
   try {
     const sdk = await _loadFirebaseSDK();
     const app = sdk.app.initializeApp(cfg, 'aw-sync');
+    // AI setup errors are contained so the existing order-sync flow can continue.
+    _prepareFirebaseAI(app, sdk);
     // Initialize Firestore with IndexedDB persistence so writes queue while
     // offline and replay automatically when the device reconnects. If
     // initialize fails (e.g. another instance already exists) fall back to
@@ -10951,6 +11028,8 @@ async function cloudSyncDisable() {
   CLOUD.unsubscribers.forEach(fn => { try { fn(); } catch(e){} });
   CLOUD.unsubscribers = [];
   CLOUD.enabled = false; CLOUD.ready = false;
+  CLOUD.ai = null; CLOUD.aiModel = null;
+  _setFirebaseAIStatus('Connect cloud sync to use Gemini.');
   state.settings.cloudEnabled = false;
   await saveData();
   setFirebaseStatus('Local mode');
