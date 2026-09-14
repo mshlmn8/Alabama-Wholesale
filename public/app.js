@@ -1676,6 +1676,7 @@ function renderBuilder() {
   );
   const note = el("textarea", {
     id: "draft-notes",
+    "data-draft-id": draft.id,
     value: draft.notes || "",
     placeholder: "Delivery instructions, packing notes or substitutions…",
     maxlength: 5000,
@@ -5607,17 +5608,26 @@ window.addEventListener("online", () => {
   }
 });
 window.addEventListener("offline", () => state && render());
+function hasUnsavedDraftNotes() {
+  const note = $("draft-notes");
+  return !!(
+    draft &&
+    note?.dataset.draftId === draft.id &&
+    note.value !== (draft.notes || "")
+  );
+}
 window.addEventListener("storage", (event) => {
   if (ws && event.key === ws.key) {
     toast(
       "This workspace changed in another tab. Reload the draft before editing it.",
       true,
     );
-    if (state) render();
+    // Keep rejected notes visible for copying/retry when another tab saves.
+    if (state && !hasUnsavedDraftNotes()) render();
   }
 });
 window.addEventListener("beforeunload", (event) => {
-  if (ws?.pending().length) {
+  if (hasUnsavedDraftNotes() || ws?.pending().length) {
     event.preventDefault();
     event.returnValue = "";
   }

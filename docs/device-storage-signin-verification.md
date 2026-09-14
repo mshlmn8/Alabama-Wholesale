@@ -23,5 +23,6 @@ Browser reproduction and recovery scripts and screenshots are retained locally u
 - Native WebKit quota reproduction now reaches the catalog, displays the storage warning, and preserves existing workspace/legacy bytes.
 - Enrollment denial, server failure, blocked reads, corrupt JSON and offline startup use the appropriate distinct screens.
 - Draft input checks cover explicit unsaved status, retained notes, failed quantity/unit rollback, durable retry, and Undo/Redo history preservation.
+- Actual second-tab storage events preserve rejected notes; retry refuses to overwrite newer notes. Account-switch tests confirm unsaved notes cannot be copied into another account. The final seven-scenario matrix plus these two isolation cases passed in both browser engines.
 
 The phone itself is not remotely inspected. Validation reproduces its reported failure in isolated mobile browser contexts. A device that still refuses durable writes can browse and export, but cannot claim new edits are saved until storage works. This change does not clear the device’s storage or remove existing business data.
