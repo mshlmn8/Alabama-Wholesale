@@ -88,7 +88,7 @@ function createApp({
       );
     next();
   });
-  app.get("/healthz", (_req, res) =>
+  app.get(["/health", "/healthz"], (_req, res) =>
     res.json({ status: "ok", version: "2", service: "alabama-wholesale" }),
   );
   app.get("/api/config", (_req, res) => {

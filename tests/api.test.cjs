@@ -96,6 +96,7 @@ async function fixture(t) {
 test("public health works while private source paths cannot be downloaded", async (t) => {
   const { request } = await fixture(t);
   assert.equal((await request("/healthz", null)).status, 200);
+  assert.equal((await request("/health", null)).status, 200);
   for (const p of [
     "/server.js",
     "/package.json",
