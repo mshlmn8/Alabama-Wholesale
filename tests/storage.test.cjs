@@ -166,6 +166,280 @@ test("failed import is atomic and preserves all existing drafts", async () => {
   assert.equal(ws.getDraft("existing").notes, "preserve");
 });
 
+test("empty and unchanged cloud merges do not write browser storage", async () => {
+  const { Workspace } = await load();
+  const store = memory();
+  const ws = new Workspace(store, "no-op");
+  const remote = { id: "cloud", status: "draft", version: 4, lines: [] };
+  ws.mergeRemoteDrafts([remote]);
+  ws.saveDraft({ id: "local", lines: [], notes: "Keep local edits" });
+  const before = store.getItem(ws.key);
+  let writes = 0;
+  store.setItem = () => {
+    writes++;
+    throw Error("quota");
+  };
+  assert.doesNotThrow(() => ws.mergeRemoteDrafts([]));
+  assert.doesNotThrow(() =>
+    ws.mergeRemoteDrafts([remote, { ...remote, id: "local", version: 99 }]),
+  );
+  assert.equal(writes, 0);
+  assert.equal(store.getItem(ws.key), before);
+  assert.equal(ws.storageStatus().warning, null);
+});
+
+test("quota during cloud caching preserves durable drafts and queue while cloud drafts remain readable", async () => {
+  const { Workspace } = await load();
+  const store = memory();
+  const ws = new Workspace(store, "owner");
+  ws.saveDraft({
+    id: "local",
+    storeId: "shop",
+    lines: [{ productId: "p", quantity: 2, unit: "each" }],
+    notes: "Unsynced work",
+  });
+  const command = {
+    id: "pending",
+    type: "order.save",
+    payload: { id: "local", notes: "Unsynced work" },
+  };
+  ws.enqueue(command);
+  store.setItem("legacy-key", "Preserve old browser data");
+  const before = store.getItem(ws.key);
+  store.setItem = () => {
+    throw Error("QuotaExceededError");
+  };
+  const remote = {
+    id: "cloud",
+    storeId: "shop",
+    status: "draft",
+    version: 4,
+    lines: [{ productId: "p", quantity: 3, unit: "case" }],
+  };
+  assert.doesNotThrow(() => ws.mergeRemoteDrafts([remote]));
+  assert.equal(ws.getDraft("cloud").lines[0].quantity, 3);
+  assert.equal(ws.listDrafts().length, 2);
+  assert.equal(ws.getDraft("local").notes, "Unsynced work");
+  assert.deepEqual(ws.pending()[0].command, command);
+  assert.equal(store.getItem(ws.key), before);
+  assert.equal(store.getItem("legacy-key"), "Preserve old browser data");
+  assert.match(ws.storageStatus().warning, /storage|device/i);
+  assert.equal(ws.storageStatus().remoteDraftCount, 1);
+  assert.equal(
+    new Workspace(store, "owner").getDraft("cloud"),
+    null,
+    "The cache is explicitly temporary until persistence succeeds.",
+  );
+  const another = new Workspace(store, "another-account");
+  assert.equal(another.listDrafts().length, 0);
+  assert.equal(another.storageStatus().warning, null);
+  ws.mergeRemoteDrafts([{ ...remote, version: 5, notes: "New cloud version" }]);
+  assert.equal(ws.getDraft("cloud").version, 5);
+  assert.equal(store.getItem(ws.key), before);
+});
+
+test("optional preferences can remain temporary but user writes still fail truthfully under quota", async () => {
+  const { Workspace, StorageFailure } = await load();
+  const store = memory();
+  const ws = new Workspace(store, "owner");
+  ws.setPreferences({ theme: "light" });
+  ws.enqueue({ id: "old", type: "order.save", payload: { id: "existing" } });
+  const before = store.getItem(ws.key);
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  ws.mergeRemoteDrafts([
+    {
+      id: "cloud",
+      status: "draft",
+      version: 2,
+      lines: [{ productId: "p", quantity: 2, unit: "each" }],
+    },
+  ]);
+  assert.doesNotThrow(() =>
+    ws.rememberPreferences({ theme: "dark", storeId: "shop" }),
+  );
+  assert.equal(ws.preferences().theme, "dark");
+  assert.equal(ws.storageStatus().preferencesTemporary, true);
+  const cloud = ws.getDraft("cloud");
+  assert.throws(
+    () => ws.saveDraft({ ...cloud, notes: "Must not silently save" }),
+    StorageFailure,
+  );
+  assert.equal(ws.getDraft("cloud").notes, undefined);
+  assert.throws(
+    () =>
+      ws.enqueue({ id: "new", type: "order.save", payload: { id: "cloud" } }),
+    StorageFailure,
+  );
+  assert.throws(
+    () =>
+      ws.importBackup({
+        format: "aw-workspace",
+        version: 1,
+        drafts: [{ id: "imported", lines: [] }],
+      }),
+    StorageFailure,
+  );
+  assert.throws(() => ws.setPreferences({ theme: "light" }), StorageFailure);
+  assert.equal(ws.getDraft("imported"), null);
+  assert.equal(ws.preferences().theme, "dark");
+  assert.equal(ws.pending().length, 1);
+  assert.equal(store.getItem(ws.key), before);
+  const exported = ws.exportBackup();
+  assert.equal(
+    exported.drafts.find((draft) => draft.id === "cloud").lines[0].quantity,
+    2,
+  );
+  assert.equal(exported.preferences.theme, "dark");
+  assert.deepEqual(exported.queue, ws.pending());
+  const restored = new Workspace(memory(), "restored");
+  restored.importBackup(exported);
+  assert.equal(
+    restored.pending().length,
+    0,
+    "Backup import must never replay saved commands automatically.",
+  );
+});
+
+test("explicit storage retry preserves queued work and durably caches the current cloud view", async () => {
+  const { Workspace, StorageFailure } = await load();
+  const store = memory();
+  const ws = new Workspace(store, "owner");
+  ws.saveDraft({ id: "local", lines: [], notes: "Preserve" });
+  ws.enqueue({ id: "queued", type: "order.save", payload: { id: "local" } });
+  const write = store.setItem;
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  ws.mergeRemoteDrafts([
+    { id: "cloud", status: "draft", version: 3, lines: [] },
+  ]);
+  ws.rememberPreferences({ theme: "dark" });
+  assert.throws(() => ws.retryStorage(), StorageFailure);
+  assert.equal(ws.storageStatus().remoteDraftCount, 1);
+  let writes = 0;
+  store.setItem = (key, value) => {
+    writes++;
+    write(key, value);
+  };
+  ws.retryStorage();
+  assert.equal(writes, 1);
+  assert.deepEqual(ws.storageStatus(), {
+    warning: null,
+    remoteDraftCount: 0,
+    preferencesTemporary: false,
+  });
+  const reloaded = new Workspace(store, "owner");
+  assert.equal(reloaded.getDraft("cloud").version, 3);
+  assert.equal(reloaded.getDraft("local").notes, "Preserve");
+  assert.equal(reloaded.preferences().theme, "dark");
+  assert.equal(reloaded.pending()[0].command.id, "queued");
+  ws.retryStorage();
+  assert.equal(
+    writes,
+    2,
+    "Retry must actually probe durable storage even without cached changes.",
+  );
+});
+
+test("saving one temporary cloud draft succeeds independently of an oversized optional cache", async () => {
+  const { Workspace } = await load();
+  const store = memory();
+  const ws = new Workspace(store, "owner");
+  const write = store.setItem;
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  ws.mergeRemoteDrafts([
+    { id: "selected", status: "draft", version: 3, lines: [] },
+    {
+      id: "large",
+      status: "draft",
+      version: 1,
+      notes: "x".repeat(10000),
+      lines: [],
+    },
+  ]);
+  store.setItem = (key, value) => {
+    if (value.length > 2000) throw Error("quota");
+    write(key, value);
+  };
+  ws.rememberPreferences({ theme: "dark" });
+  assert.equal(JSON.parse(store.getItem(ws.key)).drafts.large, undefined);
+  const saved = ws.saveDraft({
+    ...ws.getDraft("selected"),
+    notes: "Now saved",
+  });
+  assert.equal(saved.syncState, "local");
+  assert.equal(
+    new Workspace(store, "owner").getDraft("selected").notes,
+    "Now saved",
+  );
+  assert.equal(ws.storageStatus().remoteDraftCount, 1);
+  ws.removeDraft("large");
+  assert.equal(ws.getDraft("large"), null);
+  assert.equal(ws.storageStatus().warning, null);
+});
+
+test("temporary cloud revisions cannot conceal another tab's durable edit", async () => {
+  const { Workspace, DraftConflict } = await load();
+  const store = memory();
+  const first = new Workspace(store, "owner");
+  first.mergeRemoteDrafts([
+    { id: "shared", status: "draft", version: 1, lines: [], notes: "Original" },
+  ]);
+  const write = store.setItem;
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  first.mergeRemoteDrafts([
+    {
+      id: "shared",
+      status: "draft",
+      version: 2,
+      lines: [],
+      notes: "Cloud update",
+    },
+  ]);
+  const stale = first.getDraft("shared");
+  store.setItem = write;
+  const second = new Workspace(store, "owner");
+  second.saveDraft({ ...second.getDraft("shared"), notes: "Other tab's edit" });
+  assert.throws(
+    () => first.saveDraft({ ...stale, notes: "Stale overwrite" }),
+    DraftConflict,
+  );
+  first.retryStorage();
+  assert.equal(first.getDraft("shared").notes, "Other tab's edit");
+});
+
+test("strict write failures set a visible warning without replacing unreadable data", async () => {
+  const { Workspace, StorageFailure } = await load();
+  const store = memory();
+  const ws = new Workspace(store, "owner");
+  const write = store.setItem;
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  assert.throws(
+    () => ws.enqueue({ id: "save", type: "order.save", payload: {} }),
+    StorageFailure,
+  );
+  assert.match(ws.storageStatus().warning, /storage|device/i);
+  store.setItem = write;
+  ws.retryStorage();
+  assert.equal(ws.storageStatus().warning, null);
+  store.setItem(ws.key, "corrupt browser evidence");
+  assert.throws(() => ws.mergeRemoteDrafts([]), StorageFailure);
+  assert.throws(
+    () => ws.rememberPreferences({ theme: "dark" }),
+    StorageFailure,
+  );
+  assert.throws(() => ws.retryStorage(), StorageFailure);
+  assert.equal(store.getItem(ws.key), "corrupt browser evidence");
+});
+
 async function helpers() {
   return import(
     "data:text/javascript;base64," +
