@@ -1,4 +1,4 @@
-const VERSION = "aw-v2-20260914-2";
+const VERSION = "aw-v2-20260914-3";
 const SHELL = [
   "/",
   "/app.js",
@@ -20,9 +20,16 @@ const SDK_FILES = [
 self.addEventListener("install", (event) => {
   event.waitUntil(
     (async () => {
-      const cache = await caches.open(VERSION);
-      await cache.addAll(SHELL);
-      await Promise.allSettled(SDK_FILES.map((file) => cache.add(SDK + file)));
+      try {
+        const cache = await caches.open(VERSION);
+        await Promise.allSettled(
+          [...SHELL, ...SDK_FILES.map((file) => SDK + file)].map((url) =>
+            cache.add(url),
+          ),
+        );
+      } catch {
+        // Storage can be unavailable even when the app works over the network.
+      }
       await self.skipWaiting();
     })(),
   );
@@ -30,12 +37,16 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     (async () => {
-      for (const key of await caches.keys())
-        if (
-          (key.startsWith("aw-") || key.startsWith("alabama-")) &&
-          key !== VERSION
-        )
-          await caches.delete(key);
+      try {
+        const old = (await caches.keys()).filter(
+          (key) =>
+            (key.startsWith("aw-") || key.startsWith("alabama-")) &&
+            key !== VERSION,
+        );
+        await Promise.allSettled(old.map((key) => caches.delete(key)));
+      } catch {
+        // A cache cleanup error must not keep a broken older worker in control.
+      }
       await self.clients.claim();
     })(),
   );
@@ -54,16 +65,30 @@ self.addEventListener("fetch", (event) => {
   if (!shell && !sdk) return;
   event.respondWith(
     (async () => {
-      const cache = await caches.open(VERSION);
+      let response;
       try {
-        const response = await fetch(request);
-        if (response.ok) await cache.put(request, response.clone());
-        return response;
+        response = await fetch(request);
       } catch (error) {
-        const saved = await cache.match(request, { ignoreSearch: true });
-        if (saved) return saved;
+        try {
+          const cache = await caches.open(VERSION);
+          const saved = await cache.match(request, { ignoreSearch: true });
+          if (saved) return saved;
+        } catch {
+          // Preserve the network failure when no offline cache can be read.
+        }
         throw error;
       }
+      if (response.ok) event.waitUntil(remember(request, response.clone()));
+      return response;
     })(),
   );
 });
+
+async function remember(request, response) {
+  try {
+    const cache = await caches.open(VERSION);
+    await cache.put(request, response);
+  } catch {
+    // The fresh network response remains usable when a device cannot cache it.
+  }
+}

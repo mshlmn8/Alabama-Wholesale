@@ -1,4 +1,4 @@
-import { Workspace, createDraft } from "./storage.js";
+import { Workspace, StorageFailure, createDraft } from "./storage.js";
 import * as firebase from "./firebase.js";
 import {
   runSessionTask,
@@ -135,6 +135,7 @@ async function act(fn, buttonNode) {
       append(target, message);
       message.focus();
     }
+    if (error instanceof StorageFailure && state) updateStorageNotice();
     toast(friendlyError(error), true);
   } finally {
     if (buttonNode?.isConnected) {
@@ -605,7 +606,7 @@ function setView(next) {
   $("page-title")?.focus();
 }
 function persistPreferences(values) {
-  ws.setPreferences(values);
+  ws.rememberPreferences(values);
   render();
   return command("preferences.save", {
     ...preferences(),
@@ -617,7 +618,7 @@ function changeStore(id) {
   storeId = id;
   resetOrderHistory();
   const prefs = preferences();
-  ws.setPreferences({ storeId: id });
+  ws.rememberPreferences({ storeId: id });
   draft = ws.getDraft(prefs.activeDraftIds?.[id]);
   undo = [];
   redo = [];
@@ -628,7 +629,7 @@ function beginDraft() {
     throw new Error("Add or select a store before starting an order.");
   draft = ws.saveDraft(createDraft(storeId));
   const active = { ...preferences().activeDraftIds, [storeId]: draft.id };
-  ws.setPreferences({ activeDraftIds: active });
+  ws.rememberPreferences({ activeDraftIds: active });
   undo = [];
   redo = [];
   setView("build");
@@ -638,7 +639,17 @@ function editDraft(change, { renderPage = true } = {}) {
   const previous = clone(draft);
   const next = clone(draft);
   change(next);
-  const saved = ws.saveDraft(next);
+  let saved;
+  try {
+    saved = ws.saveDraft(next);
+  } catch (error) {
+    if ($("draft-sync-message"))
+      $("draft-sync-message").textContent =
+        "Changes not saved. Retry the edit before leaving.";
+    if ($("draft-sync-dot")) $("draft-sync-dot").className = "sync-dot error";
+    announce("Changes not saved. Retry the edit before leaving.");
+    throw error;
+  }
   undo.push(previous);
   if (undo.length > 50) undo.shift();
   redo = [];
@@ -650,13 +661,15 @@ function undoDraft(forward = false) {
   const source = forward ? redo : undo,
     target = forward ? undo : redo;
   if (!source.length) return;
-  target.push(clone(draft));
-  const next = source.pop();
-  draft = ws.saveDraft({
+  const next = source[source.length - 1];
+  const saved = ws.saveDraft({
     ...next,
     localRevision: draft.localRevision,
     version: draft.version,
   });
+  target.push(clone(draft));
+  source.pop();
+  draft = saved;
   render();
 }
 function newDraftFromOrder(order) {
@@ -892,7 +905,7 @@ function render() {
       notifications,
       cart,
       iconButton("Toggle light or dark theme", "sun", () => {
-        ws.setPreferences({
+        ws.rememberPreferences({
           theme: preferences().theme === "light" ? "dark" : "light",
         });
         render();
@@ -900,6 +913,8 @@ function render() {
     ),
   );
   const main = el("main", { id: "main", class: "content" });
+  const storageNotice = deviceStorageNotice();
+  if (storageNotice) append(main, storageNotice);
   if (!navigator.onLine)
     append(
       main,
@@ -1600,11 +1615,16 @@ function renderBuilder() {
             toast("Use a positive whole number.", true);
             return;
           }
-          act(() =>
-            editDraft((d) => {
-              d.lines.find((item) => item.id === line.id).quantity = number;
-            }),
-          );
+          act(() => {
+            try {
+              editDraft((d) => {
+                d.lines.find((item) => item.id === line.id).quantity = number;
+              });
+            } catch (error) {
+              event.target.value = line.quantity;
+              throw error;
+            }
+          });
         },
       });
       const units = select(
@@ -1613,12 +1633,17 @@ function renderBuilder() {
         {
           "aria-label": `Unit for ${product?.name || "product"}`,
           onChange: (event) =>
-            act(() =>
-              editDraft((d) => {
-                d.lines.find((item) => item.id === line.id).unit =
-                  event.target.value;
-              }),
-            ),
+            act(() => {
+              try {
+                editDraft((d) => {
+                  d.lines.find((item) => item.id === line.id).unit =
+                    event.target.value;
+                });
+              } catch (error) {
+                event.target.value = line.unit;
+                throw error;
+              }
+            }),
         },
       );
       const price = linePrice(line);
@@ -1651,6 +1676,7 @@ function renderBuilder() {
   );
   const note = el("textarea", {
     id: "draft-notes",
+    "data-draft-id": draft.id,
     value: draft.notes || "",
     placeholder: "Delivery instructions, packing notes or substitutions…",
     maxlength: 5000,
@@ -1670,11 +1696,12 @@ function renderBuilder() {
   });
   note.value = draft.notes || "";
   const draftSyncDot = el("span", {
+    id: "draft-sync-dot",
     class: `sync-dot${draft.syncState === "synced" ? "" : " warning"}`,
   });
   const draftSyncMessage = el(
     "span",
-    {},
+    { id: "draft-sync-message" },
     draft.syncState === "synced"
       ? `Synced ${new Date(draft.lastSyncedAt || draft.updatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
       : "Draft saved on this device",
@@ -1788,7 +1815,7 @@ function renderDraftList(drafts) {
           ),
           button("Resume", () => {
             draft = ws.getDraft(item.id);
-            ws.setPreferences({
+            ws.rememberPreferences({
               activeDraftIds: {
                 ...preferences().activeDraftIds,
                 [storeId]: draft.id,
@@ -2237,7 +2264,7 @@ async function showOrder(order) {
           draft = ws.getDraft(order.id);
           changeStore(order.storeId);
           draft = ws.getDraft(order.id);
-          ws.setPreferences({
+          ws.rememberPreferences({
             activeDraftIds: {
               ...preferences().activeDraftIds,
               [storeId]: order.id,
@@ -3705,7 +3732,7 @@ function renderMore() {
         button(
           "Toggle theme",
           () => {
-            ws.setPreferences({
+            ws.rememberPreferences({
               theme: preferences().theme === "light" ? "dark" : "light",
             });
             render();
@@ -3891,7 +3918,7 @@ function showSyncCenter() {
                     ws.acknowledge(entry.command.id);
                     draft = ws.saveDraft(copy);
                     storeId = copy.storeId;
-                    ws.setPreferences({
+                    ws.rememberPreferences({
                       activeDraftIds: {
                         ...preferences().activeDraftIds,
                         [storeId]: draft.id,
@@ -3922,7 +3949,7 @@ function showWorkspaceBackup() {
   const fileScope = operationScope();
   const m = modal(
     "Workspace backup",
-    "Save a copy of this account’s local drafts and preferences.",
+    "Save a copy of this account’s drafts, preferences and pending action records.",
   );
   append(
     m.content,
@@ -3935,7 +3962,7 @@ function showWorkspaceBackup() {
   append(
     m.content,
     notice(
-      "This backup contains local drafts and preferences. Financial records are managed by the server and are not overwritten by this import.",
+      "This backup contains drafts, preferences and pending action records. Import restores drafts only; pending actions are not replayed. Financial records stay on the server.",
     ),
     field("Import workspace JSON", file),
   );
@@ -5130,6 +5157,143 @@ function showRegistration() {
     ),
   );
 }
+function exportDeviceWorkspace(user = firebase.identity()) {
+  if (!user || user.uid !== firebase.identity()?.uid)
+    throw new SessionChanged();
+  // Export raw account data, including unreadable JSON and pending commands.
+  // Never export Firebase credentials or remove existing browser records.
+  const key = `aw:v2:${user.uid}`;
+  let raw;
+  try {
+    raw = localStorage.getItem(key);
+  } catch {
+    throw new StorageFailure(
+      "This browser is blocking access to saved data. Allow website storage, then retry the export. Nothing has been cleared.",
+    );
+  }
+  download(
+    `alabama-device-recovery-${new Date().toISOString().slice(0, 10)}.json`,
+    JSON.stringify(
+      {
+        format: "aw-device-recovery",
+        version: 1,
+        exportedAt: Date.now(),
+        workspace: { key, raw },
+      },
+      null,
+      2,
+    ),
+  );
+}
+function deviceStorageNotice() {
+  if (!ws?.storageStatus().warning) return null;
+  const content = notice(
+    el(
+      "div",
+      { class: "stack" },
+      el("strong", {}, "Device storage needs attention"),
+      el(
+        "span",
+        {},
+        "You’re signed in. You can browse, but this browser could not save a local copy. Existing drafts and pending actions are preserved. New edits require a successful save.",
+      ),
+      el(
+        "div",
+        { class: "actions" },
+        button("Export saved drafts", () =>
+          download(
+            `alabama-workspace-${new Date().toISOString().slice(0, 10)}.json`,
+            JSON.stringify(ws.exportBackup(), null, 2),
+          ),
+        ),
+        button("Retry device storage", async () => {
+          const enteredNotes = $("draft-notes")?.value;
+          const retryNotes =
+            draft &&
+            enteredNotes !== undefined &&
+            enteredNotes !== (draft.notes || "");
+          if (retryNotes) {
+            const latest = ws.getDraft(draft.id);
+            if (
+              !latest ||
+              latest.localRevision !== draft.localRevision ||
+              latest.version !== draft.version
+            )
+              throw new Error(
+                "This draft changed elsewhere. Copy your unsaved notes, then reopen the saved draft before applying them.",
+              );
+          }
+          ws.retryStorage();
+          if (draft) draft = ws.getDraft(draft.id);
+          if (retryNotes && draft)
+            editDraft(
+              (next) => {
+                next.notes = enteredNotes;
+              },
+              { renderPage: false },
+            );
+          await refresh();
+          if (!ws.storageStatus().warning)
+            toast("Device storage is working again.");
+        }),
+      ),
+    ),
+    true,
+  );
+  content.id = "device-storage-notice";
+  return content;
+}
+function updateStorageNotice() {
+  const previous = $("device-storage-notice");
+  const next = deviceStorageNotice();
+  if (previous) {
+    if (next) previous.replaceWith(next);
+    else previous.remove();
+  } else if (next) $("main")?.prepend(next);
+}
+function renderWorkspaceFailure(user, error) {
+  const storageError = error instanceof StorageFailure;
+  state = null;
+  session = null;
+  $("app").replaceChildren(
+    el(
+      "main",
+      { id: "main", class: "boot" },
+      brand(),
+      el(
+        "h1",
+        {},
+        storageError
+          ? "Device storage needs attention"
+          : "Couldn’t open your workspace",
+      ),
+      el("p", {}, user.email),
+      notice(friendlyError(error), true),
+      el(
+        "p",
+        {},
+        storageError
+          ? "Your sign-in is separate from this device’s saved data. Nothing has been cleared. Export a recovery copy before changing browser storage settings."
+          : "Your workspace could not be loaded. Retry to check your connection and session.",
+      ),
+      el(
+        "div",
+        { class: "actions" },
+        storageError
+          ? button("Export device recovery copy", () =>
+              exportDeviceWorkspace(user),
+            )
+          : null,
+        button(
+          "Retry opening workspace",
+          () => onIdentity(firebase.identity()),
+          "primary",
+        ),
+        button("Sign out", () => firebase.logout()),
+      ),
+    ),
+  );
+}
 function renderEnrollment(user, error = "") {
   const invite = new URL(location.href).searchParams.get("invite");
   const needsVerification = !user.emailVerified;
@@ -5212,7 +5376,14 @@ async function onIdentity(user) {
     return;
   }
   try {
-    ws = new Workspace(localStorage, user.uid);
+    try {
+      ws = new Workspace(localStorage, user.uid);
+    } catch (error) {
+      if (error instanceof StorageFailure) throw error;
+      throw new StorageFailure(
+        "Browser storage is unavailable. Your changes cannot be saved on this device.",
+      );
+    }
     document.documentElement.dataset.theme = ws.preferences().theme || "dark";
     $("app").replaceChildren(
       el(
@@ -5245,8 +5416,6 @@ async function onIdentity(user) {
     storeId = ws.preferences().storeId || "";
     await refresh({ renderPage: false });
     if (generation !== identityGeneration) return;
-    if (!state.me.preferences?.theme && ws.preferences().theme === undefined)
-      ws.setPreferences({ theme: "dark" });
     render();
     if (ws.pending().length)
       toast(
@@ -5254,11 +5423,25 @@ async function onIdentity(user) {
       );
   } catch (error) {
     if (generation !== identityGeneration) return;
-    if (ws && (error.code === "NETWORK" || !navigator.onLine)) {
-      renderOfflineRecovery(user);
-      return;
+    if (error instanceof StorageFailure) {
+      renderWorkspaceFailure(user, error);
+    } else if (ws && (error.code === "NETWORK" || !navigator.onLine)) {
+      try {
+        renderOfflineRecovery(user);
+      } catch (storageError) {
+        renderWorkspaceFailure(user, storageError);
+      }
+    } else if (
+      [
+        "enrollment_required",
+        "invalid_role",
+        "owner_already_enrolled",
+      ].includes(error.code)
+    ) {
+      renderEnrollment(user, friendlyError(error));
+    } else {
+      renderWorkspaceFailure(user, error);
     }
-    renderEnrollment(user, friendlyError(error));
   }
 }
 function renderOfflineRecovery(user) {
@@ -5425,17 +5608,26 @@ window.addEventListener("online", () => {
   }
 });
 window.addEventListener("offline", () => state && render());
+function hasUnsavedDraftNotes() {
+  const note = $("draft-notes");
+  return !!(
+    draft &&
+    note?.dataset.draftId === draft.id &&
+    note.value !== (draft.notes || "")
+  );
+}
 window.addEventListener("storage", (event) => {
   if (ws && event.key === ws.key) {
     toast(
       "This workspace changed in another tab. Reload the draft before editing it.",
       true,
     );
-    if (state) render();
+    // Keep rejected notes visible for copying/retry when another tab saves.
+    if (state && !hasUnsavedDraftNotes()) render();
   }
 });
 window.addEventListener("beforeunload", (event) => {
-  if (ws?.pending().length) {
+  if (hasUnsavedDraftNotes() || ws?.pending().length) {
     event.preventDefault();
     event.returnValue = "";
   }
@@ -5653,7 +5845,7 @@ async function showLegacyDeviceDraft() {
           legacyDeviceFingerprint: fingerprint,
           legacy: { requiresReview: true },
         });
-        scope.workspace.setPreferences({
+        scope.workspace.rememberPreferences({
           activeDraftIds: {
             ...preferences().activeDraftIds,
             [storeId]: draft.id,
