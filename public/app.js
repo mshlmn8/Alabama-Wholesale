@@ -5149,8 +5149,15 @@ async function onIdentity(user) {
   ws = null;
   undo = [];
   redo = [];
-  if (!user) {
+  if (!user || user.isAnonymous) {
     renderAuth();
+    if (user?.isAnonymous) {
+      try {
+        await firebase.logout();
+      } catch (error) {
+        if (generation === identityGeneration) renderAuth(friendlyError(error));
+      }
+    }
     return;
   }
   try {
