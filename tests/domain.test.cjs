@@ -216,3 +216,115 @@ test('draft legacy flags cannot be bypassed by client-supplied legacy objects',a
   const d=await f.run('order.save',{id:'recovered',lines:lines(),legacy:{requiresReview:false},expectedVersion:1},customer);
   await rejectsCode(()=>f.run('order.submit',{id:d.id,expectedVersion:d.version},customer),'LEGACY_REVIEW_REQUIRED');
 });
+test('a payment report can request an invoice allocation without verifying the payment',async()=>{
+  const f=fixture();const o=await submitted(f,{quantity:2});
+  const p=await f.run('payment.report',{storeId:'s1',amountCents:1000,orderId:o.id},customer);
+  assert.equal(p.status,'pending');assert.equal(p.orderId,o.id);assert.equal(f.get('orders',o.id).paidCents,0);
+  const verified=await f.run('payment.verify',{paymentId:p.id},salesman);
+  assert.deepEqual(verified.allocations,[{orderId:o.id,amountCents:1000}]);assert.equal(verified.unallocatedCents,0);
+  const order=f.get('orders',o.id);assert.equal(order.paidCents,1000);assert.equal(order.amountDueCents,1400);assert.equal(order.paymentStatus,'partial');
+});
+test('invoice targets are checked for store access and finalized snapshots before accepting reports',async()=>{
+  const f=fixture();const d=await draft(f);
+  await rejectsCode(()=>f.run('payment.report',{storeId:'s1',amountCents:100,orderId:d.id},customer),'INVOICE_NOT_ALLOCATABLE');
+  const o=await f.run('order.submit',{id:d.id,expectedVersion:d.version},customer);
+  await rejectsCode(()=>f.run('payment.report',{storeId:'s2',amountCents:100,orderId:o.id}),'FORBIDDEN');
+  f.db.set('orders/legacy',{id:'legacy',storeId:'s1',status:'legacy',totalCents:1000,legacy:{needsPriceReview:true}});
+  await rejectsCode(()=>f.run('payment.report',{storeId:'s1',amountCents:100,orderId:'legacy'},customer),'INVOICE_NOT_ALLOCATABLE');
+});
+test('verifying a reported overpayment leaves excess unallocated and does not double-charge the ledger',async()=>{
+  const f=fixture();const o=await submitted(f);
+  const p=await f.run('payment.report',{storeId:'s1',amountCents:2000,orderId:o.id},customer);
+  const verified=await f.run('payment.verify',{paymentId:p.id});
+  assert.equal(verified.allocatedCents,1200);assert.equal(verified.unallocatedCents,800);assert.equal(storeBalance(f.list('ledger'),'s1'),-800);
+  const order=f.get('orders',o.id);assert.equal(order.paymentStatus,'paid');assert.equal(order.amountDueCents,0);assert.equal(order.paidCents,1200);
+  await f.run('payment.verify',{paymentId:p.id});assert.equal(f.list('ledger').filter(r=>r.type==='payment').length,1);
+});
+test('an unbound verified payment credits the account without implicitly paying legacy debt or invoices',async()=>{
+  const f=fixture({ledger:[{id:'opening',storeId:'s1',type:'opening',deltaCents:10000}]});const o=await submitted(f);
+  const p=await f.run('payment.report',{storeId:'s1',amountCents:5000},customer);const verified=await f.run('payment.verify',{paymentId:p.id});
+  assert.deepEqual(verified.allocations,[]);assert.equal(verified.unallocatedCents,5000);assert.equal(f.get('orders',o.id).paidCents,0);assert.equal(f.get('orders',o.id).paymentStatus,'unpaid');assert.equal(storeBalance(f.list('ledger'),'s1'),6200);
+});
+test('staff can explicitly assign and reassign a verified payment using one complete versioned allocation list',async()=>{
+  const f=fixture();const first=await submitted(f),second=await submitted(f,{id:'o2'});
+  const p=await f.run('payment.report',{storeId:'s1',amountCents:1500},customer);let verified=await f.run('payment.verify',{paymentId:p.id});
+  verified=await f.run('payment.allocate',{paymentId:p.id,allocations:[{orderId:first.id,amountCents:1000},{orderId:second.id,amountCents:500}],expectedVersion:verified.version},salesman);
+  assert.equal(verified.allocatedCents,1500);assert.equal(f.get('orders',first.id).paidCents,1000);
+  verified=await f.run('payment.allocate',{paymentId:p.id,allocations:[{orderId:second.id,amountCents:1200}],expectedVersion:verified.version},salesman);
+  assert.equal(verified.unallocatedCents,300);assert.equal(f.get('orders',first.id).paidCents,0);assert.equal(f.get('orders',second.id).paidCents,1200);assert.equal(f.list('ledger').filter(r=>r.type==='payment').length,1);
+  const event=f.list('audit').filter(a=>a.type==='payment.allocate').at(-1);assert.deepEqual(event.details.before,[{orderId:first.id,amountCents:1000},{orderId:second.id,amountCents:500}]);assert.deepEqual(event.details.after,[{orderId:second.id,amountCents:1200}]);
+});
+test('allocation totals, repeated invoices and stale versions cannot bypass payment or invoice caps',async()=>{
+  const f=fixture();const o=await submitted(f);
+  const p=await f.run('payment.report',{storeId:'s1',amountCents:1500},customer);const v=await f.run('payment.verify',{paymentId:p.id});
+  await rejectsCode(()=>f.run('payment.allocate',{paymentId:p.id,allocations:[{orderId:o.id,amountCents:1600}],expectedVersion:v.version}),'ALLOCATION_LIMIT');
+  await rejectsCode(()=>f.run('payment.allocate',{paymentId:p.id,allocations:[{orderId:o.id,amountCents:1300}],expectedVersion:v.version}),'ALLOCATION_LIMIT');
+  await rejectsCode(()=>f.run('payment.allocate',{paymentId:p.id,allocations:[{orderId:o.id,amountCents:500},{orderId:o.id,amountCents:500}],expectedVersion:v.version}),'INVALID_INPUT');
+  const allocated=await f.run('payment.allocate',{paymentId:p.id,allocations:[{orderId:o.id,amountCents:1000}],expectedVersion:v.version});
+  await rejectsCode(()=>f.run('payment.allocate',{paymentId:p.id,allocations:[],expectedVersion:v.version}),'VERSION_CONFLICT');
+  assert.equal(f.get('payments',p.id).version,allocated.version);assert.equal(f.get('orders',o.id).paidCents,1000);
+});
+test('failed multi-invoice allocation rolls back every target and does not spend unallocated funds',async()=>{
+  const f=fixture();const o=await submitted(f);const p=await f.run('payment.report',{storeId:'s1',amountCents:2000},customer);const v=await f.run('payment.verify',{paymentId:p.id});
+  await rejectsCode(()=>f.run('payment.allocate',{paymentId:p.id,allocations:[{orderId:o.id,amountCents:500},{orderId:'missing',amountCents:500}],expectedVersion:v.version}),'NOT_FOUND');
+  assert.equal(f.get('payments',p.id).unallocatedCents,2000);assert.equal(f.get('orders',o.id).paidCents,0);
+});
+test('separate payments cannot cumulatively allocate more than an invoice owes',async()=>{
+  const f=fixture();const o=await submitted(f);const p1=await f.run('payment.report',{storeId:'s1',amountCents:800},customer),p2=await f.run('payment.report',{storeId:'s1',amountCents:800},customer);
+  const v1=await f.run('payment.verify',{paymentId:p1.id}),v2=await f.run('payment.verify',{paymentId:p2.id});
+  await f.run('payment.allocate',{paymentId:p1.id,allocations:[{orderId:o.id,amountCents:800}],expectedVersion:v1.version});
+  await rejectsCode(()=>f.run('payment.allocate',{paymentId:p2.id,allocations:[{orderId:o.id,amountCents:800}],expectedVersion:v2.version}),'ALLOCATION_LIMIT');
+  assert.equal(f.get('orders',o.id).paidCents,800);assert.equal(f.get('payments',p2.id).unallocatedCents,800);
+});
+test('customers cannot allocate or verify pending payments, and store assignment applies to allocation',async()=>{
+  const f=fixture();const o=await submitted(f);const p=await f.run('payment.report',{storeId:'s1',amountCents:500},customer);
+  await rejectsCode(()=>f.run('payment.allocate',{paymentId:p.id,allocations:[{orderId:o.id,amountCents:500}],expectedVersion:p.version},customer),'FORBIDDEN');
+  await rejectsCode(()=>f.run('payment.allocate',{paymentId:p.id,allocations:[{orderId:o.id,amountCents:500}],expectedVersion:p.version},salesman),'INVALID_TRANSITION');
+  const v=await f.run('payment.verify',{paymentId:p.id});await rejectsCode(()=>f.run('payment.allocate',{paymentId:p.id,allocations:[{orderId:o.id,amountCents:500}],expectedVersion:v.version},{uid:'other-rep',role:'salesman',storeIds:['s2']}),'FORBIDDEN');
+});
+test('approved returns lower invoice due and a paid invoice then returned exposes its account credit',async()=>{
+  const f=fixture();const o=await delivered(f,{quantity:2});const p=await f.run('payment.report',{storeId:'s1',amountCents:2400,orderId:o.id},customer);await f.run('payment.verify',{paymentId:p.id});
+  const r=await f.run('return.create',{orderId:o.id,lines:[{lineId:'line1',quantity:1}],reason:'Return'},customer);assert.deepEqual(r.storeSnapshot,o.storeSnapshot);
+  await f.run('return.approve',{returnId:r.id,restock:false});
+  const order=f.get('orders',o.id);assert.equal(order.paidCents,2400);assert.equal(order.creditedCents,1200);assert.equal(order.amountDueCents,0);assert.equal(order.creditBalanceCents,1200);assert.equal(order.paymentStatus,'credit');assert.equal(storeBalance(f.list('ledger'),'s1'),-1200);
+});
+test('an approved return limits all future invoice allocations to the remaining net charge',async()=>{
+  const f=fixture();const o=await delivered(f,{quantity:2});const r=await f.run('return.create',{orderId:o.id,lines:[{lineId:'line1',quantity:1}],reason:'Return'},customer);await f.run('return.approve',{returnId:r.id,restock:false});
+  const p=await f.run('payment.report',{storeId:'s1',amountCents:2000},customer),v=await f.run('payment.verify',{paymentId:p.id});
+  await rejectsCode(()=>f.run('payment.allocate',{paymentId:p.id,allocations:[{orderId:o.id,amountCents:1500}],expectedVersion:v.version}),'ALLOCATION_LIMIT');
+  const allocated=await f.run('payment.allocate',{paymentId:p.id,allocations:[{orderId:o.id,amountCents:1200}],expectedVersion:v.version});assert.equal(allocated.unallocatedCents,800);assert.equal(f.get('orders',o.id).paymentStatus,'paid');
+});
+test('cancelling a paid order preserves paid money as credit and pending reported money stays unallocated',async()=>{
+  const f=fixture();let o=await submitted(f);const p=await f.run('payment.report',{storeId:'s1',amountCents:1200,orderId:o.id},customer);await f.run('payment.verify',{paymentId:p.id});o=f.get('orders',o.id);
+  const cancelled=await f.run('order.transition',{id:o.id,status:'cancelled',expectedVersion:o.version});assert.equal(cancelled.paymentStatus,'credit');assert.equal(cancelled.creditBalanceCents,1200);
+  let other=await submitted(f,{id:'other'});const pending=await f.run('payment.report',{storeId:'s1',amountCents:1200,orderId:other.id},customer);await f.run('order.transition',{id:other.id,status:'cancelled',expectedVersion:other.version});
+  const v=await f.run('payment.verify',{paymentId:pending.id});assert.equal(v.unallocatedCents,1200);assert.deepEqual(v.allocations,[]);assert.equal(v.allocationWarning,'TARGET_CANCELLED');
+});
+test('notification email consent time is server-owned and survives edits only while enabled',async()=>{
+  const f=fixture();let p=await f.run('preferences.save',{notificationPreferences:{email:true,emailEnabledAt:1}},customer);assert.equal(p.notificationPreferences.emailEnabledAt,1789372800000);
+  p=await f.run('preferences.save',{theme:'dark',notificationPreferences:{email:true,emailEnabledAt:2},expectedVersion:p.version},customer);assert.equal(p.notificationPreferences.emailEnabledAt,1789372800000);
+  p=await f.run('preferences.save',{notificationPreferences:{email:false},expectedVersion:p.version},customer);assert.equal(p.notificationPreferences.emailEnabledAt,null);
+});
+test('submission rejects a stale reviewed price before stock, invoice or ledger writes',async()=>{
+  const f=fixture();const d=await draft(f);await f.run('product.save',{...f.get('products','p1'),variantPricesCents:{Orange:1300},expectedVersion:1});
+  await rejectsCode(()=>f.run('order.submit',{id:d.id,expectedVersion:d.version,expectedTotalCents:1200},customer),'PRICE_CHANGED');
+  assert.equal(f.get('orders',d.id).status,'draft');assert.equal(f.get('inventory',inventoryId('p1','Orange')).reserved,0);assert.equal(f.list('ledger').length,0);assert.equal(f.list('counters').length,0);
+  const order=await f.run('order.submit',{id:d.id,expectedVersion:d.version,expectedTotalCents:1300},customer);assert.equal(order.totalCents,1300);
+});
+test('simultaneous allocation transactions cannot overspend invoice capacity or duplicate ledger payments',async()=>{
+  const {MemoryRepository}=require('../lib/repository.cjs');const f=fixture();const o=await submitted(f);
+  const p1=await f.run('payment.report',{storeId:'s1',amountCents:1000},customer),p2=await f.run('payment.report',{storeId:'s1',amountCents:1000},customer);
+  const v1=await f.run('payment.verify',{paymentId:p1.id}),v2=await f.run('payment.verify',{paymentId:p2.id});
+  const seed={};for(const [key,value] of f.db){const collection=key.slice(0,key.indexOf('/'));(seed[collection]??=[]).push(value);}
+  const repo=new MemoryRepository(seed);let generated=0;
+  const results=await Promise.allSettled([v1,v2].map((p,i)=>repo.transaction(tx=>executeCommand(tx,master,{id:'race-'+i,type:'payment.allocate',payload:{paymentId:p.id,allocations:[{orderId:o.id,amountCents:1000}],expectedVersion:p.version}},{now:1789372800001,id:()=> 'race-id-'+(++generated)}))));
+  assert.equal(results.filter(r=>r.status==='fulfilled').length,1);assert.equal(results.find(r=>r.status==='rejected').reason.code,'ALLOCATION_LIMIT');
+  assert.equal((await repo.get('orders',o.id)).paidCents,1000);assert.equal((await repo.list('ledger')).filter(l=>l.type==='payment').length,2);
+  assert.equal((await repo.list('payments')).reduce((sum,p)=>sum+p.allocatedCents,0),1000);
+});
+test('retrying the same allocation command is durable and does not change invoice versions twice',async()=>{
+  const f=fixture();const o=await submitted(f);const p=await f.run('payment.report',{storeId:'s1',amountCents:500},customer),v=await f.run('payment.verify',{paymentId:p.id});
+  const payload={paymentId:p.id,allocations:[{orderId:o.id,amountCents:500}],expectedVersion:v.version};
+  const first=await f.run('payment.allocate',payload,salesman,'same-allocation'),version=f.get('orders',o.id).version;
+  const second=await f.run('payment.allocate',payload,salesman,'same-allocation');assert.deepEqual(first,second);assert.equal(f.get('orders',o.id).version,version);assert.equal(f.list('audit').filter(a=>a.type==='payment.allocate').length,1);
+});
