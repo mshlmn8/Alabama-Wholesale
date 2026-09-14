@@ -339,3 +339,26 @@ test('image paths reject traversal, encoded separators and private or unsupporte
     const f=fixture();await rejectsCode(()=>f.run('product.save',{id:'p1',image,expectedVersion:1}),'INVALID_INPUT');
   }
 });
+test('financial operations read only the account or invoice being changed, leaving unrelated malformed accounts untouched',async()=>{
+  const {MemoryRepository}=require('../lib/repository.cjs');const f=fixture({ledger:[{id:'unrelated-debt',storeId:'s2',deltaCents:'unreadable'}],payments:[{id:'unrelated-payment',storeId:'s2',status:'verified',amountCents:'unreadable',allocations:'unreadable'}],returns:[{id:'unrelated-return',storeId:'s2',orderId:'unrelated-order',status:'approved',lines:'unreadable',totalCents:'unreadable'}]});
+  const seed={};for(const [key,value]of f.db){const collection=key.slice(0,key.indexOf('/'));(seed[collection]??=[]).push(value);}const repo=new MemoryRepository(seed),reads=[];let n=0;
+  const run=(type,payload,actor=master)=>repo.transaction(tx=>executeCommand({...tx,list:async(collection,options)=>{const rows=await tx.list(collection,options);if(['ledger','payments','returns'].includes(collection)){reads.push({collection,options,ids:rows.map(row=>row.id)});if(rows.some(row=>row.storeId==='s2'))throw Error('An unrelated malformed financial account was loaded.');}return rows;}},actor,{id:'scoped-command-'+(++n),type,payload},{now:1789372800000,id:()=> 'scoped-id-'+(++n)}));
+  let o=await run('order.save',{id:'scoped-order',storeId:'s1',lines:lines(2)},customer);o=await run('order.submit',{id:o.id,expectedVersion:o.version},customer);
+  const p=await run('payment.report',{storeId:'s1',amountCents:1000,orderId:o.id},customer);let v=await run('payment.verify',{paymentId:p.id});v=await run('payment.allocate',{paymentId:p.id,allocations:[{orderId:o.id,amountCents:900}],expectedVersion:v.version});
+  o=await repo.get('orders',o.id);for(const status of ['approved','picking','delivered'])o=await run('order.transition',{id:o.id,status,expectedVersion:o.version});
+  const r=await run('return.create',{orderId:o.id,lines:[{lineId:'line1',quantity:1}],reason:'Returned'},customer);await run('return.approve',{returnId:r.id,restock:false});
+  assert.equal((await repo.get('orders',o.id)).amountDueCents,300);assert.equal((await repo.get('ledger','unrelated-debt')).deltaCents,'unreadable');assert.ok(reads.length>0);assert.ok(reads.every(read=>read.options?.where?.some(([field])=>['storeId','orderId'].includes(field))));
+});
+test('new stock alerts are explicitly staff-only and all new notifications have a pending email marker',async()=>{
+  const f=fixture();await f.run('inventory.adjust',{productId:'p1',variant:'Orange',onHand:5,reorderPoint:10,reason:'Count',expectedVersion:1},salesman);
+  const alert=f.list('notifications')[0];assert.equal(alert.audience,'staff');assert.equal(alert.emailQueuePending,true);
+  await submitted(f);assert.ok(f.list('notifications').every(notification=>notification.emailQueuePending===true));
+});
+test('allocating one payment across many invoices reads each account history once',async()=>{
+  const {MemoryRepository}=require('../lib/repository.cjs');const f=fixture();const orders=[];for(let i=0;i<10;i++)orders.push(await submitted(f,{id:'bulk-order-'+i}));
+  const reported=await f.run('payment.report',{storeId:'s1',amountCents:10000},customer),verified=await f.run('payment.verify',{paymentId:reported.id});
+  const seed={};for(const [key,value]of f.db){const collection=key.slice(0,key.indexOf('/'));(seed[collection]??=[]).push(value);}const repo=new MemoryRepository(seed),reads=[];let n=0;
+  await repo.transaction(tx=>executeCommand({...tx,list:async(collection,options)=>{reads.push(collection);return tx.list(collection,options);}},master,{id:'bulk-allocate',type:'payment.allocate',payload:{paymentId:verified.id,expectedVersion:verified.version,allocations:orders.map(order=>({orderId:order.id,amountCents:1000}))}},{now:1789372800000,id:()=> 'bulk-id-'+(++n)}));
+  assert.equal(reads.filter(c=>c==='payments').length,1);assert.equal(reads.filter(c=>c==='returns').length,1);
+  assert.ok((await repo.list('orders')).every(order=>order.paidCents===1000&&order.amountDueCents===200));
+});
