@@ -362,3 +362,36 @@ test('allocating one payment across many invoices reads each account history onc
   assert.equal(reads.filter(c=>c==='payments').length,1);assert.equal(reads.filter(c=>c==='returns').length,1);
   assert.ok((await repo.list('orders')).every(order=>order.paidCents===1000&&order.amountDueCents===200));
 });
+
+
+test('adding the first named variant preserves Standard drafts, prices, barcode and inventory',async()=>{
+  const original={id:'p1',name:'Original standard',sku:'BASE',categoryIds:['c1'],variants:[],priceCents:420,variantPricesCents:{},barcode:'BASE-CODE',variantBarcodes:{},packSize:6,taxable:true,image:'/assets/original.png',imageSource:{provider:'verified'},active:true,version:3};
+  const stock={id:inventoryId('p1',''),productId:'p1',variant:'',onHand:40,reserved:0,reorderPoint:2,version:1};
+  const f=fixture({products:[original],inventory:[stock]});
+  const oldDraft=await f.run('order.save',{id:'standard-draft',storeId:'s1',lines:[{id:'standard-line',productId:'p1',variant:'',quantity:2,unit:'each'}]},customer);
+  const product=await f.run('product.save',{id:'p1',variants:['Grape'],variantPricesCents:{Grape:550},variantBarcodes:{Grape:'GRAPE-CODE'},expectedVersion:3});
+  assert.equal(product.standardVariantEnabled,true);
+  for(const key of ['name','sku','categoryIds','priceCents','barcode','packSize','taxable','image','imageSource','active'])assert.deepEqual(product[key],original[key]);
+  const saved=await f.run('order.save',{id:oldDraft.id,notes:'Still editable',expectedVersion:oldDraft.version},customer);
+  const submitted=await f.run('order.submit',{id:saved.id,expectedVersion:saved.version},customer);
+  assert.equal(submitted.lines[0].variant,'');assert.equal(submitted.lines[0].unitPriceCents,420);assert.equal(submitted.lines[0].barcode,'BASE-CODE');
+  const nextStock=await f.run('inventory.adjust',{productId:'p1',variant:'',onHand:50,reorderPoint:2,reason:'Count Standard units',expectedVersion:f.get('inventory',stock.id).version},salesman);
+  assert.equal(nextStock.variant,'');assert.equal(nextStock.onHand,50);
+  const named=calculateOrder([{id:'named',productId:'p1',variant:'Grape',quantity:1,unit:'each'}],[product],f.get('stores','s1'));
+  assert.equal(named.lines[0].unitPriceCents,550);assert.equal(named.lines[0].barcode,'GRAPE-CODE');
+});
+test('Standard compatibility is server-owned, sticky, and never granted to new named-only products',async()=>{
+  const f=fixture();
+  let p=await f.run('product.save',{id:'p1',standardVariantEnabled:true,expectedVersion:1});
+  assert.equal(p.standardVariantEnabled,false);
+  assert.throws(()=>calculateOrder([{id:'blank',productId:p.id,variant:'',quantity:1,unit:'each'}],[p],f.get('stores','s1')),{code:'INVALID_VARIANT'});
+  const created=await f.run('product.save',{id:'named-new',name:'New named',variants:['Grape'],standardVariantEnabled:true,priceCents:10});
+  assert.equal(created.standardVariantEnabled,false);
+  let standard=await f.run('product.save',{id:'standard-new',name:'Standard',variants:[],priceCents:10});
+  standard=await f.run('product.save',{id:standard.id,variants:['Grape'],standardVariantEnabled:false,expectedVersion:standard.version});
+  assert.equal(standard.standardVariantEnabled,true);
+  standard=await f.run('product.save',{id:standard.id,name:'Renamed',standardVariantEnabled:false,expectedVersion:standard.version});
+  assert.equal(standard.standardVariantEnabled,true);
+  await rejectsCode(()=>f.run('product.save',{id:standard.id,variants:['Lime'],expectedVersion:standard.version-1}),'VERSION_CONFLICT');
+  assert.deepEqual(f.get('products',standard.id).variants,['Grape']);
+});

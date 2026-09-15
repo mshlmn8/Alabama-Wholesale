@@ -81,6 +81,7 @@ function createApp({
   config = {},
   assistant,
   chatAssistant,
+  catalogPhotoAssistant,
   productImageProvider,
   productImageWorkerToken,
   documents,
@@ -917,6 +918,37 @@ function createApp({
       await (chatAssistant || module.chat)(input, {
         products: await catalog("products"),
         store,
+        identity: req.identity,
+        headers: req.headers,
+        config,
+      }),
+    );
+  });
+  app.post("/api/assistant/catalog-photo", async (req, res) => {
+    master(req);
+    const module = require("./lib/catalog-photo.cjs");
+    const input = module.normalizeInput(req.body);
+    // A proposal reads only active catalog identity/packaging information.
+    // Photo bytes and extracted details are never persisted by this endpoint.
+    const products = module.normalizeCatalog(
+      await repo.list("products", {
+        fields: [
+          "id",
+          "name",
+          "active",
+          "deleted",
+          "variants",
+          "barcode",
+          "variantBarcodes",
+          "packSize",
+        ],
+      }),
+    );
+    module.validateContext(input, products);
+    await consumeAiBudget(req);
+    res.json(
+      await (catalogPhotoAssistant || module.propose)(input, {
+        products,
         identity: req.identity,
         headers: req.headers,
         config,

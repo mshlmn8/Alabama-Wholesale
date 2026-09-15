@@ -181,7 +181,9 @@ export function recoverLegacyLines(order, products) {
         continue;
       }
       if (
-        (product.variants?.length && !product.variants.includes(variant)) ||
+        (product.variants?.length &&
+          !product.variants.includes(variant) &&
+          !(variant === "" && product.standardVariantEnabled === true)) ||
         (!product.variants?.length && variant)
       ) {
         warnings.push(

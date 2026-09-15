@@ -105,3 +105,20 @@ test("catalog view preserves saved grid density while safely defaulting legacy p
   assert.equal(normalizeCatalogLayout({ view: "invalid" }).view, "list");
   assert.deepEqual(raw, { columns: 5, compact: false });
 });
+
+test("legacy Standard lines remain recoverable only when the catalog preserves that choice", async () => {
+  const { recoverLegacyLines } = await helpers;
+  const order = {
+    lines: [{ productId: "mixed", variant: "", quantity: 3, unit: "each" }],
+  };
+  const named = { id: "mixed", name: "Mixed product", variants: ["Grape"] };
+  const allowed = recoverLegacyLines(order, [
+    { ...named, standardVariantEnabled: true },
+  ]);
+  assert.equal(allowed.lines.length, 1);
+  assert.equal(allowed.lines[0].variant, "");
+  assert.equal(allowed.warnings.length, 0);
+  const rejected = recoverLegacyLines(order, [named]);
+  assert.equal(rejected.lines.length, 0);
+  assert.match(rejected.warnings.join(" "), /variant/);
+});

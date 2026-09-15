@@ -79,3 +79,29 @@ test("standard products and cases preserve the existing line contract", async ()
     /case/i,
   );
 });
+
+test("products that gained flavors retain Standard without changing named variants", async () => {
+  const { productVariants, selectedProductLines } = await helpers;
+  const mixed = { ...product, standardVariantEnabled: true };
+  const before = structuredClone(mixed);
+  assert.deepEqual(productVariants(mixed), ["", ...product.variants]);
+  assert.deepEqual(
+    selectedProductLines(mixed, ["2", "0", "3", "0"], "each").map((line) => [
+      line.variant,
+      line.quantity,
+    ]),
+    [
+      ["", 2],
+      ["cranberry", 3],
+    ],
+  );
+  assert.deepEqual(mixed, before);
+  assert.deepEqual(
+    productVariants({ ...mixed, standardVariantEnabled: "true" }),
+    product.variants,
+  );
+  assert.deepEqual(
+    productVariants({ variants: [], standardVariantEnabled: true }),
+    [""],
+  );
+});
