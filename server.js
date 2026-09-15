@@ -4,7 +4,7 @@ const { randomUUID, createHash } = require("node:crypto");
 const { safeProfile } = require("./lib/auth.cjs");
 const error = (status, code, message) =>
   Object.assign(new Error(message), { status, code, expose: true });
-const { storeBalance } = require("./lib/domain.cjs");
+const { storeBalance, authorizeStore } = require("./lib/domain.cjs");
 const publicOrder = (order) => {
   const result = { ...order };
   if (result.legacy) {
@@ -14,12 +14,33 @@ const publicOrder = (order) => {
   return result;
 };
 const ORDER_SUMMARY_FIELDS = [
-  "id", "storeId", "storeName", "status", "version", "deleted",
-  "createdAt", "updatedAt", "submittedAt", "date", "invoiceNumber",
-  "total", "totalCents", "subtotalCents", "taxCents", "paidCents",
-  "creditedCents", "netTotalCents", "amountDueCents", "creditBalanceCents",
-  "paymentStatus", "missingSnapshots", "missingPriceSnapshots", "migrationBlocked",
-  "legacy.date", "legacy.needsPriceReview", "legacy.requiresReview",
+  "id",
+  "storeId",
+  "storeName",
+  "status",
+  "version",
+  "deleted",
+  "createdAt",
+  "updatedAt",
+  "submittedAt",
+  "date",
+  "invoiceNumber",
+  "total",
+  "totalCents",
+  "subtotalCents",
+  "taxCents",
+  "paidCents",
+  "creditedCents",
+  "netTotalCents",
+  "amountDueCents",
+  "creditBalanceCents",
+  "paymentStatus",
+  "missingSnapshots",
+  "missingPriceSnapshots",
+  "migrationBlocked",
+  "legacy.date",
+  "legacy.needsPriceReview",
+  "legacy.requiresReview",
 ];
 const publicCatalogRecord = (record) => {
   const { migration, legacy, ...result } = record;
@@ -51,6 +72,7 @@ const BACKUP_COLLECTIONS = [
   "outbox",
   "orderMailJobs",
   "aiLimits",
+  "productImageJobs",
   "inviteVersions",
 ];
 function createApp({
@@ -58,6 +80,9 @@ function createApp({
   auth,
   config = {},
   assistant,
+  chatAssistant,
+  productImageProvider,
+  productImageWorkerToken,
   documents,
   assets,
   emailTransport,
@@ -126,9 +151,30 @@ function createApp({
       emailDeliveryConfigured,
     });
   });
-  const orderMailOptions = { repo, transport: emailTransport, from: emailFrom, now, ...(documents ? { render: documents } : {}) };
-  const { registerOrderMailWorker, registerOrderMailApi } = require("./lib/order-mail-routes.cjs");
+  const orderMailOptions = {
+    repo,
+    transport: emailTransport,
+    from: emailFrom,
+    now,
+    ...(documents ? { render: documents } : {}),
+  };
+  const {
+    registerOrderMailWorker,
+    registerOrderMailApi,
+  } = require("./lib/order-mail-routes.cjs");
   registerOrderMailWorker(app, orderMailOptions, orderMailWorkerToken);
+  const photoOptions = {
+    repo,
+    provider: productImageProvider,
+    assets,
+    now,
+    onApplied: () => catalogCache.delete("products"),
+  };
+  const {
+    registerProductImageWorker,
+    registerProductImageApi,
+  } = require("./lib/product-image-routes.cjs");
+  registerProductImageWorker(app, photoOptions, productImageWorkerToken);
   app.use("/api", (req, res, next) => {
     res.set("Cache-Control", "private, no-store");
     next();
@@ -157,6 +203,7 @@ function createApp({
     }
   });
   registerOrderMailApi(app, orderMailOptions);
+  registerProductImageApi(app, photoOptions);
   const catalogCache = new Map();
   async function catalog(collection) {
     const cached = catalogCache.get(collection);
@@ -240,7 +287,10 @@ function createApp({
       )
       .slice(0, 100);
   }
-  async function history(actor, { storeId, status, cursor, limit = 50, drafts } = {}) {
+  async function history(
+    actor,
+    { storeId, status, cursor, limit = 50, drafts } = {},
+  ) {
     if (storeId) access(actor, storeId);
     if (cursor) {
       const order = await repo.get("orders", cursor);
@@ -271,12 +321,16 @@ function createApp({
       if (page.length < needed) break;
       scanCursor = page[page.length - 1].id;
     }
-    const draftMap = drafts && new Map((await drafts).map(order => [order.id, order]));
-    const visible = await Promise.all(orders.slice(0, limit).map(async order => {
-      if (order.status !== "draft") return { ...order, summary: true };
-      const full = draftMap?.get(order.id) || await repo.get("orders", order.id);
-      return full && !full.deleted ? publicOrder(full) : null;
-    }));
+    const draftMap =
+      drafts && new Map((await drafts).map((order) => [order.id, order]));
+    const visible = await Promise.all(
+      orders.slice(0, limit).map(async (order) => {
+        if (order.status !== "draft") return { ...order, summary: true };
+        const full =
+          draftMap?.get(order.id) || (await repo.get("orders", order.id));
+        return full && !full.deleted ? publicOrder(full) : null;
+      }),
+    );
     return {
       orders: visible.filter(Boolean),
       nextCursor: orders.length > limit ? orders[limit - 1].id : null,
@@ -302,15 +356,24 @@ function createApp({
       storeId === ".." ||
       storeId.includes("/")
     )
-      throw error(400, "invalid_store", "Choose a valid store to refresh drafts.");
+      throw error(
+        400,
+        "invalid_store",
+        "Choose a valid store to refresh drafts.",
+      );
     access(req.actor, storeId);
     const store = await repo.get("stores", storeId);
     if (!store || store.deleted)
       throw error(404, "store_not_found", "This store was not found.");
     const orders = await repo.list("orders", {
-      where: [["storeId", "==", storeId], ["status", "==", "draft"]],
+      where: [
+        ["storeId", "==", storeId],
+        ["status", "==", "draft"],
+      ],
     });
-    res.json({ orders: orders.filter((order) => !order.deleted).map(publicOrder) });
+    res.json({
+      orders: orders.filter((order) => !order.deleted).map(publicOrder),
+    });
   });
 
   app.get("/api/state", async (req, res) => {
@@ -324,7 +387,9 @@ function createApp({
         "upgrade_in_progress",
         "The app upgrade is being completed. Your existing records are protected. Please try again shortly.",
       );
-    const drafts = scoped("orders", actor, { where: [["status", "==", "draft"]] });
+    const drafts = scoped("orders", actor, {
+      where: [["status", "==", "draft"]],
+    });
     const [
       categories,
       products,
@@ -398,10 +463,14 @@ function createApp({
       categories,
       products,
       stores,
-      orders: [...new Map([
-        ...orderPage.orders.map(order => [order.id, order]),
-        ...allDrafts.filter(order => !order.deleted).map(order => [order.id, publicOrder(order)]),
-      ]).values()],
+      orders: [
+        ...new Map([
+          ...orderPage.orders.map((order) => [order.id, order]),
+          ...allDrafts
+            .filter((order) => !order.deleted)
+            .map((order) => [order.id, publicOrder(order)]),
+        ]).values(),
+      ],
       nextCursor: orderPage.nextCursor,
       inventory,
       ledger: ledger.map((row) => {
@@ -419,14 +488,16 @@ function createApp({
           !row.userId || row.userId === actor.uid || actor.role === "master",
       ),
       users: actor.role === "master" ? contactUsers.map(safeProfile) : [],
-      legacyProfiles: (actor.role === "master" ? contactLegacy : []).map((p) => {
-        const r = { ...p };
-        delete r.legacy;
-        delete r.passwordHash;
-        delete r.password;
-        delete r.salt;
-        return r;
-      }),
+      legacyProfiles: (actor.role === "master" ? contactLegacy : []).map(
+        (p) => {
+          const r = { ...p };
+          delete r.legacy;
+          delete r.passwordHash;
+          delete r.password;
+          delete r.salt;
+          return r;
+        },
+      ),
       migration,
       audit,
     });
@@ -442,9 +513,11 @@ function createApp({
   );
   app.get("/api/orders/:id", async (req, res) => {
     const order = await repo.get("orders", req.params.id);
-    if (!order) throw error(404, "order_not_found", "This order was not found.");
+    if (!order)
+      throw error(404, "order_not_found", "This order was not found.");
     access(req.actor, order.storeId);
-    if (order.deleted) throw error(404, "order_not_found", "This order was not found.");
+    if (order.deleted)
+      throw error(404, "order_not_found", "This order was not found.");
     res.json({ order: publicOrder(order) });
   });
   app.post("/api/commands", async (req, res) => {
@@ -459,17 +532,36 @@ function createApp({
       );
     const { executeCommand } = require("./lib/domain.cjs");
     const result = await repo.transaction(async (tx) => {
-      const orderId = req.body?.type === "order.submit" && req.body?.payload?.id;
-      const previous = typeof orderId === "string" && orderId && !orderId.includes("/")
-        ? await tx.get("orders", orderId)
-        : null;
+      const orderId =
+        req.body?.type === "order.submit" && req.body?.payload?.id;
+      const previous =
+        typeof orderId === "string" && orderId && !orderId.includes("/")
+          ? await tx.get("orders", orderId)
+          : null;
       const submittedAt = now();
-      const result = await executeCommand(tx, req.actor, req.body, { now: submittedAt, id: randomUUID });
+      const result = await executeCommand(tx, req.actor, req.body, {
+        now: submittedAt,
+        id: randomUUID,
+      });
       if (previous?.status === "draft" && result?.status === "submitted")
-        await require("./lib/order-mail.cjs").queueAutomaticOrderMail(tx, req.actor, result, {
-          now: submittedAt,
-          configured: typeof emailTransport?.sendMail === "function" && !!emailFrom,
-        });
+        await require("./lib/order-mail.cjs").queueAutomaticOrderMail(
+          tx,
+          req.actor,
+          result,
+          {
+            now: submittedAt,
+            configured:
+              typeof emailTransport?.sendMail === "function" && !!emailFrom,
+          },
+        );
+      if (req.body.type === "product.save" && productImageProvider && assets) {
+        const product = await tx.get("products", result.id);
+        await require("./lib/product-images.cjs").queueProductImage(
+          tx,
+          product,
+          { now: submittedAt },
+        );
+      }
       return result;
     });
     try {
@@ -500,7 +592,9 @@ function createApp({
     if (req.body.type === "product.save") catalogCache.delete("products");
     if (req.body.type === "category.save") catalogCache.delete("categories");
     res.json({
-      result: ["order.save", "order.submit", "order.transition"].includes(req.body.type)
+      result: ["order.save", "order.submit", "order.transition"].includes(
+        req.body.type,
+      )
         ? publicOrder(result)
         : result,
     });
@@ -766,7 +860,7 @@ function createApp({
     });
   });
 
-  app.post("/api/assistant/propose", async (req, res) => {
+  async function consumeAiBudget(req) {
     const minute = Math.floor(now() / 60000),
       day = Math.floor(now() / 86400000);
     await repo.transaction(async (tx) => {
@@ -795,6 +889,42 @@ function createApp({
         });
       }
     });
+  }
+  app.post("/api/assistant/chat", async (req, res) => {
+    const module = require("./lib/assistant-chat.cjs");
+    if (
+      !req.body ||
+      Array.isArray(req.body) ||
+      Object.keys(req.body).some(
+        (key) => !["text", "history", "storeId"].includes(key),
+      )
+    )
+      throw error(400, "invalid_chat_request", "Enter a message for Gemini.");
+    const input = module.normalizeInput({
+      text: req.body.text,
+      history: req.body.history,
+    });
+    let store;
+    if (req.body.storeId != null && req.body.storeId !== "") {
+      authorizeStore(req.actor, req.body.storeId);
+      const record = await repo.get("stores", req.body.storeId);
+      if (!record || record.deleted || record.active === false)
+        throw error(404, "store_not_found", "Select an active store.");
+      store = { name: record.name };
+    }
+    await consumeAiBudget(req);
+    res.json(
+      await (chatAssistant || module.chat)(input, {
+        products: await catalog("products"),
+        store,
+        identity: req.identity,
+        headers: req.headers,
+        config,
+      }),
+    );
+  });
+  app.post("/api/assistant/propose", async (req, res) => {
+    await consumeAiBudget(req);
     const products = await repo.list("products");
     const propose = assistant || require("./lib/assistant.cjs").propose;
     res.json(
@@ -931,7 +1061,23 @@ function production() {
       ? createSmtpTransport({ smtpUrl: process.env.SMTP_URL })
       : null;
   config.emailDeliveryConfigured = !!emailTransport;
-  return createApp({ repo, auth, config, assets, emailTransport, emailFrom, orderMailWorkerToken: process.env.ORDER_MAIL_WORKER_TOKEN });
+  const productImageProvider = process.env.PRODUCT_IMAGE_GEMINI_KEY
+    ? require("./lib/product-image-provider.cjs").createProductImageProvider({
+        apiKey: process.env.PRODUCT_IMAGE_GEMINI_KEY,
+        model: firebaseConfig.aiModel || "gemini-3.8-flash",
+      })
+    : null;
+  return createApp({
+    repo,
+    auth,
+    config,
+    assets,
+    emailTransport,
+    emailFrom,
+    orderMailWorkerToken: process.env.ORDER_MAIL_WORKER_TOKEN,
+    productImageProvider,
+    productImageWorkerToken: process.env.PRODUCT_IMAGE_WORKER_TOKEN,
+  });
 }
 if (require.main === module)
   production().listen(process.env.PORT || 8080, () =>

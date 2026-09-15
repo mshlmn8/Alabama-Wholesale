@@ -32,3 +32,9 @@ env:
   - variable: ORDER_MAIL_WORKER_TOKEN
     secret: ORDER_MAIL_WORKER_TOKEN
     availability: [RUNTIME]
+  - variable: PRODUCT_IMAGE_GEMINI_KEY
+    secret: PRODUCT_IMAGE_GEMINI_KEY
+    availability: [RUNTIME]
+  - variable: PRODUCT_IMAGE_WORKER_TOKEN
+    secret: PRODUCT_IMAGE_WORKER_TOKEN
+    availability: [RUNTIME]
