@@ -44,7 +44,13 @@ function historyForRequest(messages) {
  * isCurrent compares both the session generation and selected store.
  * Call reset at every identity change, including signing back into the same UID.
  */
-export function createGeminiChat({ request, getScope, isCurrent }) {
+export function createGeminiChat({
+  request,
+  getScope,
+  isCurrent,
+  canAddFromPhoto = () => false,
+  onAddFromPhoto,
+}) {
   let conversationScope = null;
   let messages = [];
   let composerValue = "";
@@ -376,7 +382,21 @@ export function createGeminiChat({ request, getScope, isCurrent }) {
     });
     footnote.append(sessionNote, clear);
     footer.append(responseState, form, footnote);
-    shell.append(header, transcript, footer);
+    const catalogAction =
+      canAddFromPhoto() && onAddFromPhoto
+        ? node("button", "gemini-catalog-photo", "Add product from photo")
+        : null;
+    if (catalogAction) {
+      catalogAction.type = "button";
+      catalogAction.addEventListener("click", () => {
+        if (!current(scope) || !canAddFromPhoto()) return;
+        close();
+        onAddFromPhoto();
+      });
+    }
+    shell.append(header);
+    if (catalogAction) shell.append(catalogAction);
+    shell.append(transcript, footer);
     dialog.append(shell);
     elements = {
       dialog,

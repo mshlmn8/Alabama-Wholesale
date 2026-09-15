@@ -61,6 +61,15 @@ body:has(dialog.gemini-chat[open]) {
   height: 100%;
   min-width: 0;
 }
+.gemini-chat-shell:has(> .gemini-catalog-photo) {
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+.gemini-catalog-photo {
+  margin: 0 16px 8px;
+  min-height: 44px;
+  color: var(--accent-ink);
+  background: var(--goldwash);
+}
 
 .gemini-chat-header {
   display: flex;

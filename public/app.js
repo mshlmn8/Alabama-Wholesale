@@ -3,6 +3,8 @@ import { openDeviceStorage, createDeviceStorage } from "./device-storage.js";
 import { createStorageRecovery } from "./storage-recovery.js";
 import * as firebase from "./firebase.js";
 import { createProductPhotos } from "./product-photos.js";
+import { createCatalogPhoto } from "./catalog-photo.js";
+import { preparePhotoProduct } from "./catalog-photo-edit.js";
 import { createGeminiChat } from "./gemini-chat.js";
 import { createDraftSync } from "./draft-sync.js";
 import { createStorePicker } from "./store-picker.js";
@@ -2082,6 +2084,9 @@ function renderCatalog() {
       master()
         ? button("Add product", () => showProductEditor(), "", "plus")
         : null,
+      master()
+        ? button("Add from photo", () => catalogPhoto.open(), "", "spark")
+        : null,
       scanButton,
       button("Draft with AI", showAssistant, "primary", "spark"),
     ]),
@@ -2278,7 +2283,7 @@ function renderProductCard(product, fav) {
         "p",
         { class: "product-meta" },
         product.variants?.length
-          ? `${product.variants.length} variants`
+          ? `${productVariants(product).length} ${product.standardVariantEnabled ? "options" : "variants"}`
           : "Single product",
         product.packSize ? ` · ${product.packSize} per case` : "",
       ),
@@ -3783,8 +3788,10 @@ function showPricing(store) {
     ),
   );
 }
-function showProductEditor(product = {}) {
+function showProductEditor(product = {}, { photoFile = null } = {}) {
+  if (!master()) throw new Error("Owner access is required to edit products.");
   const fileScope = operationScope();
+  const editorProductId = product.id || uuid();
   const m = modal(
     product.id ? "Edit product" : "Add product",
     "Prices are per individual unit. Case prices use the configured units per case.",
@@ -3792,10 +3799,10 @@ function showProductEditor(product = {}) {
   );
   const name = input("text", product.name || "", {
     required: true,
-    maxlength: 180,
+    maxlength: 300,
   });
-  const sku = input("text", product.sku || product.id || "", {
-    maxlength: 100,
+  const sku = input("text", product.sku ?? "", {
+    maxlength: 200,
   });
   const price = input(
     "number",
@@ -3809,17 +3816,20 @@ function showProductEditor(product = {}) {
   });
   const barcode = input("text", product.barcode || "", {
     inputmode: "numeric",
-    maxlength: 100,
+    maxlength: 200,
   });
   const variants = el("textarea", {
     placeholder: "One variant per line",
     maxlength: 10000,
   });
   variants.value = (product.variants || []).join("\n");
-  const taxable = input("checkbox", "", { checked: !!product.taxable });
+  const taxable = input("checkbox", "", { checked: product.taxable !== false });
+  const currentStatus = product.stockStatus ?? (product.id ? "" : "active");
   const statusField = select(
-    ["active", "low", "out", "discontinued"],
-    product.stockStatus || "active",
+    [...new Set(["active", "low", "out", "discontinued", currentStatus])].map(
+      (value) => [value, value ? titleCase(value) : "Not set"],
+    ),
+    currentStatus,
   );
   const image = input(
     "url",
@@ -3830,6 +3840,45 @@ function showProductEditor(product = {}) {
     accept: "image/jpeg,image/png,image/webp",
     class: "file-input",
   });
+  const usePhoto = photoFile
+    ? input("checkbox", "", {
+        checked: !safeImage(product.image || product.imageUrl),
+      })
+    : null;
+  if (photoFile) {
+    const previewUrl = URL.createObjectURL(photoFile);
+    m.dialog.addEventListener("close", () => URL.revokeObjectURL(previewUrl), {
+      once: true,
+    });
+    append(
+      m.content,
+      notice(
+        "Gemini filled in these details from your photo. Review the name, flavor, barcode and pricing before saving.",
+      ),
+      el(
+        "div",
+        { class: "photo-editor-preview" },
+        el("img", { src: previewUrl, alt: "Product photo being reviewed" }),
+        el(
+          "div",
+          {},
+          el(
+            "label",
+            { class: "check-field" },
+            usePhoto,
+            "Use this photo as product picture",
+          ),
+          el(
+            "p",
+            { class: "small" },
+            product.image || product.imageUrl
+              ? "Your current product picture is kept unless you select this option."
+              : "The picture uploads only when you save the product.",
+          ),
+        ),
+      ),
+    );
+  }
   const categories = el(
     "div",
     { class: "pill-group" },
@@ -3851,7 +3900,7 @@ function showProductEditor(product = {}) {
       { min: 0, step: ".01", placeholder: "Base price" },
     );
     const code = input("text", product.variantBarcodes?.[variant] || "", {
-      maxlength: 100,
+      maxlength: 200,
       placeholder: "Variant barcode",
     });
     variantInputs.set(variant, { price: priceNode, barcode: code });
@@ -3909,7 +3958,12 @@ function showProductEditor(product = {}) {
     button(
       "Save product",
       async () => {
+        if (!scopeCurrent(fileScope) || !master()) throw new SessionChanged();
+        if (!m.dialog.open) return;
         if (!name.value.trim()) throw new Error("Product name is required.");
+        const priceCents = numberCents(price.value, "Product price", {
+          nullable: true,
+        });
         const packSize = pack.value === "" ? null : Number(pack.value);
         if (
           packSize != null &&
@@ -3943,43 +3997,63 @@ function showProductEditor(product = {}) {
           throw new Error(
             "Use an HTTPS image URL or an existing product image path.",
           );
-        let imageUrl = image.value.trim() || null;
-        if (upload.files[0]) {
-          const imageData = await readImageFile(upload.files[0]);
-          if (!scopeCurrent(fileScope)) throw new SessionChanged();
-          const uploaded = await api("/api/assets/upload", {
-            method: "POST",
-            body: { image: imageData },
-          });
-          imageUrl = uploaded.url;
-        }
-        await command("product.save", {
-          ...product,
-          id: product.id || uuid(),
-          name: name.value.trim(),
-          sku: sku.value.trim(),
-          priceCents: numberCents(price.value, "Product price", {
-            nullable: true,
-          }),
-          packSize,
-          barcode: barcode.value.trim(),
-          variants: variantNames,
-          variantPricesCents,
-          variantBarcodes,
-          categoryIds: [...categories.querySelectorAll("input:checked")].map(
-            (node) => node.value,
-          ),
-          taxable: taxable.checked,
-          stockStatus: statusField.value,
-          image: imageUrl,
-          expectedVersion: product.version || 0,
+        const controls = [
+          ...m.content.querySelectorAll("input,select,textarea"),
+        ];
+        const disabledBeforeSave = controls.map((control) => control.disabled);
+        controls.forEach((control) => {
+          control.disabled = true;
         });
-        m.close();
-        toast(
-          imageUrl
-            ? "Product saved."
-            : "Product saved. Missing photos are checked automatically; see Workspace → Product photos.",
-        );
+        try {
+          let imageUrl = image.value.trim() || null;
+          const selectedPhoto =
+            upload.files[0] || (usePhoto?.checked ? photoFile : null);
+          if (selectedPhoto) {
+            const imageData = await readImageFile(selectedPhoto);
+            if (!scopeCurrent(fileScope) || !master())
+              throw new SessionChanged();
+            if (!m.dialog.open) return;
+            const uploaded = await api("/api/assets/upload", {
+              method: "POST",
+              body: { image: imageData },
+            });
+            if (!scopeCurrent(fileScope) || !master())
+              throw new SessionChanged();
+            if (!m.dialog.open) return;
+            imageUrl = uploaded.url;
+          }
+          if (!scopeCurrent(fileScope) || !master()) throw new SessionChanged();
+          if (!m.dialog.open) return;
+          await command("product.save", {
+            ...product,
+            id: editorProductId,
+            name: name.value.trim(),
+            sku: sku.value.trim(),
+            priceCents,
+            packSize,
+            barcode: barcode.value.trim(),
+            variants: variantNames,
+            variantPricesCents,
+            variantBarcodes,
+            categoryIds: [...categories.querySelectorAll("input:checked")].map(
+              (node) => node.value,
+            ),
+            taxable: taxable.checked,
+            stockStatus: statusField.value,
+            image: imageUrl,
+            expectedVersion: product.version || 0,
+          });
+          m.close();
+          toast(
+            imageUrl
+              ? "Product saved."
+              : "Product saved. Missing photos are checked automatically; see Workspace → Product photos.",
+          );
+        } finally {
+          controls.forEach((control, index) => {
+            control.disabled = disabledBeforeSave[index];
+          });
+        }
       },
       "primary",
     ),
@@ -3998,7 +4072,7 @@ function renderInventory() {
     ]),
   );
   const candidates = state.products.flatMap((product) =>
-    (product.variants?.length ? product.variants : [""]).map((variant) => ({
+    productVariants(product).map((variant) => ({
       product,
       variant,
       key: JSON.stringify([product.id, variant]),
@@ -6589,6 +6663,26 @@ const geminiChat = createGeminiChat({
     storeName: state?.stores?.find((s) => s.id === storeId)?.name || "",
   }),
   isCurrent: (scope) => scopeCurrent(scope) && scope.storeId === storeId,
+  canAddFromPhoto: () => master(),
+  onAddFromPhoto: () => catalogPhoto.open(),
+});
+const catalogPhoto = createCatalogPhoto({
+  request: api,
+  getScope: operationScope,
+  isCurrent: (scope) => scopeCurrent(scope) && master(),
+  getProducts: () => state?.products || [],
+  readImageFile,
+  onReview: ({ productId, details, file }, close) => {
+    if (!master())
+      throw new Error("Owner access is required to edit products.");
+    const product = preparePhotoProduct({
+      productId,
+      details,
+      products: state.products,
+    });
+    close();
+    showProductEditor(product, { photoFile: file });
+  },
 });
 const productPhotos = createProductPhotos({
   request: api,
@@ -6601,6 +6695,7 @@ async function onIdentity(user) {
   storePicker?.dispose();
   storePicker = null;
   geminiChat.reset();
+  catalogPhoto.reset();
   productPhotos.reset();
   deviceStorageRecovery?.dispose();
   deviceStorageRecovery = null;

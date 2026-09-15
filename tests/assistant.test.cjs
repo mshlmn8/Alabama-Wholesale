@@ -129,3 +129,18 @@ test('empty or excessively large catalog fails honestly without silent truncatio
   await assert.rejects(() => propose({ text: 'hello' }, { ...context, products: Array.from({ length: LIMITS.products + 1 }, (_, n) => ({ id: `p${n}`, name: 'Product', variants: [] })) }), e => e.code === 'catalog_too_large');
   assert.equal(calls, 0);
 });
+
+
+test('order assistant preserves explicit Standard choices after a product gains flavors', async () => {
+  const mixed = products.map(p=>p.id==='water'?{...p,standardVariantEnabled:true}:p);
+  const requested=output([line({variant:''}),line({variant:'Still'})]);
+  assert.deepEqual(validateProposal(requested,mixed).lines,requested.lines);
+  assert.deepEqual(validateProposal(output([line({variant:''})]),products).lines,[]);
+  let body;
+  const propose=createProposer({fetchImpl:async(_url,options)=>{body=JSON.parse(options.body);return response(output([line({variant:''})]));}});
+  const result=await propose({text:'Two Standard waters, each'},{...context,products:mixed});
+  const catalog=JSON.parse(body.contents[0].parts.at(-1).text).catalog;
+  assert.equal(catalog.find(p=>p.id==='water').standardVariantEnabled,true);
+  assert.match(body.systemInstruction.parts[0].text,/standardVariantEnabled/);
+  assert.deepEqual(result.lines,[line({variant:''})]);
+});

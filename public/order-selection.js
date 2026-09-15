@@ -1,5 +1,8 @@
 export function productVariants(product) {
-  return product.variants?.length ? product.variants : [""];
+  if (!product.variants?.length) return [""];
+  return product.standardVariantEnabled === true
+    ? ["", ...product.variants]
+    : product.variants;
 }
 
 // Validate every row before the caller changes the draft. Zero/blank rows are omitted.

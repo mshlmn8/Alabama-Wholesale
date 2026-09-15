@@ -448,3 +448,26 @@ test("deadline covers provider headers and body even if fetch ignores abort", as
     errorIs("assistant_timeout", 504),
   );
 });
+
+test("chat context distinguishes preserved Standard choices and describes reviewed photo entry", async () => {
+  let body;
+  const chat = createChat({
+    fetchImpl: async (_url, options) => {
+      body = JSON.parse(options.body);
+      return answer("Review the choices in Catalog.");
+    },
+  });
+  await chat(
+    { text: "Water", history: [] },
+    {
+      ...context,
+      products: products.map((p) =>
+        p.id === "water" ? { ...p, standardVariantEnabled: true } : p,
+      ),
+    },
+  );
+  const serialized = JSON.stringify(body.contents);
+  assert.match(serialized, /standardVariantEnabled/);
+  assert.match(body.systemInstruction.parts[0].text, /Add product from photo/);
+  assert.match(body.systemInstruction.parts[0].text, /review/i);
+});
