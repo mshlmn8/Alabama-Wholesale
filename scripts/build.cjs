@@ -15,6 +15,7 @@ for (const file of [
   "public/storage.js",
   "public/session.js",
   "public/draft-sync.js",
+  "public/order-downloads.js",
   "public/view-helpers.js",
   "public/sw.js",
 ])

@@ -1,4 +1,4 @@
-const VERSION = "aw-v2-20260914-4";
+const VERSION = "aw-v2-20260914-5";
 const SHELL = [
   "/",
   "/app.js",
@@ -6,6 +6,7 @@ const SHELL = [
   "/storage.js",
   "/session.js",
   "/draft-sync.js",
+  "/order-downloads.js",
   "/view-helpers.js",
   "/firebase.js",
   "/firebase-config.json",
