@@ -73,19 +73,35 @@ test("multiword search matches across product and flavor tokens with stable ties
 test("catalog layout accepts only supported device column and density choices", async () => {
   const { normalizeCatalogLayout } = await helpers;
   assert.deepEqual(normalizeCatalogLayout(null, 2), {
+    view: "list",
     columns: 2,
     compact: true,
   });
   assert.deepEqual(normalizeCatalogLayout({ columns: 5, compact: false }, 4), {
+    view: "list",
     columns: 5,
     compact: false,
   });
   assert.deepEqual(normalizeCatalogLayout({ columns: 99, compact: true }, 4), {
+    view: "list",
     columns: 4,
     compact: true,
   });
   assert.deepEqual(normalizeCatalogLayout({ columns: "3" }, 2), {
+    view: "list",
     columns: 3,
     compact: true,
   });
+});
+
+test("catalog view preserves saved grid density while safely defaulting legacy preferences to list", async () => {
+  const { normalizeCatalogLayout } = await helpers;
+  const raw = { columns: 5, compact: false };
+  const list = normalizeCatalogLayout(raw);
+  assert.equal(list.view, "list");
+  const grid = normalizeCatalogLayout({ ...list, view: "grid" });
+  assert.deepEqual(grid, { view: "grid", columns: 5, compact: false });
+  assert.deepEqual(normalizeCatalogLayout({ ...grid, view: "list" }), list);
+  assert.equal(normalizeCatalogLayout({ view: "invalid" }).view, "list");
+  assert.deepEqual(raw, { columns: 5, compact: false });
 });

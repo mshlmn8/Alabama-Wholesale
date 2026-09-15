@@ -247,7 +247,6 @@ function heading(title, description, actions = []) {
     el(
       "div",
       {},
-      el("div", { class: "eyebrow" }, "Alabama Wholesale"),
       el("h1", { id: "page-title", tabindex: -1 }, title),
       el("p", {}, description),
     ),
@@ -1454,14 +1453,14 @@ function render() {
       ? matchMedia("(prefers-color-scheme: dark)").matches
         ? "dark"
         : "light"
-      : preferences().theme || "dark";
+      : preferences().theme || "light";
   document
     .querySelector("meta[name=theme-color]")
     ?.setAttribute(
       "content",
       document.documentElement.dataset.theme === "light"
-        ? "#f5f2ec"
-        : "#10151e",
+        ? "#f3efe5"
+        : "#1b1e19",
     );
   const nav = [
     ["home", "Overview", "home"],
@@ -1516,6 +1515,7 @@ function render() {
   const bar = el(
     "header",
     { class: "topbar" },
+    brand("mobile-brand"),
     el(
       "div",
       { class: "store-switch" },
@@ -1524,22 +1524,25 @@ function render() {
     ),
     el(
       "div",
+      { class: "sync-bar" },
+      el("span", {
+        id: "workspace-sync-dot",
+        class: `sync-dot ${protection.tone}`,
+      }),
+      el("span", { id: "workspace-sync-label" }, protection.label),
+    ),
+    el(
+      "div",
       { class: "top-actions" },
-      el(
-        "div",
-        { class: "sync-bar" },
-        el("span", {
-          id: "workspace-sync-dot",
-          class: `sync-dot ${protection.tone}`,
-        }),
-        el("span", { id: "workspace-sync-label" }, protection.label),
-      ),
       iconButton("Refresh workspace", "refresh", () => refresh()),
       notifications,
       cart,
       iconButton("Toggle light or dark theme", "sun", () => {
         ws.rememberPreferences({
-          theme: preferences().theme === "light" ? "dark" : "light",
+          theme:
+            document.documentElement.dataset.theme === "light"
+              ? "dark"
+              : "light",
         });
         render();
       }),
@@ -1608,18 +1611,17 @@ function render() {
     } catch {}
   }
 }
-function brand() {
+function brand(extraClass = "") {
   return el(
     "div",
-    { class: "brand" },
+    { class: `brand ${extraClass}`.trim() },
     el("img", {
       class: "brand-logo",
       src: "/assets/logo.png",
       alt: "Alabama Wholesale",
-      width: 44,
-      height: 44,
+      width: 1050,
+      height: 370,
     }),
-    el("div", { class: "brand-name" }, "ALABAMA", el("small", {}, "Wholesale")),
   );
 }
 async function signOut() {
@@ -1711,7 +1713,7 @@ function renderHome() {
     "div",
     { class: "stack" },
     heading(
-      "Your wholesale workspace",
+      "Overview",
       store
         ? `${store.name} · ${date(Date.now())}`
         : "Orders, inventory and customer accounts.",
@@ -1752,7 +1754,7 @@ function renderHome() {
         "p",
         {},
         draft?.lines.length
-          ? `${draft.lines.length} lines are saved in your current draft. Review quantities and pricing before submitting.`
+          ? `${draft.lines.length} lines in your current draft. Review quantities and pricing before submitting.`
           : "Start a fresh order, reorder your regulars, and follow every delivery from one place.",
       ),
       el(
@@ -1778,7 +1780,12 @@ function renderHome() {
       "payments",
     ],
     ["Orders in progress", open.length, "Submitted through picking", "orders"],
-    ["Saved drafts", drafts.length, "Available on this device", "build"],
+    [
+      "Working drafts",
+      drafts.length,
+      "Continue your incomplete orders",
+      "build",
+    ],
     staff()
       ? [
           "Stock to review",
@@ -1996,13 +2003,21 @@ function renderCatalog() {
     checked: layout.compact,
     onChange: () => act(updateLayout),
   });
+  const listButton = button("List", () => updateLayout("list"), "", "orders");
+  const gridButton = button("Grid", () => updateLayout("grid"), "", "catalog");
+  const gridOptions = el(
+    "div",
+    { class: "catalog-grid-options catalog-layout-controls" },
+    el("label", { for: "catalog-columns" }, "Columns"),
+    columns,
+    el("label", { class: "check-field" }, compact, "Compact"),
+  );
   const results = el("div", { class: "catalog-results" });
   const root = el(
     "div",
     {
       class: "catalog-page",
-      "data-compact": String(layout.compact),
-      "data-columns": layout.columns,
+      "data-view": layout.view,
     },
     heading("Catalog", `${candidates.length} products`, [
       master()
@@ -2024,10 +2039,18 @@ function renderCatalog() {
       count,
       el(
         "div",
-        { class: "catalog-layout-controls" },
-        el("label", { for: "catalog-columns" }, "Columns"),
-        columns,
-        el("label", { class: "check-field" }, compact, "Compact"),
+        { class: "catalog-presentation-controls" },
+        el(
+          "div",
+          {
+            class: "catalog-view-switch",
+            role: "group",
+            "aria-label": "Catalog view",
+          },
+          listButton,
+          gridButton,
+        ),
+        gridOptions,
       ),
     ),
     el(
@@ -2037,16 +2060,54 @@ function renderCatalog() {
     ),
     results,
   );
-  root.style.setProperty("--catalog-columns", layout.columns);
-  function updateLayout() {
+  if (draft?.lines.length) {
+    const totals = draftTotals();
+    const estimate = totals.missing.length
+      ? "Prices needed"
+      : cash(totals.total);
+    append(
+      root,
+      el(
+        "div",
+        { class: "catalog-order-dock", "aria-label": "Current order summary" },
+        el(
+          "div",
+          { class: "catalog-order-summary" },
+          el("small", {}, "Current order"),
+          el(
+            "strong",
+            {},
+            `${draft.lines.length} line${draft.lines.length === 1 ? "" : "s"}`,
+          ),
+        ),
+        el(
+          "div",
+          { class: "catalog-order-total" },
+          el("small", {}, "Estimated total"),
+          el("strong", {}, estimate),
+        ),
+        button("Review order", () => setView("build"), "primary", "arrow"),
+      ),
+    );
+  }
+  function applyLayout() {
+    const isGrid = layout.view === "grid";
+    root.dataset.view = layout.view;
+    root.dataset.compact = String(isGrid ? layout.compact : true);
+    root.dataset.columns = isGrid ? layout.columns : 1;
+    root.style.setProperty("--catalog-columns", isGrid ? layout.columns : 1);
+    gridOptions.hidden = !isGrid;
+    listButton.setAttribute("aria-pressed", String(!isGrid));
+    gridButton.setAttribute("aria-pressed", String(isGrid));
+  }
+  function updateLayout(nextView = layout.view) {
     if (!scopeCurrent(scope)) throw new SessionChanged();
     layout = normalizeCatalogLayout({
+      view: nextView,
       columns: columns.value,
       compact: compact.checked,
     });
-    root.dataset.compact = String(layout.compact);
-    root.dataset.columns = String(layout.columns);
-    root.style.setProperty("--catalog-columns", layout.columns);
+    applyLayout();
     scope.workspace.rememberPreferences({ catalogLayout: layout });
   }
   function drawResults() {
@@ -2094,6 +2155,7 @@ function renderCatalog() {
         ),
       );
   }
+  applyLayout();
   drawResults();
   return root;
 }
@@ -2112,11 +2174,15 @@ function renderProductCard(product, fav) {
             el(
               "span",
               { class: "no-image", "aria-label": "Image unavailable" },
-              "AW",
+              icon("box"),
             ),
           ),
       })
-    : el("span", { class: "no-image", "aria-label": "No product image" }, "AW");
+    : el(
+        "span",
+        { class: "no-image", "aria-label": "No product image" },
+        icon("box"),
+      );
   const favorite = iconButton(`Favorite ${product.name}`, "star", () =>
     toggleFavorite(product.id),
   );
@@ -2127,10 +2193,23 @@ function renderProductCard(product, fav) {
     variant: "",
     unit: "each",
   });
+  const add = button(
+    "Add",
+    () => showAddProduct(product),
+    "primary product-add",
+    "plus",
+  );
+  add.setAttribute("aria-label", `Add ${product.name} to order`);
+  const edit = master()
+    ? iconButton(`Edit ${product.name}`, "edit", () =>
+        showProductEditor(product),
+      )
+    : null;
+  edit?.classList.add("product-edit");
   return el(
     "article",
     { class: "product-card", "data-product-id": product.id },
-    favorite,
+    el("div", { class: "product-tools" }, favorite, edit),
     el("div", { class: "product-image" }, thumbnail),
     el(
       "div",
@@ -2152,15 +2231,8 @@ function renderProductCard(product, fav) {
           { class: `product-price${base == null ? " muted" : ""}` },
           base == null ? "Choose variant / price" : `${cash(base)} / each`,
         ),
-        button("Add to order", () => showAddProduct(product), "primary"),
+        add,
       ),
-      master()
-        ? button(
-            "Edit details",
-            () => showProductEditor(product),
-            "text-button product-edit",
-          )
-        : null,
     ),
     el(
       "button",
@@ -4552,7 +4624,10 @@ function renderMore() {
           "Toggle theme",
           () => {
             ws.rememberPreferences({
-              theme: preferences().theme === "light" ? "dark" : "light",
+              theme:
+                document.documentElement.dataset.theme === "light"
+                  ? "dark"
+                  : "light",
             });
             render();
           },
@@ -6242,7 +6317,13 @@ async function onIdentity(user) {
         "Browser storage is unavailable. Your changes cannot be saved on this device.",
       );
     }
-    document.documentElement.dataset.theme = ws.preferences().theme || "dark";
+    const preferredTheme = ws.preferences().theme;
+    document.documentElement.dataset.theme =
+      preferredTheme === "system"
+        ? matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light"
+        : preferredTheme || "light";
     $("app").replaceChildren(
       el(
         "main",
