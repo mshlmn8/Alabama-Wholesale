@@ -1,5 +1,6 @@
 import { Workspace, StorageFailure, createDraft } from "./storage.js";
 import * as firebase from "./firebase.js";
+import { createDraftSync } from "./draft-sync.js";
 import {
   runSessionTask,
   afterConfirmation,
@@ -389,6 +390,10 @@ let config,
   orderFilter = "",
   queueBusy = false,
   loading = false;
+let draftSync = null;
+const draftProtectionCache = new Map();
+const pendingProtectionUpdates = new Set();
+let protectionFrame = null;
 let lastRefresh = 0,
   orderCursor = undefined,
   cameraCleanup = null;
@@ -408,6 +413,323 @@ const unread = () =>
   state?.notifications.filter((n) => !(n.readBy || []).includes(state.me.uid))
     .length || 0;
 const preferences = () => ({ ...state?.me?.preferences, ...ws?.preferences() });
+function saveWorkingDraft(value, workspace = ws) {
+  const result = workspace.saveDraftForCloud(value);
+  if (workspace === ws) {
+    draftProtectionCache.delete(result.draft.id);
+    draftSync?.stage(result.draft);
+  }
+  return result.draft;
+}
+function draftProtection(id) {
+  let status = draftProtectionCache.get(id);
+  if (!status) {
+    if (draftSync) status = draftSync.status(id);
+    else {
+      const current = ws?.getDraft(id);
+      status = {
+        localPersisted: ws?.localDraftStatus(id)?.localPersisted ?? false,
+        cloudConfirmed: current?.syncState === "synced",
+      };
+    }
+    draftProtectionCache.set(id, status);
+  }
+  const { localPersisted, cloudConfirmed } = status;
+  const phase =
+    status?.phase ||
+    (cloudConfirmed ? "saved" : navigator.onLine ? "dirty" : "offline");
+  if (draft?.id === id && hasUnsavedDraftNotes())
+    return {
+      ...status,
+      phase: "error",
+      localPersisted: false,
+      cloudConfirmed: false,
+      label: "Changes not saved · copy or retry your notes",
+      tone: "error",
+    };
+  let label,
+    tone = "warning";
+  if (cloudConfirmed) {
+    label = "Saved online";
+    tone = "";
+  } else if (phase === "conflict") {
+    label = localPersisted
+      ? "Cloud conflict · edits kept on this device"
+      : "Cloud conflict · keep this tab open";
+    tone = "error";
+  } else if (phase === "error" || phase === "blocked") {
+    label = localPersisted
+      ? "Only on this device · cloud save needs attention"
+      : "Not yet protected · keep this tab open";
+    tone = "error";
+  } else if (!navigator.onLine || phase === "offline") {
+    label = localPersisted
+      ? "Only on this device · waiting for connection"
+      : "Not yet protected · keep this tab open";
+    tone = localPersisted ? "warning" : "error";
+  } else {
+    label = localPersisted
+      ? "Saving online… · device copy saved"
+      : "Not yet protected · saving online…";
+  }
+  return { ...status, phase, localPersisted, cloudConfirmed, label, tone };
+}
+function updateDraftMetadata(id) {
+  if (!ws) return;
+  const saved = draftSync?.get(id) || ws.getDraft(id);
+  if (draft?.id === id && saved?.localRevision === draft.localRevision) {
+    draft = {
+      ...draft,
+      version: saved.version,
+      syncState: saved.syncState,
+      lastSyncedAt: saved.lastSyncedAt,
+    };
+  }
+  return saved;
+}
+function updateDraftProtection(id, { aggregate = true } = {}) {
+  if (!ws) return;
+  const saved = updateDraftMetadata(id);
+  const protection = draftProtection(id);
+  if (state && saved && protection.cloudConfirmed) {
+    const confirmed = { ...saved, status: "draft" };
+    const index = state.orders.findIndex((item) => item.id === id);
+    if (index < 0) state.orders.unshift(confirmed);
+    else if (state.orders[index].status === "draft")
+      state.orders[index] = confirmed;
+  }
+  if (draft?.id === id) {
+    if ($("draft-sync-message"))
+      $("draft-sync-message").textContent = protection.label;
+    if ($("draft-sync-dot"))
+      $("draft-sync-dot").className = `sync-dot ${protection.tone}`;
+  }
+  document.querySelectorAll("[data-draft-protection]").forEach((node) => {
+    if (node.dataset.draftProtection === id)
+      node.textContent = protection.label;
+  });
+  if (aggregate) updateWorkspaceProtection();
+}
+function scheduleDraftProtectionUpdate(id, scope) {
+  draftProtectionCache.delete(id);
+  updateDraftMetadata(id);
+  pendingProtectionUpdates.add(id);
+  if (protectionFrame !== null) return;
+  protectionFrame = requestAnimationFrame(() => {
+    protectionFrame = null;
+    const ids = [...pendingProtectionUpdates];
+    pendingProtectionUpdates.clear();
+    if (!scopeCurrent(scope)) return;
+    try {
+      for (const changedId of ids)
+        updateDraftProtection(changedId, { aggregate: false });
+      updateWorkspaceProtection();
+    } catch {
+      // Presentation or device reads cannot undo an online confirmation.
+      const status = draft && draftSync?.status(draft.id);
+      if ($("draft-sync-message"))
+        $("draft-sync-message").textContent = status?.cloudConfirmed
+          ? "Saved online · device copy unavailable"
+          : "Save status unavailable · keep this tab open";
+    }
+  });
+}
+function resetDraftProtection() {
+  draftProtectionCache.clear();
+  pendingProtectionUpdates.clear();
+  if (protectionFrame !== null) cancelAnimationFrame(protectionFrame);
+  protectionFrame = null;
+}
+function workspaceProtection() {
+  const pending = ws?.pending().length || 0;
+  if (pending) return { label: `${pending} action pending`, tone: "warning" };
+  const unconfirmed = unconfirmedDrafts();
+  if (unconfirmed.length) {
+    const unprotected = unconfirmed.some(
+      (item) => !draftProtection(item.id).localPersisted,
+    );
+    return {
+      label: unprotected
+        ? "Draft not yet protected"
+        : navigator.onLine
+          ? `${unconfirmed.length} draft saving`
+          : `${unconfirmed.length} draft on this device`,
+      tone: unprotected ? "error" : "warning",
+    };
+  }
+  return {
+    label: navigator.onLine ? "Saved online" : "Offline",
+    tone: navigator.onLine ? "" : "error",
+  };
+}
+function updateWorkspaceProtection() {
+  if (!$("workspace-sync-label")) return;
+  const protection = workspaceProtection();
+  $("workspace-sync-label").textContent = protection.label;
+  $("workspace-sync-dot").className = `sync-dot ${protection.tone}`;
+}
+function unconfirmedDrafts() {
+  return (ws?.listDrafts() || []).filter(
+    (item) => !draftProtection(item.id).cloudConfirmed,
+  );
+}
+async function flushWorkingDrafts() {
+  if (!draftSync || !navigator.onLine) return;
+  draftProtectionCache.clear();
+  const controller = draftSync;
+  try {
+    await Promise.allSettled(
+      unconfirmedDrafts().map((item) => controller.flush(item.id)),
+    );
+  } catch {
+    /* Sign-out and recovery still need to work if device reads are blocked. */
+  }
+}
+function showDraftProtection(id) {
+  const scope = operationScope();
+  const current = ws.getDraft(id);
+  if (!current) throw new Error("This draft is no longer available.");
+  const protection = draftProtection(id);
+  const m = modal("Draft saving", protection.label);
+  append(
+    m.content,
+    notice(
+      protection.cloudConfirmed
+        ? "This version is saved to your account online and can be reopened on another device."
+        : protection.localPersisted
+          ? "Your current edits are saved on this device. Keep the app connected to finish saving them online."
+          : "The latest edits exist only in this tab until the online save succeeds. Keep it open or export a copy now.",
+      !protection.cloudConfirmed && !protection.localPersisted,
+    ),
+  );
+  if (protection.error)
+    append(
+      m.content,
+      notice(
+        typeof protection.error === "string"
+          ? protection.error
+          : friendlyError(protection.error),
+        true,
+      ),
+    );
+  append(
+    m.footer,
+    button(
+      "Export draft",
+      () =>
+        download(
+          `draft-${id}.json`,
+          JSON.stringify(draftRecoverySnapshot(id), null, 2),
+        ),
+      "",
+      "download",
+    ),
+    button("Close", m.close),
+    button(
+      "Retry online save",
+      async () => {
+        if (!scopeCurrent(scope)) throw new SessionChanged();
+        if (!draftSync)
+          throw new Error("Reconnect to your account before saving online.");
+        await draftSync.retry(id);
+        if (!scopeCurrent(scope)) throw new SessionChanged();
+        m.close();
+        showDraftProtection(id);
+      },
+      "primary",
+    ),
+  );
+  if (["conflict", "blocked", "error"].includes(protection.phase)) {
+    append(
+      m.content,
+      el(
+        "div",
+        { class: "actions mt" },
+        button("Keep edits as a new draft", async () => {
+          if (!scopeCurrent(scope)) throw new SessionChanged();
+          const original = draftRecoverySnapshot(id);
+          const copied = saveWorkingDraft({
+            ...original,
+            id: uuid(),
+            version: 0,
+            localRevision: 0,
+            syncState: "local",
+            createdAt: Date.now(),
+          });
+          draft = copied;
+          storeId = copied.storeId;
+          ws.rememberPreferences({
+            activeDraftIds: {
+              ...preferences().activeDraftIds,
+              [storeId]: copied.id,
+            },
+          });
+          undo = [];
+          redo = [];
+          m.close();
+          setView("build");
+        }),
+        button(
+          "Reload the online draft",
+          async () => {
+            if (
+              !(await confirmAction(
+                "Replace these edits with the online draft?",
+                "Export first if you want to keep your current edits. This replaces this draft’s working copy with the saved online version.",
+                "Load online version",
+              ))
+            )
+              return;
+            if (!scopeCurrent(scope)) throw new SessionChanged();
+            const before = scope.workspace.getDraft(id);
+            const response = await api(`/api/orders/${encodeURIComponent(id)}`);
+            if (!scopeCurrent(scope)) throw new SessionChanged();
+            if (response.order?.status !== "draft")
+              throw new Error(
+                "This order has already been submitted. Keep your edits as a new draft instead.",
+              );
+            const restored = scope.workspace.reloadDraftFromCloud(
+              response.order,
+              before.localRevision,
+            );
+            draftSync.forget(id);
+            draftSync.seed([response.order]);
+            if (draft?.id === id) {
+              draft = restored.draft;
+              undo = [];
+              redo = [];
+            }
+            m.close();
+            render();
+          },
+          "danger",
+        ),
+      ),
+    );
+  }
+}
+function draftRecoverySnapshot(id) {
+  const saved = ws?.getDraft(id);
+  const note = $("draft-notes");
+  return saved &&
+    note?.dataset.draftId === id &&
+    note.value !== (saved.notes || "")
+    ? {
+        ...saved,
+        notes: note.value,
+        syncState: "local",
+        needsReconciliation: true,
+      }
+    : saved;
+}
+function workspaceRecoverySnapshot() {
+  const backup = ws.exportBackup();
+  if (draft && hasUnsavedDraftNotes())
+    backup.drafts = backup.drafts.map((item) =>
+      item.id === draft.id ? draftRecoverySnapshot(item.id) : item,
+    );
+  return backup;
+}
 function operationScope() {
   return {
     generation: identityGeneration,
@@ -428,7 +750,9 @@ async function api(path, { method = "GET", body, raw = false } = {}) {
   return runSessionTask(scope, scopeCurrent, async () => {
     if (!navigator.onLine)
       throw Object.assign(
-        new Error("You are offline. Your drafts remain on this device."),
+        new Error(
+          "You are offline. Check your draft’s save status before closing this tab.",
+        ),
         { code: "NETWORK" },
       );
     const headers = await firebase.credentials(false, scope.identity);
@@ -437,7 +761,7 @@ async function api(path, { method = "GET", body, raw = false } = {}) {
     if (!navigator.onLine)
       throw Object.assign(
         new Error(
-          "You are offline. Your draft and pending actions remain on this device.",
+          "You are offline. Check your draft’s save status before closing this tab.",
         ),
         { code: "NETWORK" },
       );
@@ -457,7 +781,7 @@ async function api(path, { method = "GET", body, raw = false } = {}) {
         new Error(
           error.name === "AbortError"
             ? "The request timed out. Retry uses the same request ID."
-            : "Could not reach the server. Your pending action is saved on this device.",
+            : "Could not reach the server. Check your draft’s save status before closing this tab.",
         ),
         { code: "NETWORK" },
       );
@@ -509,9 +833,12 @@ async function refresh({ renderPage = true } = {}) {
       state = next;
       state.me = next.me || scope.session;
       resetOrderHistory();
-      scope.workspace.mergeRemoteDrafts(
-        state.orders.filter((order) => order.status === "draft"),
+      const remoteDrafts = state.orders.filter(
+        (order) => order.status === "draft",
       );
+      scope.workspace.mergeRemoteDrafts(remoteDrafts);
+      draftProtectionCache.clear();
+      draftSync?.seed(remoteDrafts);
       if (!state.stores.some((store) => store.id === storeId))
         storeId = state.stores[0]?.id || "";
       const prefs = preferences();
@@ -542,6 +869,8 @@ async function sendEntry(entry) {
         }
         if (entry.command.type === "order.submit") {
           scope.workspace.removeDraft(entry.command.payload.id);
+          draftSync?.forget(entry.command.payload.id);
+          draftProtectionCache.delete(entry.command.payload.id);
           if (draft?.id === entry.command.payload.id) draft = null;
         }
         scope.workspace.acknowledge(entry.command.id);
@@ -578,7 +907,7 @@ async function command(type, payload, metadata = {}) {
   const scope = operationScope();
   if (scope.workspace.pending().length)
     throw new Error(
-      "Resolve the pending action in Sync center before starting another server action. Your other drafts can still be edited locally.",
+      "Resolve the pending action in Sync center before starting another server action. Your other drafts can still be edited and saved online.",
     );
   const cmd = { id: uuid(), type, payload };
   const entry = scope.workspace.enqueue(cmd, metadata);
@@ -627,7 +956,7 @@ function changeStore(id) {
 function beginDraft() {
   if (!storeId)
     throw new Error("Add or select a store before starting an order.");
-  draft = ws.saveDraft(createDraft(storeId));
+  draft = saveWorkingDraft(createDraft(storeId));
   const active = { ...preferences().activeDraftIds, [storeId]: draft.id };
   ws.rememberPreferences({ activeDraftIds: active });
   undo = [];
@@ -641,12 +970,13 @@ function editDraft(change, { renderPage = true } = {}) {
   change(next);
   let saved;
   try {
-    saved = ws.saveDraft(next);
+    saved = saveWorkingDraft(next);
   } catch (error) {
     if ($("draft-sync-message"))
       $("draft-sync-message").textContent =
         "Changes not saved. Retry the edit before leaving.";
     if ($("draft-sync-dot")) $("draft-sync-dot").className = "sync-dot error";
+    updateDraftProtection(draft.id);
     announce("Changes not saved. Retry the edit before leaving.");
     throw error;
   }
@@ -655,14 +985,14 @@ function editDraft(change, { renderPage = true } = {}) {
   redo = [];
   draft = saved;
   if (renderPage) render();
-  announce("Draft saved on this device.");
+  announce(draftProtection(draft.id).label);
 }
 function undoDraft(forward = false) {
   const source = forward ? redo : undo,
     target = forward ? undo : redo;
   if (!source.length) return;
   const next = source[source.length - 1];
-  const saved = ws.saveDraft({
+  const saved = saveWorkingDraft({
     ...next,
     localRevision: draft.localRevision,
     version: draft.version,
@@ -700,8 +1030,14 @@ function newDraftFromOrder(order) {
 }
 async function syncDraft(target = draft) {
   const scope = operationScope();
-  if (!target?.lines.length)
-    throw new Error("Add at least one product to save this order.");
+  const controller = draftSync;
+  if (!target) throw new Error("Start a draft before saving it.");
+  if (draft?.id === target.id && hasUnsavedDraftNotes())
+    throw new Error(
+      "Your visible notes have not been saved. Copy or retry them before continuing.",
+    );
+  if (!controller || !navigator.onLine)
+    throw new Error("Reconnect before saving this draft online.");
   let sent = clone(target);
   if (
     (sent.legacy?.requiresReview || sent.migrationBlocked) &&
@@ -714,38 +1050,28 @@ async function syncDraft(target = draft) {
         "I reviewed this draft",
       ))
     )
-      throw new Error("Review the recovered draft before syncing.");
+      throw new Error("Review the recovered draft before continuing.");
     if (!scopeCurrent(scope)) throw new SessionChanged();
-    sent = scope.workspace.saveDraft({
-      ...sent,
-      acknowledgeLegacyReview: true,
-    });
+    sent = saveWorkingDraft({ ...sent, acknowledgeLegacyReview: true });
     if (draft?.id === sent.id) draft = sent;
   }
-  if (sent.syncState !== "synced")
-    await command(
-      "order.save",
-      {
-        id: sent.id,
-        storeId: sent.storeId,
-        lines: sent.lines,
-        notes: sent.notes,
-        expectedVersion: sent.version || 0,
-        ...(sent.acknowledgeLegacyReview
-          ? { acknowledgeLegacyReview: true }
-          : {}),
-      },
-      { localRevision: sent.localRevision },
-    );
+  const confirmed = await controller.flush(sent.id);
   if (!scopeCurrent(scope)) throw new SessionChanged();
   const saved = scope.workspace.getDraft(sent.id);
-  if (saved.localRevision !== sent.localRevision)
+  if (!saved || saved.localRevision !== sent.localRevision)
     throw new Error(
-      "This draft changed while it was syncing. Review the updated draft before submitting.",
+      "This draft changed while saving online. Review the updated draft before submitting.",
     );
-  if (draft?.id === sent.id) draft = saved;
-  return saved;
+  if (!controller.status(sent.id).cloudConfirmed)
+    throw new Error(
+      "The latest draft has not been confirmed online yet. Retry its save before submitting.",
+    );
+  const result = { ...saved, version: confirmed.version };
+  if (draft?.id === sent.id) draft = result;
+  updateDraftProtection(sent.id);
+  return result;
 }
+
 function linePrice(line, store = currentStore()) {
   const p = productById(line.productId);
   if (!p) return null;
@@ -876,6 +1202,7 @@ function render() {
   const cart = iconButton("Open current order", "cart", () => setView("build"));
   if (draft?.lines.length)
     append(cart, el("span", { class: "badge-count" }, draft.lines.length));
+  const protection = workspaceProtection();
   const pending = ws.pending().length;
   const bar = el(
     "header",
@@ -893,13 +1220,10 @@ function render() {
         "div",
         { class: "sync-bar" },
         el("span", {
-          class: `sync-dot${pending ? " warning" : !navigator.onLine ? " error" : ""}`,
+          id: "workspace-sync-dot",
+          class: `sync-dot ${protection.tone}`,
         }),
-        pending
-          ? `${pending} action pending`
-          : navigator.onLine
-            ? "Connected"
-            : "Offline",
+        el("span", { id: "workspace-sync-label" }, protection.label),
       ),
       iconButton("Refresh workspace", "refresh", () => refresh()),
       notifications,
@@ -919,7 +1243,7 @@ function render() {
     append(
       main,
       notice(
-        "You’re offline. Draft edits stay on this device. Reconnect to sync or submit.",
+        "You’re offline. Check each draft’s save status and keep this tab open if it is not yet protected. Saving online resumes when connected.",
       ),
     );
   if (pending)
@@ -990,15 +1314,70 @@ function brand() {
   );
 }
 async function signOut() {
-  if (
-    ws?.pending().length &&
-    !(await confirmAction(
-      "Sign out with pending actions?",
-      "Pending actions remain on this device for this account. Sign back in here to finish them.",
-      "Sign out",
-    ))
-  )
-    return;
+  const scope = operationScope();
+  let timeout;
+  await Promise.race([
+    flushWorkingDrafts(),
+    new Promise((resolve) => {
+      timeout = setTimeout(resolve, 6000);
+    }),
+  ]);
+  clearTimeout(timeout);
+  if (!scopeCurrent(scope)) throw new SessionChanged();
+  draftProtectionCache.clear();
+  let needsWarning = hasUnsavedDraftNotes(),
+    unreadable = false;
+  try {
+    needsWarning ||= unconfirmedDrafts().length > 0 || ws?.pending().length > 0;
+  } catch {
+    needsWarning = true;
+    unreadable = true;
+  }
+  if (needsWarning) {
+    const leave = await new Promise((resolve) => {
+      const m = modal(
+        "Some work is not saved online",
+        "Export a copy or keep this tab open to finish saving.",
+      );
+      let approved = false;
+      append(
+        m.content,
+        notice(
+          "Drafts saved only in this tab will be lost when you sign out. Drafts saved on this device remain here, but will not be available on another device until saved online.",
+          true,
+        ),
+      );
+      append(
+        m.footer,
+        button(
+          "Export drafts",
+          () =>
+            unreadable
+              ? exportDeviceWorkspace(scope.identity)
+              : download(
+                  "alabama-draft-recovery.json",
+                  JSON.stringify(workspaceRecoverySnapshot(), null, 2),
+                ),
+          "",
+          "download",
+        ),
+        button("Keep saving", m.close, "primary"),
+        button(
+          "Sign out anyway",
+          () => {
+            approved = true;
+            m.close();
+          },
+          "danger",
+        ),
+      );
+      m.dialog.addEventListener("close", () => resolve(approved), {
+        once: true,
+      });
+    });
+    if (!leave) return;
+  }
+  if (!scopeCurrent(scope)) throw new SessionChanged();
   await firebase.logout();
 }
 
@@ -1554,7 +1933,7 @@ function renderBuilder() {
               draft?.lines.length &&
               !(await confirmAction(
                 "Start a new draft?",
-                "Your current draft stays saved on this device. You can reopen it below.",
+                "Your current draft stays in this workspace. Check its save status before closing the app.",
                 "Start new",
               ))
             )
@@ -1688,37 +2067,50 @@ function renderBuilder() {
           },
           { renderPage: false },
         );
-        draftSyncDot.className = "sync-dot warning";
-        draftSyncMessage.textContent = "Draft saved on this device";
-        draftStatus.querySelectorAll("button")[0].disabled = !undo.length;
-        draftStatus.querySelectorAll("button")[1].disabled = !redo.length;
+        updateDraftProtection(draft.id);
+        draftStatus.querySelectorAll(
+          "[data-draft-history] button",
+        )[0].disabled = !undo.length;
+        draftStatus.querySelectorAll(
+          "[data-draft-history] button",
+        )[1].disabled = !redo.length;
       }),
   });
   note.value = draft.notes || "";
   const draftSyncDot = el("span", {
     id: "draft-sync-dot",
-    class: `sync-dot${draft.syncState === "synced" ? "" : " warning"}`,
+    class: `sync-dot ${draftProtection(draft.id).tone}`,
   });
   const draftSyncMessage = el(
     "span",
     { id: "draft-sync-message" },
-    draft.syncState === "synced"
-      ? `Synced ${new Date(draft.lastSyncedAt || draft.updatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
-      : "Draft saved on this device",
+    draftProtection(draft.id).label,
   );
   const draftStatus = el(
     "div",
     { class: "split mb" },
-    el("div", { class: "sync-bar" }, draftSyncDot, draftSyncMessage),
     el(
       "div",
-      { class: "actions" },
+      { class: "sync-bar" },
+      draftSyncDot,
+      draftSyncMessage,
+      button(
+        "Save details",
+        () => showDraftProtection(draft.id),
+        "text-button",
+      ),
+    ),
+    el(
+      "div",
+      { class: "actions", "data-draft-history": "true" },
       button("Undo", () => undoDraft(), "", null),
       button("Redo", () => undoDraft(true), "", null),
     ),
   );
-  draftStatus.querySelectorAll("button")[0].disabled = !undo.length;
-  draftStatus.querySelectorAll("button")[1].disabled = !redo.length;
+  draftStatus.querySelectorAll("[data-draft-history] button")[0].disabled =
+    !undo.length;
+  draftStatus.querySelectorAll("[data-draft-history] button")[1].disabled =
+    !redo.length;
   const summary = el(
     "aside",
     { class: "panel summary-box" },
@@ -1743,9 +2135,9 @@ function renderBuilder() {
       "div",
       { class: "stack mt" },
       button("Review & submit", showSubmit, "primary", "check"),
-      button("Sync draft", async () => {
+      button("Save online now", async () => {
         await syncDraft();
-        toast("Draft confirmed by the server.");
+        toast("Draft saved online.");
       }),
       button("Copy order text", () => copyText(draftText(draft)), "subtle"),
       button(
@@ -1771,13 +2163,26 @@ function renderBuilder() {
           ? lines
           : empty(
               "Add your first product",
-              "Your draft is saved. Choose products from the catalog or start with a note.",
+              "Choose products from the catalog or start with a note. Changes save online automatically when connected.",
               [
                 button("Browse catalog", () => setView("catalog"), "primary"),
                 button("Use Gemini", showAssistant),
               ],
             ),
-        el("div", { class: "panel" }, field("Order notes", note)),
+        el(
+          "div",
+          { class: "panel" },
+          field("Order notes", note),
+          el(
+            "p",
+            {
+              class: "small",
+              "data-draft-protection": draft.id,
+              "aria-live": "polite",
+            },
+            draftProtection(draft.id).label,
+          ),
+        ),
       ),
       summary,
     ),
@@ -1791,7 +2196,7 @@ function renderDraftList(drafts) {
   return el(
     "section",
     { class: "panel mt" },
-    el("h2", {}, "Saved drafts on this device"),
+    el("h2", {}, "Your drafts"),
     el(
       "div",
       { class: "activity-list" },
@@ -1809,8 +2214,8 @@ function renderDraftList(drafts) {
             ),
             el(
               "p",
-              {},
-              `${date(item.updatedAt)} · ${item.syncState === "synced" ? "Synced" : "Local draft"}`,
+              { "data-draft-protection": item.id },
+              draftProtection(item.id).label,
             ),
           ),
           button("Resume", () => {
@@ -1851,6 +2256,10 @@ function totalRows(totals) {
 }
 async function showSubmit() {
   if (!draft?.lines.length) return;
+  if (hasUnsavedDraftNotes())
+    throw new Error(
+      "Your visible notes have not been saved. Copy or retry them before reviewing this order.",
+    );
   const reviewed = clone(draft);
   const totals = draftTotals(reviewed);
   if (totals.missing.length)
@@ -1884,11 +2293,21 @@ async function showSubmit() {
         const submitted = await syncDraft(reviewed);
         const id = submitted.id,
           version = submitted.version;
-        const result = await command("order.submit", {
-          id,
-          expectedVersion: version,
-          expectedTotalCents: totals.total,
-        });
+        const controller = draftSync;
+        controller.pause(id);
+        let result,
+          confirmed = false;
+        try {
+          result = await command("order.submit", {
+            id,
+            expectedVersion: version,
+            expectedTotalCents: totals.total,
+          });
+          confirmed = true;
+          controller.forget(id);
+        } finally {
+          if (!confirmed) controller.unpause(id);
+        }
         m.close();
         setView("orders");
         toast("Order submitted and confirmed.");
@@ -3707,7 +4126,7 @@ function renderMore() {
     ],
     [
       "Workspace backup",
-      "Export or restore drafts saved on this device.",
+      "Export or restore your working drafts.",
       "download",
       showWorkspaceBackup,
     ],
@@ -3827,7 +4246,7 @@ function renderMore() {
 function showSyncCenter() {
   const m = modal(
     "Sync center",
-    "Drafts are saved locally. Actions below need confirmation from the server.",
+    "Drafts save online automatically. Actions below still need confirmation from the server.",
     true,
   );
   const pending = ws.pending();
@@ -3916,7 +4335,7 @@ function showSyncCenter() {
                       syncState: "local",
                     };
                     ws.acknowledge(entry.command.id);
-                    draft = ws.saveDraft(copy);
+                    draft = saveWorkingDraft(copy);
                     storeId = copy.storeId;
                     ws.rememberPreferences({
                       activeDraftIds: {
@@ -3992,6 +4411,10 @@ function showWorkspaceBackup() {
         }
         if (!scopeCurrent(fileScope)) throw new SessionChanged();
         const result = fileScope.workspace.importBackup(data);
+        draftProtectionCache.clear();
+        draftSync?.seed(
+          state?.orders?.filter((order) => order.status === "draft") || [],
+        );
         m.close();
         render();
         toast(
@@ -5195,7 +5618,7 @@ function deviceStorageNotice() {
       el(
         "span",
         {},
-        "You’re signed in. You can browse, but this browser could not save a local copy. Existing drafts and pending actions are preserved. New edits require a successful save.",
+        "This browser could not save a device copy. Draft edits will still try to save online. Keep this tab open until the draft says Saved online, or export a copy. Existing device records are preserved.",
       ),
       el(
         "div",
@@ -5253,6 +5676,9 @@ function updateStorageNotice() {
 }
 function renderWorkspaceFailure(user, error) {
   const storageError = error instanceof StorageFailure;
+  draftSync?.dispose();
+  draftSync = null;
+  resetDraftProtection();
   state = null;
   session = null;
   $("app").replaceChildren(
@@ -5289,7 +5715,7 @@ function renderWorkspaceFailure(user, error) {
           () => onIdentity(firebase.identity()),
           "primary",
         ),
-        button("Sign out", () => firebase.logout()),
+        button("Sign out", signOut),
       ),
     ),
   );
@@ -5346,13 +5772,17 @@ function renderEnrollment(user, error = "") {
       button("I’ve verified / refresh access", async () =>
         onIdentity(await firebase.reloadIdentity()),
       ),
-      button("Sign out", () => firebase.logout()),
+      button("Sign out", signOut),
     ),
   );
   $("app").replaceChildren(content);
 }
 let identityGeneration = 0;
 async function onIdentity(user) {
+  const previousWorkspace = ws?.key === `aw:v2:${user?.uid}` ? ws : null;
+  draftSync?.dispose();
+  draftSync = null;
+  resetDraftProtection();
   const generation = ++identityGeneration;
   cameraCleanup?.();
   document.querySelectorAll("dialog").forEach((dialog) => dialog.close());
@@ -5377,7 +5807,7 @@ async function onIdentity(user) {
   }
   try {
     try {
-      ws = new Workspace(localStorage, user.uid);
+      ws = previousWorkspace || new Workspace(localStorage, user.uid);
     } catch (error) {
       if (error instanceof StorageFailure) throw error;
       throw new StorageFailure(
@@ -5413,6 +5843,30 @@ async function onIdentity(user) {
       return;
     }
     session = result.me;
+    const syncScope = operationScope();
+    draftSync = createDraftSync({
+      workspace: ws,
+      send: (command) =>
+        runSessionTask(syncScope, scopeCurrent, () =>
+          api("/api/commands", { method: "POST", body: command }),
+        ),
+      isCurrent: () => scopeCurrent(syncScope),
+      online: () => navigator.onLine,
+      onChange: (id) => {
+        if (scopeCurrent(syncScope)) {
+          try {
+            scheduleDraftProtectionUpdate(id, syncScope);
+          } catch {
+            // A device read failure cannot undo a confirmed online save.
+            const status = draftSync?.status(id);
+            if (draft?.id === id && $("draft-sync-message"))
+              $("draft-sync-message").textContent = status?.cloudConfirmed
+                ? "Saved online · device copy unavailable"
+                : "Save status unavailable · keep this tab open";
+          }
+        }
+      },
+    });
     storeId = ws.preferences().storeId || "";
     await refresh({ renderPage: false });
     if (generation !== identityGeneration) return;
@@ -5445,6 +5899,9 @@ async function onIdentity(user) {
   }
 }
 function renderOfflineRecovery(user) {
+  draftSync?.dispose();
+  draftSync = null;
+  resetDraftProtection();
   state = null;
   session = null;
   const workspace = ws;
@@ -5464,7 +5921,7 @@ function renderOfflineRecovery(user) {
     brand(),
     heading("Offline draft recovery", user.email || "This device"),
     notice(
-      "The server is unavailable. Only drafts saved for this signed-in account on this device are shown. Prices, permissions and submission require a connection.",
+      "The server is unavailable. Drafts for this account are shown from this device or the current tab. Keep this tab open if a device save fails. Online saving resumes when connected.",
     ),
     field("Saved draft", selectDraft),
     content,
@@ -5478,7 +5935,7 @@ function renderOfflineRecovery(user) {
         ),
       ),
       button("Reconnect", () => onIdentity(firebase.identity()), "primary"),
-      button("Sign out", () => firebase.logout()),
+      button("Sign out", signOut),
     ),
   );
   function draw() {
@@ -5489,7 +5946,7 @@ function renderOfflineRecovery(user) {
       append(
         content,
         empty(
-          "No local drafts",
+          "No drafts available",
           "Connect to the server to open your workspace.",
         ),
       );
@@ -5537,9 +5994,13 @@ function renderOfflineRecovery(user) {
               );
             return { ...line, quantity };
           });
-          workspace.saveDraft({ ...saved, lines, notes: notes.value });
+          saveWorkingDraft({ ...saved, lines, notes: notes.value }, workspace);
           draw();
-          toast("Draft changes saved locally.");
+          toast(
+            draftProtection(saved.id).label,
+            !draftProtection(saved.id).localPersisted &&
+              !draftProtection(saved.id).cloudConfirmed,
+          );
         },
         "primary",
       ),
@@ -5602,12 +6063,23 @@ window.addEventListener("popstate", () => {
   }
 });
 window.addEventListener("online", () => {
+  draftProtectionCache.clear();
   if (state) {
-    render();
-    toast("Connection restored. Review pending actions in Sync center.");
+    draftSync?.resume();
+    if (!hasUnsavedDraftNotes()) render();
+    toast("Connection restored. Drafts are saving online automatically.");
+  } else if (ws && firebase.identity()) {
+    onIdentity(firebase.identity());
   }
 });
-window.addEventListener("offline", () => state && render());
+window.addEventListener("offline", () => {
+  draftProtectionCache.clear();
+  draftSync?.resume();
+  if (state && !hasUnsavedDraftNotes()) render();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushWorkingDrafts();
+});
 function hasUnsavedDraftNotes() {
   const note = $("draft-notes");
   return !!(
@@ -5618,6 +6090,10 @@ function hasUnsavedDraftNotes() {
 }
 window.addEventListener("storage", (event) => {
   if (ws && event.key === ws.key) {
+    draftProtectionCache.clear();
+    draftSync?.seed(
+      state?.orders?.filter((order) => order.status === "draft") || [],
+    );
     toast(
       "This workspace changed in another tab. Reload the draft before editing it.",
       true,
@@ -5627,7 +6103,18 @@ window.addEventListener("storage", (event) => {
   }
 });
 window.addEventListener("beforeunload", (event) => {
-  if (hasUnsavedDraftNotes() || ws?.pending().length) {
+  let unprotected = hasUnsavedDraftNotes();
+  try {
+    unprotected ||= !!(
+      draftSync?.hasUnsaved() ||
+      ws?.pending().length ||
+      (!draftSync &&
+        ws?.listDrafts().some((item) => item.syncState !== "synced"))
+    );
+  } catch {
+    unprotected = true;
+  }
+  if (unprotected) {
     event.preventDefault();
     event.returnValue = "";
   }
@@ -5838,7 +6325,7 @@ async function showLegacyDeviceDraft() {
           .filter(Boolean)
           .join("\n");
         changeStore(legacyStoreId);
-        draft = scope.workspace.saveDraft({
+        draft = saveWorkingDraft({
           ...createDraft(legacyStoreId),
           lines: converted.lines.map((line) => ({ ...line, id: uuid() })),
           notes,

@@ -32,6 +32,8 @@ export class Workspace {
     this.storage = storage;
     this.key = `aw:v2:${key}`;
     this.remoteDrafts = new Map();
+    this.workingDrafts = new Map();
+    this.recoveryOverrides = new Map();
     this.temporaryPreferences = {};
     this.writeWarning = null;
     this.read();
@@ -86,11 +88,41 @@ export class Workspace {
     return {
       warning:
         this.writeWarning ||
-        (remoteDraftCount || preferencesTemporary
+        (remoteDraftCount ||
+        preferencesTemporary ||
+        this.workingDrafts.size ||
+        this.recoveryOverrides.size
           ? "Some cloud drafts or preferences are available only in this session because device storage could not save them. Your existing saved work is preserved."
           : null),
       remoteDraftCount,
       preferencesTemporary,
+    };
+  }
+  durableBase(data, id) {
+    const current = Object.hasOwn(data.drafts, id) ? data.drafts[id] : null;
+    return {
+      exists: !!current,
+      localRevision: current?.localRevision || 0,
+      version: current?.version || 0,
+      fingerprint: current ? JSON.stringify(current) : null,
+    };
+  }
+  workingConflict(data, id) {
+    const entry = this.workingDrafts.get(id);
+    return (
+      !!entry &&
+      JSON.stringify(entry.base) !== JSON.stringify(this.durableBase(data, id))
+    );
+  }
+  localDraftStatus(id) {
+    const data = this.read();
+    this.draftView(data);
+    return {
+      localPersisted:
+        !this.workingDrafts.has(id) &&
+        !this.remoteDrafts.has(id) &&
+        Object.hasOwn(data.drafts, id),
+      conflicted: this.workingConflict(data, id),
     };
   }
   draftView(data) {
@@ -110,6 +142,9 @@ export class Workspace {
       ...Object.fromEntries(
         [...this.remoteDrafts].map(([id, entry]) => [id, entry.draft]),
       ),
+      ...Object.fromEntries(
+        [...this.workingDrafts].map(([id, entry]) => [id, entry.draft]),
+      ),
     };
   }
   getDraft(id) {
@@ -121,45 +156,190 @@ export class Workspace {
       .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
       .map(clone);
   }
-  saveDraft(draft) {
+  prepareDraft(data, draft) {
     if (!validId(draft?.id) || !Array.isArray(draft.lines))
       throw new Error("Invalid draft.");
+    if (this.workingConflict(data, draft.id)) throw new DraftConflict();
+    if (
+      data.queue.some(
+        (entry) =>
+          entry.command.type === "order.submit" &&
+          entry.command.payload.id === draft.id,
+      )
+    )
+      throw new Error(
+        "This draft is being submitted. Wait for confirmation or retry the pending submission before editing it.",
+      );
+    const current = this.draftView(data)[draft.id];
+    if (
+      current &&
+      ((draft.localRevision ?? 0) !== (current.localRevision ?? 0) ||
+        (this.remoteDrafts.has(draft.id) &&
+          !this.workingDrafts.has(draft.id) &&
+          (draft.version || 0) !== (current.version || 0)))
+    )
+      throw new DraftConflict();
+    return {
+      ...clone(draft),
+      localRevision: (current?.localRevision || 0) + 1,
+      syncState: "local",
+      updatedAt: Date.now(),
+    };
+  }
+  saveDraft(draft) {
     const saved = this.mutate((data) => {
-      if (
-        data.queue.some(
-          (entry) =>
-            entry.command.type === "order.submit" &&
-            entry.command.payload.id === draft.id,
-        )
-      )
-        throw new Error(
-          "This draft is being submitted. Wait for confirmation or retry the pending submission before editing it.",
-        );
-      const current = this.draftView(data)[draft.id];
-      if (
-        current &&
-        ((draft.localRevision ?? 0) !== (current.localRevision ?? 0) ||
-          (this.remoteDrafts.has(draft.id) &&
-            (draft.version || 0) !== (current.version || 0)))
-      )
-        throw new DraftConflict();
-      const saved = {
-        ...clone(draft),
-        localRevision: (current?.localRevision || 0) + 1,
-        syncState: "local",
-        updatedAt: Date.now(),
-      };
-      data.drafts[draft.id] = saved;
-      return saved;
+      const next = this.prepareDraft(data, draft);
+      data.drafts[next.id] = next;
+      return next;
     });
-    this.remoteDrafts.delete(draft.id);
+    this.remoteDrafts.delete(saved.id);
+    this.workingDrafts.delete(saved.id);
     return saved;
+  }
+  saveDraftForCloud(draft) {
+    const data = this.read();
+    const saved = this.prepareDraft(data, draft);
+    const base =
+      this.workingDrafts.get(saved.id)?.base ||
+      this.durableBase(data, saved.id);
+    data.drafts[saved.id] = saved;
+    data.revision++;
+    try {
+      this.write(data);
+    } catch (error) {
+      if (!(error instanceof StorageFailure)) throw error;
+      this.workingDrafts.set(saved.id, { draft: saved, base });
+      return { draft: clone(saved), localPersisted: false };
+    }
+    this.remoteDrafts.delete(saved.id);
+    this.workingDrafts.delete(saved.id);
+    return { draft: clone(saved), localPersisted: true };
+  }
+  ackCloudDraft(sent, remote) {
+    if (
+      remote?.id !== sent?.id ||
+      remote.status !== "draft" ||
+      !Number.isSafeInteger(remote.version)
+    )
+      throw new Error("Invalid cloud draft confirmation.");
+    const data = this.read();
+    const current = this.draftView(data)[sent.id];
+    if (!current) return { draft: null, localPersisted: false };
+    if ((current.version || 0) > remote.version)
+      return { draft: clone(current), ...this.localDraftStatus(sent.id) };
+    const same = current.localRevision === sent.localRevision;
+    const updated = {
+      ...clone(current),
+      version: remote.version,
+      syncState: same ? "synced" : "local",
+      lastSyncedAt: Date.now(),
+    };
+    if (same) {
+      if (Object.hasOwn(remote, "legacy"))
+        updated.legacy = clone(remote.legacy);
+      if (Object.hasOwn(remote, "migrationBlocked"))
+        updated.migrationBlocked = remote.migrationBlocked;
+    }
+    const base =
+      this.workingDrafts.get(sent.id)?.base || this.durableBase(data, sent.id);
+    if (this.workingConflict(data, sent.id)) {
+      this.workingDrafts.set(sent.id, { draft: updated, base });
+      return { draft: clone(updated), localPersisted: false };
+    }
+    data.drafts[sent.id] = updated;
+    data.revision++;
+    try {
+      this.write(data);
+    } catch (error) {
+      if (!(error instanceof StorageFailure)) throw error;
+      this.workingDrafts.set(sent.id, { draft: updated, base });
+      return { draft: clone(updated), localPersisted: false };
+    }
+    this.remoteDrafts.delete(sent.id);
+    this.workingDrafts.delete(sent.id);
+    return { draft: clone(updated), localPersisted: true };
+  }
+  reloadDraftFromCloud(remote, expectedLocalRevision) {
+    if (
+      !validId(remote?.id) ||
+      remote.status !== "draft" ||
+      !Array.isArray(remote.lines)
+    )
+      throw new Error("Invalid cloud draft.");
+    const data = this.read(),
+      current = this.draftView(data)[remote.id];
+    if (
+      (current?.localRevision || 0) !== expectedLocalRevision ||
+      this.workingConflict(data, remote.id)
+    )
+      throw new DraftConflict();
+    if (
+      data.queue.some(
+        (entry) =>
+          ["order.save", "order.submit"].includes(entry.command.type) &&
+          entry.command.payload.id === remote.id,
+      )
+    )
+      throw new Error(
+        "Resolve this draft’s pending action in Sync center first.",
+      );
+    const updated = {
+      ...clone(remote),
+      localRevision: (current?.localRevision || 0) + 1,
+      syncState: "synced",
+      lastSyncedAt: Date.now(),
+    };
+    const base = this.durableBase(data, remote.id);
+    data.drafts[remote.id] = updated;
+    data.revision++;
+    try {
+      this.write(data);
+    } catch (error) {
+      if (!(error instanceof StorageFailure)) throw error;
+      this.workingDrafts.set(remote.id, { draft: updated, base });
+      this.remoteDrafts.delete(remote.id);
+      return { draft: clone(updated), localPersisted: false };
+    }
+    this.remoteDrafts.delete(remote.id);
+    this.workingDrafts.delete(remote.id);
+    return { draft: clone(updated), localPersisted: true };
+  }
+  autosaveRecovery() {
+    const records = { ...(this.read().draftAutosave || {}) };
+    for (const [id, record] of this.recoveryOverrides) {
+      if (record === null) delete records[id];
+      else records[id] = clone(record);
+    }
+    return clone(records);
+  }
+  rememberDraftSave(id, record) {
+    if (
+      !validId(id) ||
+      (record !== null &&
+        (record?.command?.type !== "order.save" ||
+          record.command.payload?.id !== id ||
+          record.sentDraft?.id !== id))
+    )
+      throw new Error("Invalid draft save recovery record.");
+    this.recoveryOverrides.set(id, record === null ? null : clone(record));
+    const data = this.read();
+    data.draftAutosave = this.autosaveRecovery();
+    data.revision++;
+    try {
+      this.write(data);
+    } catch (error) {
+      if (!(error instanceof StorageFailure)) throw error;
+      return false;
+    }
+    this.recoveryOverrides.clear();
+    return true;
   }
   removeDraft(id) {
     this.mutate((data) => {
       delete data.drafts[id];
     });
     this.remoteDrafts.delete(id);
+    this.workingDrafts.delete(id);
   }
   markDraftSynced(id, localRevision, remote) {
     this.mutate((data) => {
@@ -176,7 +356,12 @@ export class Workspace {
     const current = this.draftView(data);
     const changes = new Map();
     for (const remote of drafts) {
-      if (remote.status !== "draft" || !validId(remote.id)) continue;
+      if (
+        remote.status !== "draft" ||
+        !validId(remote.id) ||
+        this.workingDrafts.has(remote.id)
+      )
+        continue;
       const local = current[remote.id];
       if (
         !local ||
@@ -284,15 +469,24 @@ export class Workspace {
   retryStorage() {
     const data = this.read();
     this.draftView(data);
+    for (const [id, entry] of this.workingDrafts) {
+      if (this.workingConflict(data, id)) throw new DraftConflict();
+    }
     for (const [id, entry] of this.remoteDrafts)
-      data.drafts[id] = {
-        ...clone(entry.draft),
-        localRevision: entry.localRevision + 1,
-      };
+      if (!this.workingDrafts.has(id))
+        data.drafts[id] = {
+          ...clone(entry.draft),
+          localRevision: entry.localRevision + 1,
+        };
+    for (const [id, entry] of this.workingDrafts)
+      data.drafts[id] = clone(entry.draft);
+    data.draftAutosave = this.autosaveRecovery();
     data.preferences = { ...data.preferences, ...this.temporaryPreferences };
     data.revision++;
     this.write(data);
     this.remoteDrafts.clear();
+    this.workingDrafts.clear();
+    this.recoveryOverrides.clear();
     this.temporaryPreferences = {};
     return this.storageStatus();
   }
@@ -305,6 +499,7 @@ export class Workspace {
       drafts: Object.values(this.draftView(data)).map(clone),
       preferences: clone({ ...data.preferences, ...this.temporaryPreferences }),
       queue: clone(data.queue),
+      draftAutosave: this.autosaveRecovery(),
     };
   }
   importBackup(backup) {
@@ -338,7 +533,7 @@ export class Workspace {
     return this.mutate((data) => {
       let imported = 0;
       for (const draft of checked) {
-        if (!Object.hasOwn(data.drafts, draft.id)) {
+        if (!Object.hasOwn(this.draftView(data), draft.id)) {
           data.drafts[draft.id] = {
             ...draft,
             status: "draft",
