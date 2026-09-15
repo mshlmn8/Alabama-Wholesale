@@ -1,4 +1,4 @@
-const VERSION = "aw-v2-20260914-6";
+const VERSION = "aw-v2-20260914-7";
 const SHELL = [
   "/",
   "/app.js",
@@ -12,6 +12,8 @@ const SHELL = [
   "/firebase-config.json",
   "/manifest.webmanifest",
   "/assets/logo.png",
+  "/assets/app-icon-v2.svg",
+  "/assets/fonts/manrope-latin.woff2",
 ];
 const SDK = "https://www.gstatic.com/firebasejs/12.19.0/";
 const SDK_FILES = [

@@ -1,28 +1,40 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="light">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#141922" />
+    <meta name="theme-color" content="#f3efe5" />
     <meta
       name="description"
       content="Alabama Wholesale — orders, inventory and customer accounts in one place."
     />
     <title>Alabama Wholesale</title>
+    <link
+      rel="preload"
+      href="/assets/fonts/manrope-latin.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
     <link rel="stylesheet" href="/styles.css" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/assets/logo.png" />
-    <link
-      rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23efa83f'/%3E%3Ctext x='32' y='44' text-anchor='middle' font-family='Georgia' font-size='36' fill='%23141922'%3EA%3C/text%3E%3C/svg%3E"
-    />
+    <link rel="icon" href="/assets/logo.png" type="image/png" />
     <script type="module" src="/app.js"></script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
     <div id="app">
       <main id="main" class="boot">
-        <div class="brand-mark" aria-hidden="true">AW</div>
+        <div class="brand">
+          <img
+            class="brand-logo"
+            src="/assets/logo.png"
+            alt="Alabama Wholesale"
+            width="1050"
+            height="370"
+          />
+        </div>
         <h1>Alabama Wholesale</h1>
         <p>Opening your workspace…</p>
       </main>

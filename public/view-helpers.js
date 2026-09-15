@@ -94,6 +94,7 @@ export function rankCatalogProducts(index, query) {
 export function normalizeCatalogLayout(raw, defaultColumns = 2) {
   const columns = Number(raw?.columns);
   return {
+    view: raw?.view === "grid" ? "grid" : "list",
     columns:
       Number.isInteger(columns) && columns >= 1 && columns <= 5
         ? columns
@@ -104,9 +105,9 @@ export function normalizeCatalogLayout(raw, defaultColumns = 2) {
 export function isHistoricalOrder(order) {
   return Boolean(
     order.status === "legacy" ||
-    order.legacy?.needsPriceReview ||
-    order.missingSnapshots ||
-    order.missingPriceSnapshots,
+      order.legacy?.needsPriceReview ||
+      order.missingSnapshots ||
+      order.missingPriceSnapshots,
   );
 }
 export function orderDocumentOptions(order) {

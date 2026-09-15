@@ -1,8 +1,10 @@
 # Mobile ordering guide
 
-Updated September 14, 2026.
+Updated September 15, 2026.
 
-- **Browse and search.** Choose **Columns** from 1–5 and turn **Compact** on or off in Catalog. These choices belong to your account on this device. On a narrow phone screen, four- and five-column tiles open the full product name, options, price and quantity controls when tapped. Exact product names and codes rank first; searching `SS` puts the exact name ahead of related products and excludes incidental matches such as “floss.” Mobile fields avoid unwanted focus zoom; pinch zoom remains available.
+- **Browse and search.** Catalog opens in the compact **List** view. Choose **Grid** to set **Columns** from 1–5 and turn **Compact** on or off. Switching views preserves your grid settings; these choices belong to your account on this device. On a narrow phone screen, four- and five-column tiles open the full product name, options, price and quantity controls when tapped. Exact product names and codes rank first; searching `SS` puts the exact name ahead of related products and excludes incidental matches such as “floss.” The current-order bar opens your working draft for review. Its total is an estimate until submission. Mobile fields avoid unwanted focus zoom; pinch zoom remains available.
+
+- **Appearance.** The Dispatch layout uses orange controls, warm ivory backgrounds, compact typography and the original Alabama Wholesale logo. Light is the default for a new account on a device; your explicit theme preference is retained. Use the sun icon to switch between light and dark.
 
 - **Ask AI.** Select a store, then choose **Ask AI** in Catalog or Build. Type an order, dictate using your keyboard’s microphone, or attach a JPEG, PNG or WebP photo up to 5 MB. Review the proposed products, flavors, units and quantities before adding them. AI suggestions can be wrong or incomplete. This assistant prepares drafts; it does not submit or email an order for you.
 
