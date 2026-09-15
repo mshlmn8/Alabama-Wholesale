@@ -1,0 +1,7 @@
+# Faster order building
+
+Let a product's flavors be selected together with an independent whole-number quantity for each. Zero means unselected; a normal multi-flavor opening starts at zero, while a scanned flavor and a single-variant product start at one. Keep Each/Case and an optional shared line note. Show selected counts and a price subtotal without pretending unpriced items have a known total. Search long flavor lists without clearing selections. Add all chosen lines through one existing draft edit so autosave and Undo cover the entire batch. Reject invalid quantities before changing the draft, and reject stale account/store scopes.
+
+Replace the header's native store selector with an accessible searchable dropdown. Filter only stores already authorized in the workspace. Typing, dismissal, and no-result searches leave the current store unchanged. Selecting a result uses the existing store-change/draft-restoration flow. Support mouse, touch, arrows, Enter and Escape. Dispose document listeners during app renders and identity changes.
+
+Use the existing orange/ivory design and logo, readable wrapping names, 16px mobile inputs and 44px tap targets. Verify the two user scenarios in Chromium and WebKit on phone and desktop widths, including per-store draft restoration, batch Undo/autosave, long names, no-results states, keyboard use and overflow. Run the regression suite, build, dependency audit and CI, then verify the deployed assets and service worker.

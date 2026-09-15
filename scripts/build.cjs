@@ -19,6 +19,8 @@ for (const file of [
   "lib/order-mail.cjs",
   "lib/order-mail-routes.cjs",
   "public/app.js",
+  "public/order-selection.js",
+  "public/store-picker.js",
   "public/gemini-chat.js",
   "public/product-photos.js",
   "public/firebase.js",
@@ -37,6 +39,8 @@ for (const file of [
 for (const file of [
   "public/index.html",
   "public/styles.css",
+  "public/order-selection.css",
+  "public/store-picker.css",
   "config/firebase-web.json",
 ])
   if (!fs.existsSync(path.join(root, file)))

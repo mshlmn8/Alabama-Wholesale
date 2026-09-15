@@ -1,7 +1,11 @@
-const VERSION = "aw-v2-20260915-9";
+const VERSION = "aw-v2-20260915-10";
 const SHELL = [
   "/",
   "/app.js",
+  "/order-selection.js",
+  "/order-selection.css",
+  "/store-picker.js",
+  "/store-picker.css",
   "/gemini-chat.js",
   "/product-photos.js",
   "/gemini-chat.css",
