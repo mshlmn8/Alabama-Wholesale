@@ -1,4 +1,6 @@
 import { Workspace, StorageFailure, createDraft } from "./storage.js";
+import { openDeviceStorage, createDeviceStorage } from "./device-storage.js";
+import { createStorageRecovery } from "./storage-recovery.js";
 import * as firebase from "./firebase.js";
 import { createProductPhotos } from "./product-photos.js";
 import { createGeminiChat } from "./gemini-chat.js";
@@ -400,6 +402,7 @@ let config,
   loading = false;
 let draftSync = null;
 let orderDownloads = null;
+let deviceStorageRecovery = null;
 const draftProtectionCache = new Map();
 const pendingProtectionUpdates = new Set();
 let protectionFrame = null;
@@ -738,10 +741,12 @@ function workspaceProtection() {
   };
 }
 function updateWorkspaceProtection() {
-  if (!$("workspace-sync-label")) return;
-  const protection = workspaceProtection();
-  $("workspace-sync-label").textContent = protection.label;
-  $("workspace-sync-dot").className = `sync-dot ${protection.tone}`;
+  if ($("workspace-sync-label")) {
+    const protection = workspaceProtection();
+    $("workspace-sync-label").textContent = protection.label;
+    $("workspace-sync-dot").className = `sync-dot ${protection.tone}`;
+  }
+  updateStorageNotice();
 }
 function unconfirmedDrafts() {
   return (ws?.listDrafts() || []).filter(
@@ -1165,6 +1170,21 @@ async function sendEntry(entry) {
   const scope = operationScope();
   let result;
   try {
+    // An IndexedDB write is asynchronous. Financial commands must have a
+    // committed device receipt before they are sent, just as localStorage did.
+    await scope.workspace.flushStorage();
+    await scope.workspace.storage.refresh?.();
+    if (!scopeCurrent(scope)) throw new SessionChanged();
+    const queued = scope.workspace
+      .pending()
+      .find((item) => item.command.id === entry.command.id);
+    if (
+      !queued ||
+      JSON.stringify(queued.command) !== JSON.stringify(entry.command)
+    )
+      throw new Error(
+        "This action changed in another tab. Review Sync center before sending it.",
+      );
     result = await runSessionTask(
       scope,
       scopeCurrent,
@@ -1635,6 +1655,7 @@ function render() {
       if (start != null) node.setSelectionRange(start, end);
     } catch {}
   }
+  recoverDeviceStorageAutomatically();
 }
 function brand(extraClass = "") {
   return el(
@@ -1653,7 +1674,7 @@ async function signOut() {
   const scope = operationScope();
   let timeout;
   await Promise.race([
-    flushWorkingDrafts(),
+    Promise.allSettled([flushWorkingDrafts(), ws?.flushStorage()]),
     new Promise((resolve) => {
       timeout = setTimeout(resolve, 6000);
     }),
@@ -6116,13 +6137,19 @@ function exportDeviceWorkspace(user = firebase.identity()) {
   // Export raw account data, including unreadable JSON and pending commands.
   // Never export Firebase credentials or remove existing browser records.
   const key = `aw:v2:${user.uid}`;
-  let raw;
+  let raw, current;
+  if (ws?.key === key) {
+    try {
+      current = ws.exportBackup();
+    } catch {}
+  }
   try {
     raw = localStorage.getItem(key);
   } catch {
-    throw new StorageFailure(
-      "This browser is blocking access to saved data. Allow website storage, then retry the export. Nothing has been cleared.",
-    );
+    if (!current)
+      throw new StorageFailure(
+        "This browser is blocking access to saved data. Allow website storage, then retry the export. Nothing has been cleared.",
+      );
   }
   download(
     `alabama-device-recovery-${new Date().toISOString().slice(0, 10)}.json`,
@@ -6132,6 +6159,7 @@ function exportDeviceWorkspace(user = firebase.identity()) {
         version: 1,
         exportedAt: Date.now(),
         workspace: { key, raw },
+        ...(current ? { currentWorkspace: current } : {}),
       },
       null,
       2,
@@ -6141,27 +6169,47 @@ function exportDeviceWorkspace(user = firebase.identity()) {
 function deviceStorageNotice() {
   const storage = ws?.storageStatus();
   if (!storage?.warning) return null;
+  const conflicted = ws.storage.status?.().conflicted;
+  const databaseUnavailable = ws.storage.databaseUnavailable;
   const unprotected =
     storage.unprotectedDraftCount > 0 || hasUnsavedDraftNotes();
   const content = el(
     "div",
-    { class: "notice small", role: unprotected ? "alert" : "status" },
+    {
+      class: "notice small",
+      role: unprotected ? "alert" : "status",
+      "data-protection": databaseUnavailable
+        ? "unavailable"
+        : conflicted
+          ? "conflict"
+          : unprotected
+            ? "unprotected"
+            : "online",
+    },
     el(
       "div",
       { class: "stack" },
       el(
         "strong",
         {},
-        unprotected
-          ? "Device backup unavailable · check draft save status"
-          : "Device backup unavailable",
+        databaseUnavailable
+          ? "Device database unavailable"
+          : conflicted
+            ? "Device drafts changed in another tab"
+            : unprotected
+              ? "Device backup unavailable · check draft save status"
+              : "Device backup unavailable",
       ),
       el(
         "span",
         {},
-        unprotected
-          ? "Keep this tab open until your draft says Saved online. Check its status if the connection is unavailable."
-          : "Confirmed online drafts remain saved. Local storage is full or blocked; offline edits and queued submissions need a working device backup.",
+        databaseUnavailable
+          ? "Some offline drafts could not be loaded. Online drafts and readable device copies remain available. Keep this tab open for unsaved edits, or export a copy before reopening. Existing records are preserved."
+          : conflicted
+            ? "Export this tab’s drafts before reopening the app to review the saved device copy. Your existing records have been preserved."
+            : unprotected
+              ? "Keep this tab open until your draft says Saved online. Check its status if the connection is unavailable."
+              : "Confirmed online drafts remain saved. Local storage is full or blocked; offline edits and queued submissions need a working device backup.",
       ),
       el(
         "details",
@@ -6177,12 +6225,10 @@ function deviceStorageNotice() {
             ),
           ),
           button("Retry device storage", async () => {
-            const enteredNotes = $("draft-notes")?.value;
-            const retryNotes =
-              draft &&
-              enteredNotes !== undefined &&
-              enteredNotes !== (draft.notes || "");
-            if (retryNotes) {
+            const scope = operationScope(),
+              selectedDraft = draft?.id;
+            const verifyNotesBase = () => {
+              if (!hasUnsavedDraftNotes()) return;
               const latest = ws.getDraft(draft.id);
               if (
                 !latest ||
@@ -6192,17 +6238,21 @@ function deviceStorageNotice() {
                 throw new Error(
                   "This draft changed elsewhere. Copy your unsaved notes, then reopen the saved draft before applying them.",
                 );
-            }
-            ws.retryStorage();
-            if (draft) draft = ws.getDraft(draft.id);
-            if (retryNotes && draft)
+            };
+            verifyNotesBase();
+            await deviceStorageRecovery.attempt({ force: true });
+            if (!scopeCurrent(scope)) throw new SessionChanged();
+            if (draft?.id === selectedDraft && hasUnsavedDraftNotes()) {
+              verifyNotesBase();
+              const enteredNotes = $("draft-notes").value;
               editDraft(
                 (next) => {
                   next.notes = enteredNotes;
                 },
                 { renderPage: false },
               );
-            await refresh();
+            }
+            updateWorkspaceProtection();
             if (!ws.storageStatus().warning)
               toast("Device storage is working again.");
           }),
@@ -6217,12 +6267,99 @@ function updateStorageNotice() {
   const previous = $("device-storage-notice");
   const next = deviceStorageNotice();
   if (previous) {
-    if (next) previous.replaceWith(next);
-    else previous.remove();
+    if (next) {
+      // Autosave must not collapse backup options or move keyboard focus.
+      if (previous.dataset.protection !== next.dataset.protection) {
+        previous.dataset.protection = next.dataset.protection;
+        previous.setAttribute("role", next.getAttribute("role"));
+        previous.querySelector("strong").textContent =
+          next.querySelector("strong").textContent;
+        previous.querySelector(".stack > span").textContent =
+          next.querySelector(".stack > span").textContent;
+      }
+    } else previous.remove();
   } else if (next) $("main")?.prepend(next);
+  recoverDeviceStorageAutomatically();
+}
+function recoverDeviceStorageAutomatically() {
+  if (!state || document.visibilityState === "hidden") return;
+  try {
+    void deviceStorageRecovery?.attempt().catch(() => {
+      // Leave the real warning and all saved records available for manual recovery.
+    });
+  } catch {
+    // A blocked read cannot undo a cloud save or break the active editor.
+  }
+}
+function initializeDeviceStorageRecovery() {
+  const scope = operationScope();
+  deviceStorageRecovery = createStorageRecovery({
+    workspace: scope.workspace,
+    isCurrent: () => scopeCurrent(scope),
+    reclaim: async () => {
+      if (scope.workspace.storage.flush) {
+        await scope.workspace.flushStorage();
+        return;
+      }
+      let adapter;
+      adapter = await createDeviceStorage(
+        scope.workspace.key,
+        JSON.stringify(scope.workspace.persistenceSnapshot()),
+        {
+          onChange: () => {
+            if (ws?.storage === adapter)
+              deviceDatabaseChanged(operationScope());
+          },
+        },
+      );
+      if (!scopeCurrent(scope)) {
+        adapter.dispose();
+        return;
+      }
+      rebaseAfterDeviceWrite(scope.workspace, () =>
+        scope.workspace.adoptStorage(adapter),
+      );
+      await scope.workspace.flushStorage();
+    },
+    retry: async () => {
+      rebaseAfterDeviceWrite(scope.workspace, () =>
+        scope.workspace.retryStorage(),
+      );
+      await scope.workspace.flushStorage();
+    },
+    onRecovered: () => {
+      draftProtectionCache.clear();
+      if (draft) updateDraftProtection(draft.id, { aggregate: false });
+      updateWorkspaceProtection();
+      draftSync?.resume();
+    },
+  });
+}
+function rebaseAfterDeviceWrite(workspace, write) {
+  const before = draft && workspace.getDraft(draft.id);
+  const sameBase =
+    before &&
+    before.localRevision === draft.localRevision &&
+    before.version === draft.version;
+  write();
+  // A cache becoming durable may advance its local revision. Keep that same
+  // editor base without replacing any text the user is currently typing.
+  if (sameBase) draft = workspace.getDraft(draft.id);
+}
+function deviceDatabaseChanged(scope) {
+  if (!scopeCurrent(scope)) return;
+  draftProtectionCache.clear();
+  if (state && !editorIsActive() && restoreActiveDraft() && view === "build") {
+    render();
+    return;
+  }
+  if (draft) updateDraftProtection(draft.id, { aggregate: false });
+  updateWorkspaceProtection();
 }
 function renderWorkspaceFailure(user, error) {
   const storageError = error instanceof StorageFailure;
+  deviceStorageRecovery?.dispose();
+  deviceStorageRecovery = null;
   draftSync?.dispose();
   draftSync = null;
   orderDownloads?.dispose();
@@ -6346,7 +6483,10 @@ const productPhotos = createProductPhotos({
 async function onIdentity(user) {
   geminiChat.reset();
   productPhotos.reset();
+  deviceStorageRecovery?.dispose();
+  deviceStorageRecovery = null;
   const previousWorkspace = ws?.key === `aw:v2:${user?.uid}` ? ws : null;
+  if (!previousWorkspace) ws?.storage.dispose?.();
   draftSync?.dispose();
   draftSync = null;
   orderDownloads?.dispose();
@@ -6377,7 +6517,41 @@ async function onIdentity(user) {
   }
   try {
     try {
-      ws = previousWorkspace || new Workspace(localStorage, user.uid);
+      let adapter = null,
+        databaseUnavailable = false;
+      if (!previousWorkspace) {
+        try {
+          adapter = await openDeviceStorage(`aw:v2:${user.uid}`, {
+            onChange: () => {
+              if (ws?.storage === adapter)
+                deviceDatabaseChanged(operationScope());
+            },
+          });
+        } catch {
+          // Existing localStorage records and online drafts remain readable
+          // when this browser blocks IndexedDB. Do not write the old baseline:
+          // the inaccessible database could contain newer offline edits.
+          databaseUnavailable = true;
+        }
+        if (generation !== identityGeneration) {
+          adapter?.dispose();
+          return;
+        }
+      }
+      const local = databaseUnavailable
+        ? {
+            databaseUnavailable:
+              "The device database could not be checked. Some offline drafts may not be loaded; existing records are preserved.",
+            getItem: (key) => localStorage.getItem(key),
+            setItem: () => {
+              throw new StorageFailure(
+                "The device database is unavailable. Original device records have been preserved.",
+              );
+            },
+          }
+        : localStorage;
+      ws = previousWorkspace || new Workspace(adapter || local, user.uid);
+      initializeDeviceStorageRecovery();
     } catch (error) {
       if (error instanceof StorageFailure) throw error;
       throw new StorageFailure(
@@ -6435,10 +6609,18 @@ async function onIdentity(user) {
     });
     draftSync = createDraftSync({
       workspace: ws,
-      send: (command) =>
-        runSessionTask(syncScope, scopeCurrent, () =>
+      send: async (command) => {
+        try {
+          await syncScope.workspace.flushStorage();
+        } catch (error) {
+          // Cloud autosave can protect an edit when both device stores fail.
+          // A conflicting device revision must be resolved before any send.
+          if (!(error instanceof StorageFailure)) throw error;
+        }
+        return runSessionTask(syncScope, scopeCurrent, () =>
           api("/api/commands", { method: "POST", body: command }),
-        ),
+        );
+      },
       isCurrent: () => scopeCurrent(syncScope),
       online: () => navigator.onLine,
       onChange: (id) => {
@@ -6514,6 +6696,9 @@ function renderOfflineRecovery(user) {
     notice(
       "The server is unavailable. Drafts for this account are shown from this device or the current tab. Keep this tab open if a device save fails. Online saving resumes when connected.",
     ),
+    workspace.storage.databaseUnavailable
+      ? notice(workspace.storage.databaseUnavailable, true)
+      : null,
     field("Saved draft", selectDraft),
     content,
     el(
@@ -6583,6 +6768,33 @@ function renderOfflineRecovery(user) {
               ? ". Enter a positive whole quantity; the last valid quantity is preserved."
               : "")
           : "Not yet protected · keep this tab open and reconnect, or export your workspace.";
+        if (!durable && workspace.storage.flush) {
+          const revision = saved.localRevision;
+          workspace
+            .flushStorage()
+            .then(() => {
+              if (
+                !scopeCurrent(scope) ||
+                !saveStatus.isConnected ||
+                saved.localRevision !== revision
+              )
+                return;
+              if (workspace.localDraftStatus(saved.id).localPersisted)
+                saveStatus.textContent =
+                  "Saved on this device · syncs automatically when connected" +
+                  (invalidQuantity
+                    ? ". Enter a positive whole quantity; the last valid quantity is preserved."
+                    : "");
+            })
+            .catch((error) => {
+              if (
+                scopeCurrent(scope) &&
+                saveStatus.isConnected &&
+                saved.localRevision === revision
+              )
+                saveStatus.textContent = friendlyError(error);
+            });
+        }
       } catch (error) {
         if (error.name === "DraftConflict") {
           // Another tab changed the offline base. Keep this editor as a separate draft.
@@ -6734,9 +6946,14 @@ window.addEventListener("offline", () => {
 });
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") flushWorkingDrafts();
-  else refreshInForeground();
+  else {
+    ws?.storage.refresh?.().catch(() => {});
+    recoverDeviceStorageAutomatically();
+    refreshInForeground();
+  }
 });
 setInterval(refreshInForeground, 30000);
+setInterval(recoverDeviceStorageAutomatically, 30000);
 function hasUnsavedDraftNotes() {
   const note = $("draft-notes");
   return !!(
@@ -6899,6 +7116,7 @@ async function showLegacyDeviceDraft() {
       "The older device draft could not be read. Its storage has not been changed.",
     );
   }
+  if (!scopeCurrent(scope)) throw new SessionChanged();
   if (!original?.lines?.length)
     throw new Error("No older device draft was found in this browser.");
   const legacyStoreId = original.storeId || data?.currentStoreId;
@@ -6934,7 +7152,7 @@ async function showLegacyDeviceDraft() {
   append(
     m.content,
     notice(
-      "The original device storage will be preserved. Review the converted lines, especially any quantities or units marked below.",
+      "The original device copy will be preserved. Review the converted lines, especially any quantities or units marked below.",
     ),
     ...converted.warnings.map((warning) => notice(warning)),
     lineTable(

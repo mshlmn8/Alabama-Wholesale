@@ -74,6 +74,7 @@ export class Workspace {
     return clone(result ?? data);
   }
   write(data) {
+    if (this.storage.status?.().conflicted) throw new DraftConflict();
     try {
       this.storage.setItem(this.key, JSON.stringify(data));
     } catch {
@@ -84,21 +85,44 @@ export class Workspace {
     this.writeWarning = null;
   }
   storageStatus() {
-    const data = this.workingDrafts.size ? this.read() : null;
-    const unprotectedDraftCount = [...this.workingDrafts].filter(
+    const backend = this.storage.status?.();
+    const data = this.workingDrafts.size || backend ? this.read() : null;
+    const workingUnprotectedCount = [...this.workingDrafts].filter(
       ([id, entry]) =>
         entry.draft.syncState !== "synced" || this.workingConflict(data, id),
     ).length;
+    const committed = backend
+      ? JSON.parse(this.storage.committedItem(this.key) || "null")
+      : null;
+    const databaseOnly = backend
+      ? Object.values(data.drafts).filter(
+          (draft) =>
+            !this.workingDrafts.has(draft.id) &&
+            (backend.conflicted ||
+              JSON.stringify(committed?.drafts?.[draft.id]) !==
+                JSON.stringify(draft)),
+        )
+      : [];
+    const unprotectedDraftCount =
+      workingUnprotectedCount +
+      databaseOnly.filter(
+        (draft) => draft.syncState !== "synced" || backend.conflicted,
+      ).length;
     const cloudOnlyDraftCount =
       [...this.remoteDrafts.keys()].filter((id) => !this.workingDrafts.has(id))
         .length +
       this.workingDrafts.size -
-      unprotectedDraftCount;
+      workingUnprotectedCount +
+      databaseOnly.filter(
+        (draft) => draft.syncState === "synced" && !backend.conflicted,
+      ).length;
     const remoteDraftCount = this.remoteDrafts.size;
     const preferencesTemporary =
       Object.keys(this.temporaryPreferences).length > 0;
     return {
       warning:
+        this.storage.databaseUnavailable ||
+        backend?.warning ||
         this.writeWarning ||
         (remoteDraftCount ||
         preferencesTemporary ||
@@ -132,12 +156,21 @@ export class Workspace {
   localDraftStatus(id) {
     const data = this.read();
     this.draftView(data);
+    let committed = true;
+    if (this.storage.committedItem) {
+      const saved = JSON.parse(this.storage.committedItem(this.key) || "null");
+      committed =
+        JSON.stringify(saved?.drafts?.[id]) === JSON.stringify(data.drafts[id]);
+    }
     return {
       localPersisted:
+        committed &&
+        !this.storage.status?.().conflicted &&
         !this.workingDrafts.has(id) &&
         !this.remoteDrafts.has(id) &&
         Object.hasOwn(data.drafts, id),
-      conflicted: this.workingConflict(data, id),
+      conflicted:
+        !!this.storage.status?.().conflicted || this.workingConflict(data, id),
     };
   }
   draftView(data) {
@@ -256,7 +289,10 @@ export class Workspace {
     }
     this.remoteDrafts.delete(saved.id);
     this.workingDrafts.delete(saved.id);
-    return { draft: clone(saved), localPersisted: true };
+    return {
+      draft: clone(saved),
+      localPersisted: this.localDraftStatus(saved.id).localPersisted,
+    };
   }
   ackCloudDraft(sent, remote) {
     if (
@@ -313,7 +349,10 @@ export class Workspace {
     }
     this.remoteDrafts.delete(sent.id);
     this.workingDrafts.delete(sent.id);
-    return { draft: clone(updated), localPersisted: true };
+    return {
+      draft: clone(updated),
+      localPersisted: this.localDraftStatus(updated.id).localPersisted,
+    };
   }
   reloadDraftFromCloud(remote, expectedLocalRevision) {
     if (
@@ -358,7 +397,10 @@ export class Workspace {
     }
     this.remoteDrafts.delete(remote.id);
     this.workingDrafts.delete(remote.id);
-    return { draft: clone(updated), localPersisted: true };
+    return {
+      draft: clone(updated),
+      localPersisted: this.localDraftStatus(updated.id).localPersisted,
+    };
   }
   autosaveRecovery() {
     const records = { ...(this.read().draftAutosave || {}) };
@@ -454,7 +496,10 @@ export class Workspace {
     this.recoveryOverrides.delete(order.id);
     this.retiredDrafts.delete(order.id);
     this.confirmedOrderVersions.set(order.id, order.version);
-    return { retired: true, localPersisted: true };
+    const committed = this.storage.committedItem
+      ? JSON.parse(this.storage.committedItem(this.key) || "null")
+      : null;
+    return { retired: true, localPersisted: !committed?.drafts?.[order.id] };
   }
   markDraftSynced(id, localRevision, remote) {
     this.mutate((data) => {
@@ -584,7 +629,7 @@ export class Workspace {
     this.temporaryPreferences = {};
     return clone(preferences);
   }
-  retryStorage() {
+  persistenceSnapshot() {
     const data = this.read();
     this.draftView(data);
     for (const [id, entry] of this.workingDrafts) {
@@ -602,12 +647,40 @@ export class Workspace {
     data.draftAutosave = this.autosaveRecovery();
     data.preferences = { ...data.preferences, ...this.temporaryPreferences };
     data.revision++;
-    this.write(data);
+    return data;
+  }
+  clearStorageOverlays() {
     this.remoteDrafts.clear();
     this.workingDrafts.clear();
     this.retiredDrafts.clear();
     this.recoveryOverrides.clear();
     this.temporaryPreferences = {};
+  }
+  adoptStorage(storage) {
+    // Capture again after opening the database: typing and cloud confirmations
+    // may have advanced this workspace while that asynchronous operation ran.
+    const data = this.persistenceSnapshot();
+    storage.setItem(this.key, JSON.stringify(data));
+    this.storage = storage;
+    this.writeWarning = null;
+    this.clearStorageOverlays();
+  }
+  async flushStorage() {
+    if (this.storage.databaseUnavailable)
+      throw new StorageFailure(this.storage.databaseUnavailable);
+    try {
+      await this.storage.flush?.();
+    } catch (error) {
+      if (error.code === "DEVICE_STORAGE_CONFLICT") throw new DraftConflict();
+      throw new StorageFailure(
+        "The device database could not save this copy. Keep this tab open until your draft says Saved online, or export a copy.",
+      );
+    }
+  }
+  retryStorage() {
+    const data = this.persistenceSnapshot();
+    this.write(data);
+    this.clearStorageOverlays();
     return this.storageStatus();
   }
   exportBackup() {
