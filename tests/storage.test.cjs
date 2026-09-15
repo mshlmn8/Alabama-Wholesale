@@ -782,3 +782,296 @@ test("finalized orders retain valid invoice and fulfillment documents while draf
     [["historical-copy", "Historical copy"]],
   );
 });
+
+test("explicit cloud staging retains quota-failed edits without claiming device durability", async () => {
+  const { Workspace, StorageFailure } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "cloud-stage");
+  const first = ws.saveDraft({
+    id: "draft",
+    storeId: "shop",
+    lines: [],
+    notes: "old",
+    version: 0,
+  });
+  const original = store.getItem(ws.key);
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  const staged = ws.saveDraftForCloud({ ...first, notes: "new" });
+  assert.equal(staged.localPersisted, false);
+  assert.equal(ws.getDraft("draft").notes, "new");
+  assert.ok(staged.draft.localRevision > first.localRevision);
+  assert.equal(ws.localDraftStatus("draft").localPersisted, false);
+  assert.equal(ws.exportBackup().drafts[0].notes, "new");
+  assert.equal(store.getItem(ws.key), original);
+  assert.throws(
+    () =>
+      ws.enqueue({
+        id: "submit",
+        type: "order.submit",
+        payload: { id: "draft" },
+      }),
+    StorageFailure,
+  );
+  assert.equal(new Workspace(store, "other").getDraft("draft"), null);
+});
+test("cloud acknowledgements stay confirmed under quota and retain newer edits", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "cloud-ack");
+  const initial = ws.saveDraft({
+    id: "draft",
+    storeId: "shop",
+    lines: [],
+    notes: "original",
+    version: 0,
+  });
+  const raw = store.getItem(ws.key);
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  const sent = ws.saveDraftForCloud({ ...initial, notes: "sent" }).draft;
+  const latest = ws.saveDraftForCloud({ ...sent, notes: "newer" }).draft;
+  const ack = ws.ackCloudDraft(sent, { ...sent, status: "draft", version: 1 });
+  assert.equal(ack.draft.notes, "newer");
+  assert.equal(ack.draft.localRevision, latest.localRevision);
+  assert.equal(ack.draft.version, 1);
+  assert.equal(ack.draft.syncState, "local");
+  assert.equal(ack.localPersisted, false);
+  const final = ws.ackCloudDraft(ack.draft, {
+    ...ack.draft,
+    status: "draft",
+    version: 2,
+  });
+  assert.equal(final.draft.syncState, "synced");
+  assert.equal(final.draft.notes, "newer");
+  assert.equal(store.getItem(ws.key), raw);
+});
+test("working drafts preserve another tab edits and refuse to overwrite them during retry", async () => {
+  const { Workspace, DraftConflict } = await load();
+  const store = memory(),
+    originalSet = store.setItem;
+  const a = new Workspace(store, "tabs-cloud"),
+    b = new Workspace(store, "tabs-cloud");
+  const saved = a.saveDraft({
+    id: "draft",
+    lines: [],
+    notes: "first",
+    version: 0,
+  });
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  const working = a.saveDraftForCloud({ ...saved, notes: "A unsaved" }).draft;
+  store.setItem = originalSet;
+  b.saveDraft({ ...saved, notes: "B newer" });
+  const raw = store.getItem(a.key);
+  assert.equal(a.getDraft("draft").notes, "A unsaved");
+  assert.equal(a.localDraftStatus("draft").conflicted, true);
+  assert.throws(
+    () => a.saveDraftForCloud({ ...working, notes: "A retry" }),
+    DraftConflict,
+  );
+  assert.throws(() => a.retryStorage(), DraftConflict);
+  const ack = a.ackCloudDraft(working, {
+    ...working,
+    status: "draft",
+    version: 1,
+  });
+  assert.equal(ack.draft.version, 1);
+  assert.equal(ack.localPersisted, false);
+  assert.equal(store.getItem(a.key), raw);
+});
+test("autosave recovery retains immutable request bodies and tombstones without replaying imports", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "recovery");
+  const recovery = {
+    command: {
+      id: "stable",
+      type: "order.save",
+      payload: { id: "draft", lines: [], notes: "sent", expectedVersion: 0 },
+    },
+    sentDraft: { id: "draft", lines: [], notes: "sent", localRevision: 1 },
+  };
+  ws.rememberDraftSave("draft", recovery);
+  assert.deepEqual(
+    new Workspace(store, "recovery").autosaveRecovery().draft,
+    recovery,
+  );
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  ws.rememberDraftSave("draft", null);
+  assert.deepEqual(ws.autosaveRecovery(), {});
+  assert.deepEqual(ws.exportBackup().draftAutosave, {});
+  assert.deepEqual(
+    new Workspace(store, "recovery").autosaveRecovery().draft,
+    recovery,
+  );
+  const other = new Workspace(memory(), "import");
+  other.importBackup({
+    format: "aw-workspace",
+    version: 1,
+    drafts: [],
+    draftAutosave: { draft: recovery },
+  });
+  assert.deepEqual(other.autosaveRecovery(), {});
+});
+test("retry saves working drafts, exact recovery and preferences without changing queued commands", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    set = store.setItem,
+    ws = new Workspace(store, "retry-working");
+  ws.enqueue({
+    id: "pending",
+    type: "payment.report",
+    payload: { amountCents: 100 },
+  });
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  const staged = ws.saveDraftForCloud({
+    id: "draft",
+    lines: [],
+    notes: "keep",
+    version: 0,
+  }).draft;
+  ws.rememberDraftSave("draft", {
+    command: {
+      id: "retry",
+      type: "order.save",
+      payload: { id: "draft", lines: [], expectedVersion: 0 },
+    },
+    sentDraft: staged,
+  });
+  ws.rememberPreferences({ storeId: "shop" });
+  store.setItem = set;
+  ws.retryStorage();
+  const reloaded = new Workspace(store, "retry-working");
+  assert.equal(reloaded.getDraft("draft").notes, "keep");
+  assert.equal(reloaded.getDraft("draft").localRevision, staged.localRevision);
+  assert.equal(ws.localDraftStatus("draft").localPersisted, true);
+  assert.equal(reloaded.autosaveRecovery().draft.command.id, "retry");
+  assert.equal(reloaded.pending()[0].command.id, "pending");
+  assert.equal(reloaded.preferences().storeId, "shop");
+});
+test("cloud staging cannot change a draft queued for submission", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "submit-block");
+  const draft = ws.saveDraft({ id: "draft", lines: [] });
+  ws.enqueue({ id: "submit", type: "order.submit", payload: { id: "draft" } });
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  assert.throws(
+    () => ws.saveDraftForCloud({ ...draft, notes: "unsafe" }),
+    /being submitted/,
+  );
+  assert.equal(ws.getDraft("draft").notes, undefined);
+});
+
+test("cloud reload is explicit, durable when possible, and cannot erase another tab working copy", async () => {
+  const { Workspace, DraftConflict } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "reload");
+  const local = ws.saveDraft({
+    id: "draft",
+    status: "draft",
+    lines: [],
+    notes: "local",
+    version: 1,
+  });
+  const remote = {
+    id: "draft",
+    status: "draft",
+    lines: [],
+    notes: "online",
+    version: 2,
+  };
+  assert.throws(
+    () => ws.reloadDraftFromCloud(remote, local.localRevision - 1),
+    DraftConflict,
+  );
+  const loaded = ws.reloadDraftFromCloud(remote, local.localRevision);
+  assert.equal(loaded.localPersisted, true);
+  assert.equal(loaded.draft.syncState, "synced");
+  assert.equal(loaded.draft.notes, "online");
+  const before = store.getItem(ws.key);
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  const newer = ws.reloadDraftFromCloud(
+    { ...remote, notes: "new online", version: 3 },
+    loaded.draft.localRevision,
+  );
+  assert.equal(newer.localPersisted, false);
+  assert.equal(ws.getDraft("draft").notes, "new online");
+  assert.equal(store.getItem(ws.key), before);
+});
+test("imports preserve session-only drafts and cloud acknowledgement keeps newer durable fields", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    set = store.setItem,
+    ws = new Workspace(store, "preserve-stage");
+  const initial = ws.saveDraft({
+    id: "draft",
+    status: "draft",
+    lines: [],
+    notes: "sent",
+    version: 0,
+  });
+  const newer = ws.saveDraft({ ...initial, notes: "newer local" });
+  const ack = ws.ackCloudDraft(initial, { ...initial, version: 1 });
+  assert.equal(ack.draft.notes, "newer local");
+  assert.equal(ack.draft.localRevision, newer.localRevision);
+  assert.equal(ack.draft.syncState, "local");
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  ws.saveDraftForCloud({
+    id: "memory",
+    status: "draft",
+    lines: [],
+    notes: "session only",
+    version: 0,
+  });
+  store.setItem = set;
+  const result = ws.importBackup({
+    format: "aw-workspace",
+    version: 1,
+    drafts: [{ id: "memory", lines: [], notes: "old backup" }],
+  });
+  assert.equal(result.skipped, 1);
+  assert.equal(ws.getDraft("memory").notes, "session only");
+});
+
+test("a replaced local draft with reused revision numbers is not overwritten by a working copy", async () => {
+  const { Workspace, DraftConflict } = await load();
+  const store = memory(),
+    set = store.setItem,
+    ws = new Workspace(store, "revision-reuse");
+  const saved = ws.saveDraft({
+    id: "draft",
+    status: "draft",
+    version: 0,
+    lines: [],
+    notes: "original",
+  });
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  ws.saveDraftForCloud({ ...saved, notes: "session copy" });
+  store.setItem = set;
+  const data = JSON.parse(store.getItem(ws.key));
+  data.drafts.draft.notes = "restored from a different backup";
+  store.setItem(ws.key, JSON.stringify(data));
+  assert.equal(ws.localDraftStatus("draft").conflicted, true);
+  assert.throws(() => ws.retryStorage(), DraftConflict);
+  assert.equal(
+    JSON.parse(store.getItem(ws.key)).drafts.draft.notes,
+    "restored from a different backup",
+  );
+});

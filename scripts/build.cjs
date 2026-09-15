@@ -14,6 +14,7 @@ for (const file of [
   "public/firebase.js",
   "public/storage.js",
   "public/session.js",
+  "public/draft-sync.js",
   "public/view-helpers.js",
   "public/sw.js",
 ])
