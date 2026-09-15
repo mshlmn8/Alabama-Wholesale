@@ -2,6 +2,10 @@ import { Workspace, StorageFailure, createDraft } from "./storage.js";
 import * as firebase from "./firebase.js";
 import { createDraftSync } from "./draft-sync.js";
 import {
+  createOrderDownloads,
+  normalizeDeviceCopyOptions,
+} from "./order-downloads.js";
+import {
   runSessionTask,
   afterConfirmation,
   SessionChanged,
@@ -391,6 +395,7 @@ let config,
   queueBusy = false,
   loading = false;
 let draftSync = null;
+let orderDownloads = null;
 const draftProtectionCache = new Map();
 const pendingProtectionUpdates = new Set();
 let protectionFrame = null;
@@ -413,6 +418,172 @@ const unread = () =>
   state?.notifications.filter((n) => !(n.readBy || []).includes(state.me.uid))
     .length || 0;
 const preferences = () => ({ ...state?.me?.preferences, ...ws?.preferences() });
+function deviceCopyOptions() {
+  return normalizeDeviceCopyOptions(ws?.preferences().orderDeviceCopy);
+}
+function deviceCopySettings() {
+  const scope = operationScope();
+  const options = deviceCopyOptions();
+  const enabled = input("checkbox", "", {
+    checked: options.enabled,
+    "data-automatic-order-copy": "true",
+  });
+  const format = select(
+    [
+      ["pdf", "PDF invoice"],
+      ["json", "JSON order archive"],
+      ["both", "PDF and JSON"],
+    ],
+    options.format,
+    { "data-order-copy-format": "true" },
+  );
+  const value = () =>
+    normalizeDeviceCopyOptions({
+      enabled: enabled.checked,
+      format: format.value,
+    });
+  const remember = () =>
+    act(() => {
+      if (!scopeCurrent(scope)) throw new SessionChanged();
+      scope.workspace.rememberPreferences({ orderDeviceCopy: value() });
+      updateStorageNotice();
+    });
+  enabled.addEventListener("change", remember);
+  format.addEventListener("change", remember);
+  return {
+    value,
+    element: el(
+      "section",
+      { class: "panel mt" },
+      el("h3", {}, "Completed-order device copy"),
+      el(
+        "label",
+        { class: "check-field" },
+        enabled,
+        "Automatically download a copy after submitting an order",
+      ),
+      field("Completed-order copy format", format),
+      el(
+        "p",
+        { class: "small" },
+        "For this account on this device. Your browser controls file downloads. Choose PDF to read or print, or JSON for a structured order archive.",
+      ),
+    ),
+  };
+}
+async function orderPdfBlob(order, kind = "invoice", scope = operationScope()) {
+  if (!scopeCurrent(scope)) throw new SessionChanged();
+  const response = await api(
+    `/api/documents/${encodeURIComponent(order.id)}/${kind}`,
+    { raw: true },
+  );
+  if (!scopeCurrent(scope)) throw new SessionChanged();
+  const blob = await response.blob();
+  if (!scopeCurrent(scope)) throw new SessionChanged();
+  return blob;
+}
+function updateOrderCopyPanel(panel, copyStatus = {}) {
+  const phase = copyStatus.phase || "idle";
+  const labels = {
+    idle: "Save a copy of this completed order to this device.",
+    preparing: "Preparing your device copy…",
+    requested: "Download requested. Check your browser’s Downloads.",
+    partial:
+      "Some copies could not be prepared. Your order is still saved online.",
+    error:
+      "Device copy could not be prepared. Your order is still saved online.",
+  };
+  panel.querySelector("[data-copy-message]").textContent =
+    labels[phase] || labels.idle;
+  const error = panel.querySelector("[data-copy-error]");
+  error.textContent = copyStatus.error || "";
+  error.hidden = !copyStatus.error;
+  const action = panel.querySelector("[data-copy-action]");
+  action.disabled = phase === "preparing";
+  action.textContent =
+    phase === "preparing"
+      ? "Preparing…"
+      : ["requested", "partial"].includes(phase)
+        ? "Download again"
+        : phase === "error"
+          ? "Retry device copy"
+          : "Save to device";
+}
+function updateOrderCopyPanels(id, copyStatus) {
+  document.querySelectorAll("[data-order-copy]").forEach((panel) => {
+    if (panel.dataset.orderCopy === id) updateOrderCopyPanel(panel, copyStatus);
+  });
+}
+function orderCopyPanel(order) {
+  const scope = operationScope();
+  const copyStatus = orderDownloads?.status(order.id);
+  const format = select(
+    [
+      ["pdf", "PDF invoice"],
+      ["json", "JSON order archive"],
+      ["both", "PDF and JSON"],
+    ],
+    copyStatus?.phase && copyStatus.phase !== "idle"
+      ? copyStatus.format
+      : deviceCopyOptions().format,
+  );
+  const panel = el(
+    "section",
+    { class: "panel mt", "data-order-copy": order.id },
+    el("h3", {}, "Device copy"),
+    el("p", { "data-copy-message": "true", role: "status" }),
+    el("p", {
+      "data-copy-error": "true",
+      class: "small",
+      role: "alert",
+      hidden: true,
+    }),
+    field("Device copy format", format),
+    button("Save to device", async () => {
+      if (!scopeCurrent(scope)) throw new SessionChanged();
+      if (!orderDownloads)
+        throw new Error("Reconnect before downloading this order.");
+      await orderDownloads.save(order, { enabled: true, format: format.value });
+    }),
+    el(
+      "p",
+      { class: "small" },
+      "Your browser controls the download location. If no file appears, try again and allow downloads. A JSON copy is an archive for review.",
+    ),
+  );
+  panel.querySelector("button").dataset.copyAction = "true";
+  updateOrderCopyPanel(panel, copyStatus);
+  return panel;
+}
+function requestCompletedOrderCopy(entry, result, scope) {
+  if (
+    entry.command.type !== "order.submit" ||
+    !scopeCurrent(scope) ||
+    !orderDownloads
+  )
+    return;
+  const downloader = orderDownloads;
+  // This optional side effect must never re-enter the financial error path.
+  void Promise.resolve()
+    .then(() => {
+      if (!scopeCurrent(scope)) return;
+      const options = normalizeDeviceCopyOptions(
+        entry.metadata?.deviceCopy ||
+          scope.workspace.preferences().orderDeviceCopy,
+      );
+      return downloader.automatic(result.order || result, {
+        requestId: entry.command.id,
+        options,
+      });
+    })
+    .catch(() => {
+      if (scopeCurrent(scope))
+        toast(
+          "Order saved online. Open the order to retry its device copy.",
+          true,
+        );
+    });
+}
 function saveWorkingDraft(value, workspace = ws) {
   const result = workspace.saveDraftForCloud(value);
   if (workspace === ws) {
@@ -851,8 +1022,9 @@ async function refresh({ renderPage = true } = {}) {
 }
 async function sendEntry(entry) {
   const scope = operationScope();
+  let result;
   try {
-    return await runSessionTask(
+    result = await runSessionTask(
       scope,
       scopeCurrent,
       () => api("/api/commands", { method: "POST", body: entry.command }),
@@ -886,6 +1058,8 @@ async function sendEntry(entry) {
     );
     throw error;
   }
+  requestCompletedOrderCopy(entry, result, scope);
+  return result;
 }
 async function flushQueue(manual = false) {
   if (queueBusy || !session || !navigator.onLine) return;
@@ -2271,6 +2445,7 @@ async function showSubmit() {
     `${currentStore()?.name} · ${draft.lines.length} lines`,
     true,
   );
+  const deviceCopy = deviceCopySettings();
   append(
     m.content,
     notice(
@@ -2279,6 +2454,7 @@ async function showSubmit() {
     lineTable(draft.lines, true),
     totalRows(totals),
     draft.notes ? el("p", {}, draft.notes) : null,
+    deviceCopy.element,
   );
   append(
     m.footer,
@@ -2286,6 +2462,7 @@ async function showSubmit() {
     button(
       "Submit order",
       async () => {
+        const copyOptions = deviceCopy.value();
         if (ws.getDraft(reviewed.id)?.localRevision !== reviewed.localRevision)
           throw new Error(
             "This draft changed after the review opened. Close and review the latest version.",
@@ -2298,11 +2475,11 @@ async function showSubmit() {
         let result,
           confirmed = false;
         try {
-          result = await command("order.submit", {
-            id,
-            expectedVersion: version,
-            expectedTotalCents: totals.total,
-          });
+          result = await command(
+            "order.submit",
+            { id, expectedVersion: version, expectedTotalCents: totals.total },
+            { deviceCopy: copyOptions },
+          );
           confirmed = true;
           controller.forget(id);
         } finally {
@@ -2509,6 +2686,9 @@ async function showOrder(order) {
       "div",
       { class: "split" },
       status(order.status),
+      order.status !== "draft"
+        ? el("span", { class: "small" }, "Saved online")
+        : null,
       el(
         "strong",
         { class: "money" },
@@ -2520,6 +2700,11 @@ async function showOrder(order) {
       ),
     ),
   );
+  if (
+    !legacy &&
+    orderDocumentOptions(order).some(([kind]) => kind === "invoice")
+  )
+    append(m.content, orderCopyPanel(order));
   if (!legacy && order.status !== "draft" && order.status !== "cancelled")
     append(
       m.content,
@@ -2648,14 +2833,10 @@ async function showOrder(order) {
       button(
         label,
         async () => {
-          const response = await api(
-            `/api/documents/${encodeURIComponent(order.id)}/${kind}`,
-            { raw: true },
-          );
-          download(
-            `${order.invoiceNumber || order.id}-${kind}.pdf`,
-            await response.blob(),
-          );
+          const scope = operationScope();
+          const blob = await orderPdfBlob(order, kind, scope);
+          if (!scopeCurrent(scope)) throw new SessionChanged();
+          download(`${order.invoiceNumber || order.id}-${kind}.pdf`, blob);
         },
         "",
         "download",
@@ -4372,6 +4553,7 @@ function showWorkspaceBackup() {
   );
   append(
     m.content,
+    deviceCopySettings().element,
     button("Recover older device draft", showLegacyDeviceDraft, "", "refresh"),
   );
   const file = input("file", "", {
@@ -5678,6 +5860,8 @@ function renderWorkspaceFailure(user, error) {
   const storageError = error instanceof StorageFailure;
   draftSync?.dispose();
   draftSync = null;
+  orderDownloads?.dispose();
+  orderDownloads = null;
   resetDraftProtection();
   state = null;
   session = null;
@@ -5782,6 +5966,8 @@ async function onIdentity(user) {
   const previousWorkspace = ws?.key === `aw:v2:${user?.uid}` ? ws : null;
   draftSync?.dispose();
   draftSync = null;
+  orderDownloads?.dispose();
+  orderDownloads = null;
   resetDraftProtection();
   const generation = ++identityGeneration;
   cameraCleanup?.();
@@ -5844,6 +6030,19 @@ async function onIdentity(user) {
     }
     session = result.me;
     const syncScope = operationScope();
+    orderDownloads = createOrderDownloads({
+      fetchPdf: (order) => orderPdfBlob(order, "invoice", syncScope),
+      download,
+      isCurrent: () => scopeCurrent(syncScope),
+      onChange: (id, copyStatus) => {
+        if (!scopeCurrent(syncScope)) return;
+        try {
+          updateOrderCopyPanels(id, copyStatus);
+        } catch {
+          // Document status is optional presentation, never a financial action.
+        }
+      },
+    });
     draftSync = createDraftSync({
       workspace: ws,
       send: (command) =>
@@ -5901,6 +6100,8 @@ async function onIdentity(user) {
 function renderOfflineRecovery(user) {
   draftSync?.dispose();
   draftSync = null;
+  orderDownloads?.dispose();
+  orderDownloads = null;
   resetDraftProtection();
   state = null;
   session = null;
