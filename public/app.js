@@ -18,6 +18,9 @@ import {
   recoverLegacyLines,
   isHistoricalOrder,
   orderDocumentOptions,
+  indexCatalogProducts,
+  rankCatalogProducts,
+  normalizeCatalogLayout,
 } from "./view-helpers.js";
 
 const $ = (id) => document.getElementById(id);
@@ -979,15 +982,135 @@ async function api(path, { method = "GET", body, raw = false } = {}) {
     return raw ? response : response.json();
   });
 }
-async function refresh({ renderPage = true } = {}) {
+function editorIsActive() {
+  return (
+    !!document.querySelector("dialog[open]") ||
+    !!document.activeElement?.matches(
+      "input, textarea, select, [contenteditable=true]",
+    ) ||
+    hasUnsavedDraftNotes()
+  );
+}
+function availableDrafts() {
+  return ws.listDrafts();
+}
+function retireCanonicalDraft(order) {
+  if (!order || order.status === "draft" || !ws) return;
+  const result = ws.retireConfirmedDraft(order);
+  if (!result.retired) return;
+  draftSync?.forget(order.id);
+  draftProtectionCache.delete(order.id);
+}
+function restoreActiveDraft(preferredId = draft?.id) {
+  if (!ws || hasUnsavedDraftNotes()) return false;
+  const candidates = availableDrafts().filter(
+    (item) => item.storeId === storeId,
+  );
+  const next =
+    candidates.find((item) => item.id === preferredId) ||
+    candidates.find(
+      (item) => item.id === preferences().activeDraftIds?.[storeId],
+    ) ||
+    candidates[0] ||
+    null;
+  const changed = JSON.stringify(next) !== JSON.stringify(draft);
+  if (changed) {
+    draft = next;
+    undo = [];
+    redo = [];
+  }
+  return changed;
+}
+let foregroundRefreshBusy = false,
+  workspaceRefreshGeneration = 0,
+  lastDraftRefresh = 0;
+async function refreshInForeground() {
+  if (
+    !session ||
+    !state ||
+    !storeId ||
+    !navigator.onLine ||
+    document.visibilityState !== "visible" ||
+    editorIsActive() ||
+    foregroundRefreshBusy ||
+    Date.now() - lastDraftRefresh < 25000
+  )
+    return;
+  foregroundRefreshBusy = true;
+  const scope = operationScope(),
+    selectedStore = storeId,
+    refreshGeneration = ++workspaceRefreshGeneration;
+  try {
+    const result = await api(
+      `/api/drafts?storeId=${encodeURIComponent(selectedStore)}`,
+    );
+    if (
+      !scopeCurrent(scope) ||
+      refreshGeneration !== workspaceRefreshGeneration ||
+      storeId !== selectedStore ||
+      editorIsActive()
+    )
+      return;
+    const remote = result.orders;
+    if (!Array.isArray(remote)) return;
+    if (
+      draft?.syncState === "synced" &&
+      draft.storeId === selectedStore &&
+      !remote.some((item) => item.id === draft.id)
+    ) {
+      const result = await api(`/api/orders/${encodeURIComponent(draft.id)}`);
+      if (
+        !scopeCurrent(scope) ||
+        refreshGeneration !== workspaceRefreshGeneration ||
+        storeId !== selectedStore ||
+        editorIsActive()
+      )
+        return;
+      if (result.order?.status === "draft") remote.push(result.order);
+      else if (result.order) {
+        retireCanonicalDraft(result.order);
+        state.orders = [
+          ...state.orders.filter((item) => item.id !== result.order.id),
+          result.order,
+        ];
+      }
+    }
+    scope.workspace.mergeRemoteDrafts(remote);
+    draftProtectionCache.clear();
+    draftSync?.seed(remote);
+    state.orders = [
+      ...state.orders.filter(
+        (item) => item.status !== "draft" || item.storeId !== selectedStore,
+      ),
+      ...remote,
+    ];
+    const changed = restoreActiveDraft();
+    lastDraftRefresh = Date.now();
+    if (changed && view === "build") render();
+    else updateWorkspaceProtection();
+  } catch {
+    /* Draft autosave reports its own status; an unavailable background read never discards local edits. */
+  } finally {
+    foregroundRefreshBusy = false;
+  }
+}
+async function refresh({ renderPage = true, passive = false } = {}) {
   if (!session) return;
   resetOrderHistory();
-  const scope = operationScope();
+  const scope = operationScope(),
+    refreshGeneration = ++workspaceRefreshGeneration;
   return runSessionTask(
     scope,
     scopeCurrent,
     () => api("/api/state"),
     (next) => {
+      // A request may finish after the user starts typing. Never replace that editor.
+      if (
+        refreshGeneration !== workspaceRefreshGeneration ||
+        (passive && editorIsActive())
+      )
+        return;
+      const preserveInput = hasUnsavedDraftNotes();
       for (const key of [
         "categories",
         "products",
@@ -1007,16 +1130,27 @@ async function refresh({ renderPage = true } = {}) {
       const remoteDrafts = state.orders.filter(
         (order) => order.status === "draft",
       );
+      if (!preserveInput) {
+        const cachedDraftIds = new Set(
+          scope.workspace.listDrafts().map((item) => item.id),
+        );
+        state.orders
+          .filter((item) => cachedDraftIds.has(item.id))
+          .forEach(retireCanonicalDraft);
+      }
       scope.workspace.mergeRemoteDrafts(remoteDrafts);
       draftProtectionCache.clear();
       draftSync?.seed(remoteDrafts);
       if (!state.stores.some((store) => store.id === storeId))
         storeId = state.stores[0]?.id || "";
-      const prefs = preferences();
-      if (!draft && prefs.activeDraftIds?.[storeId])
-        draft = scope.workspace.getDraft(prefs.activeDraftIds[storeId]);
+      const changed = restoreActiveDraft();
       lastRefresh = Date.now();
-      if (renderPage) render();
+      if (
+        renderPage &&
+        !preserveInput &&
+        (!passive || changed || view !== "build")
+      )
+        render();
     },
   );
 }
@@ -1122,7 +1256,8 @@ function changeStore(id) {
   resetOrderHistory();
   const prefs = preferences();
   ws.rememberPreferences({ storeId: id });
-  draft = ws.getDraft(prefs.activeDraftIds?.[id]);
+  draft = null;
+  restoreActiveDraft(prefs.activeDraftIds?.[id]);
   undo = [];
   redo = [];
   render();
@@ -1560,7 +1695,7 @@ function renderHome() {
     orders = state.orders.filter(
       (order) => order.storeId === storeId && order.status !== "draft",
     );
-  const drafts = ws.listDrafts().filter((item) => item.storeId === storeId);
+  const drafts = availableDrafts().filter((item) => item.storeId === storeId);
   const open = orders.filter(
     (order) => !["delivered", "cancelled", "legacy"].includes(order.status),
   );
@@ -1798,27 +1933,25 @@ function orderList(orders) {
   );
 }
 function renderCatalog() {
+  const scope = operationScope();
   const fav =
     preferences().favorites?.[storeId] ??
     currentStore()?.favoriteProductIds ??
     [];
   const cardCache = new Map();
-  const candidates = state.products
-    .filter((product) => product.active !== false)
-    .map((product) => ({
-      product,
-      terms: [
-        product.name,
-        product.id,
-        product.sku,
-        product.barcode,
-        ...(product.variants || []),
-        ...Object.values(product.variantBarcodes || {}),
-      ].map((value) => String(value || "").toLowerCase()),
-    }));
+  const candidates = indexCatalogProducts(
+    state.products.filter((product) => product.active !== false),
+  );
+  let layout = normalizeCatalogLayout(
+    ws.preferences().catalogLayout,
+    matchMedia("(max-width: 600px)").matches ? 2 : 4,
+  );
   const searchField = input("search", search, {
     id: "catalog-search",
-    placeholder: "Search product, flavor, SKU or barcode",
+    placeholder: "Search name, flavor, SKU or barcode…",
+    autocomplete: "off",
+    autocapitalize: "none",
+    spellcheck: false,
     onInput: (event) => {
       search = event.target.value;
       drawResults();
@@ -1848,41 +1981,80 @@ function renderCatalog() {
     "pill",
   );
   const count = el("p", { class: "small muted mb", role: "status" });
+  const scanButton = button("Scan", showScanner, "", "scan");
+  scanButton.setAttribute("aria-label", "Scan barcode");
+  const columns = select(
+    [1, 2, 3, 4, 5].map((value) => [String(value), String(value)]),
+    String(layout.columns),
+    {
+      id: "catalog-columns",
+      onChange: () => act(updateLayout),
+    },
+  );
+  const compact = input("checkbox", "", {
+    id: "catalog-compact",
+    checked: layout.compact,
+    onChange: () => act(updateLayout),
+  });
   const results = el("div", { class: "catalog-results" });
   const root = el(
     "div",
-    {},
-    heading(
-      "The catalog",
-      `${state.products.length} products · Find your regulars and discover what’s new.`,
-      [
-        master()
-          ? button("Add product", () => showProductEditor(), "", "plus")
-          : null,
-        button("Scan barcode", showScanner, "", "scan"),
-        button("Draft with Gemini", showAssistant, "primary", "spark"),
-      ],
-    ),
+    {
+      class: "catalog-page",
+      "data-compact": String(layout.compact),
+      "data-columns": layout.columns,
+    },
+    heading("Catalog", `${candidates.length} products`, [
+      master()
+        ? button("Add product", () => showProductEditor(), "", "plus")
+        : null,
+      scanButton,
+      button("Ask AI", showAssistant, "primary", "spark"),
+    ]),
     el(
       "div",
-      { class: "filters" },
+      { class: "filters catalog-filters" },
       el("div", { class: "search" }, searchField),
       categoryField,
       favoritesButton,
     ),
-    count,
+    el(
+      "div",
+      { class: "catalog-view-controls" },
+      count,
+      el(
+        "div",
+        { class: "catalog-layout-controls" },
+        el("label", { for: "catalog-columns" }, "Columns"),
+        columns,
+        el("label", { class: "check-field" }, compact, "Compact"),
+      ),
+    ),
+    el(
+      "p",
+      { class: "catalog-tile-hint small" },
+      "Tap a tile for the full name, options and price.",
+    ),
     results,
   );
+  root.style.setProperty("--catalog-columns", layout.columns);
+  function updateLayout() {
+    if (!scopeCurrent(scope)) throw new SessionChanged();
+    layout = normalizeCatalogLayout({
+      columns: columns.value,
+      compact: compact.checked,
+    });
+    root.dataset.compact = String(layout.compact);
+    root.dataset.columns = String(layout.columns);
+    root.style.setProperty("--catalog-columns", layout.columns);
+    scope.workspace.rememberPreferences({ catalogLayout: layout });
+  }
   function drawResults() {
-    const query = search.trim().toLowerCase();
-    const products = candidates
-      .filter(
-        ({ product, terms }) =>
-          (!category || product.categoryIds?.includes(category)) &&
-          (!favoritesOnly || fav.includes(product.id)) &&
-          (!query || terms.some((term) => term.includes(query))),
-      )
-      .map(({ product }) => product);
+    const products = rankCatalogProducts(candidates, search).filter(
+      (product) =>
+        (!category || product.categoryIds?.includes(category)) &&
+        (!favoritesOnly || fav.includes(product.id)),
+    );
     favoritesButton.textContent = favoritesOnly ? "★ Favorites" : "☆ Favorites";
     favoritesButton.className = favoritesOnly ? "pill active" : "pill";
     favoritesButton.setAttribute("aria-pressed", favoritesOnly);
@@ -1957,13 +2129,13 @@ function renderProductCard(product, fav) {
   });
   return el(
     "article",
-    { class: "product-card" },
+    { class: "product-card", "data-product-id": product.id },
     favorite,
     el("div", { class: "product-image" }, thumbnail),
     el(
       "div",
       { class: "product-content" },
-      el("h3", { class: "product-name" }, product.name),
+      el("h3", { class: "product-name", title: product.name }, product.name),
       el(
         "p",
         { class: "product-meta" },
@@ -1986,9 +2158,20 @@ function renderProductCard(product, fav) {
         ? button(
             "Edit details",
             () => showProductEditor(product),
-            "text-button",
+            "text-button product-edit",
           )
         : null,
+    ),
+    el(
+      "button",
+      {
+        type: "button",
+        class: "product-tile-open",
+        "aria-label": `View ${product.name}`,
+        title: product.name,
+        onClick: () => act(() => showAddProduct(product)),
+      },
+      el("span", { class: "sr-only" }, `View ${product.name}`),
     ),
   );
 }
@@ -2064,6 +2247,22 @@ function showAddProduct(product, initialVariant) {
       field("Line note", note),
     ),
     price,
+    el(
+      "div",
+      { class: "actions" },
+      button("Favorite product", () => toggleFavorite(product.id), "", "star"),
+      master()
+        ? button(
+            "Edit product",
+            () => {
+              m.close();
+              showProductEditor(product);
+            },
+            "text-button",
+            "edit",
+          )
+        : null,
+    ),
   );
   append(
     m.footer,
@@ -2126,7 +2325,7 @@ function renderBuilder() {
       ],
     ),
   );
-  const saved = ws.listDrafts().filter((item) => item.storeId === storeId);
+  const saved = availableDrafts().filter((item) => item.storeId === storeId);
   if (!draft) {
     append(
       root,
@@ -2135,7 +2334,7 @@ function renderBuilder() {
         "Build a cart from the catalog, repeat a previous order, or turn a note into a proposed cart.",
         [
           button("Start an order", beginDraft, "primary"),
-          button("Draft from note or photo", showAssistant, "", "spark"),
+          button("Ask AI", showAssistant, "", "spark"),
         ],
         "cart",
       ),
@@ -2161,23 +2360,39 @@ function renderBuilder() {
         min: 1,
         step: 1,
         "aria-label": `Quantity for ${product?.name || "product"}`,
-        onChange: (event) => {
+        onInput: (event) => {
           const number = Number(event.target.value);
-          if (!Number.isSafeInteger(number) || number <= 0) {
-            event.target.value = line.quantity;
-            toast("Use a positive whole number.", true);
-            return;
-          }
+          if (!Number.isSafeInteger(number) || number <= 0) return;
           act(() => {
             try {
-              editDraft((d) => {
-                d.lines.find((item) => item.id === line.id).quantity = number;
-              });
+              editDraft(
+                (d) => {
+                  const target = d.lines.find((item) => item.id === line.id);
+                  if (!target)
+                    throw new Error(
+                      "This item changed elsewhere. Refresh the draft before editing it.",
+                    );
+                  target.quantity = number;
+                },
+                { renderPage: false },
+              );
+              updateDraftProtection(draft.id);
             } catch (error) {
-              event.target.value = line.quantity;
+              event.target.value =
+                draft?.lines.find((item) => item.id === line.id)?.quantity ??
+                line.quantity;
               throw error;
             }
           });
+        },
+        onChange: (event) => {
+          const number = Number(event.target.value);
+          if (!Number.isSafeInteger(number) || number <= 0)
+            toast(
+              "Use a positive whole number. Your last valid quantity is saved.",
+              true,
+            );
+          if (!hasUnsavedDraftNotes()) render();
         },
       });
       const units = select(
@@ -2340,7 +2555,7 @@ function renderBuilder() {
               "Choose products from the catalog or start with a note. Changes save online automatically when connected.",
               [
                 button("Browse catalog", () => setView("catalog"), "primary"),
-                button("Use Gemini", showAssistant),
+                button("Ask AI", showAssistant),
               ],
             ),
         el(
@@ -2704,7 +2919,11 @@ async function showOrder(order) {
     !legacy &&
     orderDocumentOptions(order).some(([kind]) => kind === "invoice")
   )
-    append(m.content, orderCopyPanel(order));
+    append(
+      m.content,
+      orderCopyPanel(order),
+      button("Send / schedule email", () => showOrderEmail(order), "", "bell"),
+    );
   if (!legacy && order.status !== "draft" && order.status !== "cancelled")
     append(
       m.content,
@@ -4377,6 +4596,7 @@ function renderMore() {
           button("Migration & reconciliation", showMigration),
           button("Verify business backup", showBusinessBackup),
           button("Audit activity", showAudit),
+          button("Order email settings", showOrderEmailSettings),
           button("Email delivery status", showEmailDelivery),
         ),
       ),
@@ -5282,14 +5502,14 @@ function showAssistant() {
   const fileScope = operationScope();
   if (!storeId) throw new Error("Select a store to create a proposed order.");
   const m = modal(
-    "Draft an order with Gemini",
-    "Turn an order note or photo into a proposed cart. You review every line before adding it.",
+    "Ask AI to build an order",
+    "Type your order, use your keyboard’s microphone to dictate it, or attach a photo. Gemini suggests matching products for you to review.",
     true,
   );
   const text = el("textarea", {
     id: "assistant-note",
     placeholder:
-      "For example: 2 cases of strawberry flavor and 6 each of the blue pack…",
+      "For example: Add 2 cases of SS Original and 6 each of Raw cones. Ask me if a product or flavor is unclear.",
     maxlength: 12000,
     rows: 5,
   });
@@ -5303,7 +5523,11 @@ function showAssistant() {
     el(
       "div",
       { class: "stack" },
-      field("Order note", text),
+      field(
+        "Tell the AI what you need",
+        text,
+        "This assistant prepares order suggestions. It does not send or submit an order until you review and confirm it.",
+      ),
       field(
         "Photo of an order or product list",
         photo,
@@ -5791,59 +6015,76 @@ function exportDeviceWorkspace(user = firebase.identity()) {
   );
 }
 function deviceStorageNotice() {
-  if (!ws?.storageStatus().warning) return null;
-  const content = notice(
+  const storage = ws?.storageStatus();
+  if (!storage?.warning) return null;
+  const unprotected =
+    storage.unprotectedDraftCount > 0 || hasUnsavedDraftNotes();
+  const content = el(
+    "div",
+    { class: "notice small", role: unprotected ? "alert" : "status" },
     el(
       "div",
       { class: "stack" },
-      el("strong", {}, "Device storage needs attention"),
+      el(
+        "strong",
+        {},
+        unprotected
+          ? "Device backup unavailable · check draft save status"
+          : "Device backup unavailable",
+      ),
       el(
         "span",
         {},
-        "This browser could not save a device copy. Draft edits will still try to save online. Keep this tab open until the draft says Saved online, or export a copy. Existing device records are preserved.",
+        unprotected
+          ? "Keep this tab open until your draft says Saved online. Check its status if the connection is unavailable."
+          : "Confirmed online drafts remain saved. Local storage is full or blocked; offline edits and queued submissions need a working device backup.",
       ),
       el(
-        "div",
-        { class: "actions" },
-        button("Export saved drafts", () =>
-          download(
-            `alabama-workspace-${new Date().toISOString().slice(0, 10)}.json`,
-            JSON.stringify(ws.exportBackup(), null, 2),
+        "details",
+        {},
+        el("summary", {}, "Device backup options"),
+        el(
+          "div",
+          { class: "actions mt" },
+          button("Export saved drafts", () =>
+            download(
+              `alabama-workspace-${new Date().toISOString().slice(0, 10)}.json`,
+              JSON.stringify(workspaceRecoverySnapshot(), null, 2),
+            ),
           ),
-        ),
-        button("Retry device storage", async () => {
-          const enteredNotes = $("draft-notes")?.value;
-          const retryNotes =
-            draft &&
-            enteredNotes !== undefined &&
-            enteredNotes !== (draft.notes || "");
-          if (retryNotes) {
-            const latest = ws.getDraft(draft.id);
-            if (
-              !latest ||
-              latest.localRevision !== draft.localRevision ||
-              latest.version !== draft.version
-            )
-              throw new Error(
-                "This draft changed elsewhere. Copy your unsaved notes, then reopen the saved draft before applying them.",
+          button("Retry device storage", async () => {
+            const enteredNotes = $("draft-notes")?.value;
+            const retryNotes =
+              draft &&
+              enteredNotes !== undefined &&
+              enteredNotes !== (draft.notes || "");
+            if (retryNotes) {
+              const latest = ws.getDraft(draft.id);
+              if (
+                !latest ||
+                latest.localRevision !== draft.localRevision ||
+                latest.version !== draft.version
+              )
+                throw new Error(
+                  "This draft changed elsewhere. Copy your unsaved notes, then reopen the saved draft before applying them.",
+                );
+            }
+            ws.retryStorage();
+            if (draft) draft = ws.getDraft(draft.id);
+            if (retryNotes && draft)
+              editDraft(
+                (next) => {
+                  next.notes = enteredNotes;
+                },
+                { renderPage: false },
               );
-          }
-          ws.retryStorage();
-          if (draft) draft = ws.getDraft(draft.id);
-          if (retryNotes && draft)
-            editDraft(
-              (next) => {
-                next.notes = enteredNotes;
-              },
-              { renderPage: false },
-            );
-          await refresh();
-          if (!ws.storageStatus().warning)
-            toast("Device storage is working again.");
-        }),
+            await refresh();
+            if (!ws.storageStatus().warning)
+              toast("Device storage is working again.");
+          }),
+        ),
       ),
     ),
-    true,
   );
   content.id = "device-storage-notice";
   return content;
@@ -5977,6 +6218,7 @@ async function onIdentity(user) {
   session = null;
   state = null;
   draft = null;
+  lastDraftRefresh = 0;
   ws = null;
   undo = [];
   redo = [];
@@ -6141,7 +6383,7 @@ function renderOfflineRecovery(user) {
   );
   function draw() {
     if (!scopeCurrent(scope)) return;
-    const saved = workspace.getDraft(selectDraft.value);
+    let saved = workspace.getDraft(selectDraft.value);
     content.replaceChildren();
     if (!saved) {
       append(
@@ -6165,6 +6407,91 @@ function renderOfflineRecovery(user) {
         "aria-label": `Quantity ${line.name || line.productId}`,
       }),
     }));
+    const saveStatus = el(
+      "p",
+      { class: "small", role: "status" },
+      "Valid edits save on this device automatically and sync when connected.",
+    );
+    function saveOffline() {
+      if (!scopeCurrent(scope)) return;
+      try {
+        let invalidQuantity = false;
+        const lines = quantities.map(({ line, node }) => {
+          const quantity = Number(node.value);
+          if (!Number.isSafeInteger(quantity) || quantity <= 0) {
+            invalidQuantity = true;
+            return saved.lines.find((item) => item.id === line.id) || line;
+          }
+          return { ...line, quantity };
+        });
+        saved = saveWorkingDraft(
+          { ...saved, lines, notes: notes.value },
+          workspace,
+        );
+        const durable = workspace.localDraftStatus(saved.id).localPersisted;
+        saveStatus.textContent = durable
+          ? "Saved on this device · syncs automatically when connected" +
+            (invalidQuantity
+              ? ". Enter a positive whole quantity; the last valid quantity is preserved."
+              : "")
+          : "Not yet protected · keep this tab open and reconnect, or export your workspace.";
+      } catch (error) {
+        if (error.name === "DraftConflict") {
+          // Another tab changed the offline base. Keep this editor as a separate draft.
+          const recovery = {
+            ...saved,
+            ...createDraft(saved.storeId),
+            localRevision: 0,
+            lines: saved.lines.map((line) => {
+              const value = Number(
+                quantities.find((item) => item.line.id === line.id)?.node.value,
+              );
+              return {
+                ...line,
+                quantity:
+                  Number.isSafeInteger(value) && value > 0
+                    ? value
+                    : line.quantity,
+              };
+            }),
+            notes: notes.value,
+          };
+          try {
+            saved = saveWorkingDraft(recovery, workspace);
+            append(
+              selectDraft,
+              el(
+                "option",
+                { value: saved.id },
+                "Recovered edits · another tab changed the original",
+              ),
+            );
+            selectDraft.value = saved.id;
+            saveStatus.textContent = workspace.localDraftStatus(saved.id)
+              .localPersisted
+              ? "Your edits were saved as a separate draft because the original changed in another tab. Both copies are preserved."
+              : "Your edits are kept as a separate draft in this tab. Reconnect or export before leaving.";
+            return;
+          } catch (recoveryError) {
+            error = recoveryError;
+          }
+        }
+        saveStatus.textContent = friendlyError(error);
+      }
+    }
+    notes.addEventListener("input", saveOffline);
+    quantities.forEach(({ line, node }) => {
+      node.addEventListener("input", saveOffline);
+      node.addEventListener("change", () => {
+        if (
+          !Number.isSafeInteger(Number(node.value)) ||
+          Number(node.value) <= 0
+        )
+          node.value =
+            saved.lines.find((item) => item.id === line.id)?.quantity ||
+            line.quantity;
+      });
+    });
     append(
       content,
       table(
@@ -6183,28 +6510,7 @@ function renderOfflineRecovery(user) {
         ),
       ),
       field("Draft notes", notes),
-      button(
-        "Save changes on this device",
-        () => {
-          if (!scopeCurrent(scope)) throw new SessionChanged();
-          const lines = quantities.map(({ line, node }) => {
-            const quantity = Number(node.value);
-            if (!Number.isSafeInteger(quantity) || quantity <= 0)
-              throw new Error(
-                "Every quantity must be a positive whole number.",
-              );
-            return { ...line, quantity };
-          });
-          saveWorkingDraft({ ...saved, lines, notes: notes.value }, workspace);
-          draw();
-          toast(
-            draftProtection(saved.id).label,
-            !draftProtection(saved.id).localPersisted &&
-              !draftProtection(saved.id).cloudConfirmed,
-          );
-        },
-        "primary",
-      ),
+      saveStatus,
     );
   }
   selectDraft.addEventListener("change", draw);
@@ -6280,7 +6586,9 @@ window.addEventListener("offline", () => {
 });
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") flushWorkingDrafts();
+  else refreshInForeground();
 });
+setInterval(refreshInForeground, 30000);
 function hasUnsavedDraftNotes() {
   const note = $("draft-notes");
   return !!(
@@ -6295,12 +6603,15 @@ window.addEventListener("storage", (event) => {
     draftSync?.seed(
       state?.orders?.filter((order) => order.status === "draft") || [],
     );
-    toast(
-      "This workspace changed in another tab. Reload the draft before editing it.",
-      true,
-    );
-    // Keep rejected notes visible for copying/retry when another tab saves.
-    if (state && !hasUnsavedDraftNotes()) render();
+    // Keep the visible base while typing so stale input cannot overwrite a newer draft.
+    if (state && !editorIsActive()) {
+      restoreActiveDraft();
+      render();
+    } else
+      toast(
+        "This draft changed in another tab. Finish or copy your current input, then refresh before editing it.",
+        true,
+      );
   }
 });
 window.addEventListener("beforeunload", (event) => {
@@ -6740,4 +7051,284 @@ function showEmailRetry(item) {
       "primary",
     ),
   );
+}
+
+async function showOrderEmailSettings() {
+  const scope = operationScope();
+  const m = modal(
+    "Order email settings",
+    "Invoices go directly to alwholesaleorders@gmail.com, even when the app is closed.",
+  );
+  async function read() {
+    const settings = await api("/api/order-email/config");
+    if (!scopeCurrent(scope) || !m.dialog.open) return;
+    draw(settings);
+  }
+  function draw(settings) {
+    m.content.replaceChildren(
+      notice(
+        settings.configured
+          ? "Dedicated sender connected. New submitted orders can be emailed automatically five minutes after submission. You can change the time or cancel from the order."
+          : "The dedicated Gmail sender still needs to be connected by the workspace owner. Sending becomes available once its account verification is complete.",
+      ),
+    );
+    const automatic = input("checkbox", "", {
+      checked: settings.automatic,
+      disabled: !settings.configured,
+    });
+    append(
+      m.content,
+      field(
+        "Automatically email new submitted orders",
+        automatic,
+        "Existing orders are never sent in bulk when this setting is enabled.",
+      ),
+    );
+    automatic.addEventListener("change", () =>
+      act(async () => {
+        if (!scopeCurrent(scope)) throw new SessionChanged();
+        try {
+          const saved = await api("/api/admin/order-email/settings", {
+            method: "POST",
+            body: {
+              automatic: automatic.checked,
+              expectedVersion: settings.version,
+            },
+          });
+          if (!scopeCurrent(scope) || !m.dialog.open) return;
+          draw(saved);
+          toast("Order email setting saved.");
+        } catch (error) {
+          automatic.checked = settings.automatic;
+          // A lost response may still have saved; resolve it before showing the setting.
+          await read().catch(() => {});
+          if (scopeCurrent(scope) && m.dialog.open && !automatic.isConnected) {
+            const message = notice(friendlyError(error), true);
+            message.classList.add("action-error");
+            append(m.content, message);
+          }
+          throw error;
+        }
+      }, automatic),
+    );
+  }
+  append(
+    m.footer,
+    button("Close", m.close),
+    button("Refresh connection", read),
+  );
+  await read();
+}
+async function showOrderEmail(order) {
+  const scope = operationScope();
+  const m = modal(
+    "Send order email",
+    `Invoice ${order.invoiceNumber} · alwholesaleorders@gmail.com`,
+  );
+  let current,
+    selectedTime = "",
+    pending = null;
+  const read = async () => {
+    const result = await api(
+      `/api/orders/${encodeURIComponent(order.id)}/email`,
+    );
+    if (!scopeCurrent(scope) || !m.dialog.open) return;
+    current = result;
+    draw();
+  };
+  async function change(action, extra = {}) {
+    if (!scopeCurrent(scope)) throw new SessionChanged();
+    const signature = JSON.stringify([
+      action,
+      extra,
+      current.job?.version || 0,
+    ]);
+    if (pending?.signature !== signature)
+      pending = {
+        signature,
+        body: {
+          requestId: uuid(),
+          action,
+          expectedVersion: current.job?.version || 0,
+          ...extra,
+        },
+      };
+    try {
+      const result = await api(
+        `/api/orders/${encodeURIComponent(order.id)}/email`,
+        {
+          method: "POST",
+          body: pending.body,
+        },
+      );
+      pending = null;
+      if (!scopeCurrent(scope) || !m.dialog.open) return;
+      current = { ...current, job: result.job };
+      draw();
+    } catch (error) {
+      // Keep the exact request available on network failure; refresh resolves a lost response.
+      await read().catch(() => {});
+      throw error;
+    }
+  }
+  function draw() {
+    const { job, config: settings } = current;
+    const labels = {
+      queued: "Scheduled",
+      preparing: "Preparing invoice",
+      sending: "Sending",
+      sent: "Accepted by email provider",
+      failed: "Email failed",
+      uncertain: "Delivery needs review",
+      cancelled: "Cancelled",
+    };
+    m.content.replaceChildren(
+      el(
+        "p",
+        { role: "status", class: "strong" },
+        job
+          ? labels[job.status] || titleCase(job.status)
+          : "No email scheduled",
+      ),
+      el(
+        "p",
+        { class: "small" },
+        "The invoice PDF is attached. The order remains saved online regardless of email delivery.",
+      ),
+    );
+    if (job?.scheduledAt && ["queued", "preparing"].includes(job.status))
+      append(
+        m.content,
+        el(
+          "p",
+          {},
+          `Scheduled for ${new Date(job.scheduledAt).toLocaleString()} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`,
+        ),
+      );
+    if (job?.sentAt)
+      append(
+        m.content,
+        el(
+          "p",
+          {},
+          `Provider accepted at ${new Date(job.sentAt).toLocaleString()}. This does not confirm inbox delivery.`,
+        ),
+      );
+    if (!settings.configured)
+      append(
+        m.content,
+        notice(
+          "The dedicated Gmail sender is not connected yet. The owner must finish its setup before emails can be sent.",
+        ),
+      );
+    if (job?.lastError)
+      append(
+        m.content,
+        notice(
+          typeof job.lastError === "string"
+            ? job.lastError
+            : typeof job.lastError.message === "string"
+              ? job.lastError.message
+              : "The email could not be sent. Refresh its status before retrying.",
+          true,
+        ),
+      );
+    const available =
+      !job || ["queued", "preparing", "cancelled"].includes(job.status);
+    if (available) {
+      const initial = new Date(
+        job?.scheduledAt > Date.now() ? job.scheduledAt : Date.now() + 3600000,
+      );
+      const local = new Date(
+        initial.getTime() - initial.getTimezoneOffset() * 60000,
+      )
+        .toISOString()
+        .slice(0, 16);
+      const when = input("datetime-local", selectedTime || local, {
+        "aria-label": "Email date and time",
+        disabled: !settings.configured,
+      });
+      when.addEventListener("input", () => {
+        selectedTime = when.value;
+      });
+      append(
+        m.content,
+        field("Send at your local date and time", when),
+        el(
+          "div",
+          { class: "actions mt" },
+          el(
+            "button",
+            {
+              type: "button",
+              disabled: !settings.configured,
+              onClick: (event) =>
+                act(() => change("send"), event.currentTarget),
+            },
+            "Send now",
+          ),
+          el(
+            "button",
+            {
+              type: "button",
+              class: "primary",
+              disabled: !settings.configured,
+              onClick: (event) =>
+                act(async () => {
+                  const scheduledAt = new Date(when.value).getTime();
+                  if (
+                    !Number.isSafeInteger(scheduledAt) ||
+                    scheduledAt <= Date.now()
+                  )
+                    throw new Error("Choose a future date and time.");
+                  await change("schedule", { scheduledAt });
+                }, event.currentTarget),
+            },
+            job && job.status !== "cancelled"
+              ? "Change scheduled time"
+              : "Schedule email",
+          ),
+          job && ["queued", "preparing"].includes(job.status)
+            ? button("Cancel email", () => change("cancel"))
+            : null,
+        ),
+      );
+    }
+    if (job?.status === "failed" && settings.configured)
+      append(
+        m.content,
+        button("Retry email", () => change("retry")),
+      );
+    if (job?.status === "uncertain") {
+      append(
+        m.content,
+        notice(
+          "The provider may already have sent this email. Check the sender’s Sent folder before retrying.",
+        ),
+      );
+      if (master() && settings.configured)
+        append(
+          m.content,
+          button("Review and retry", async () => {
+            if (
+              await confirmAction(
+                "Retry an uncertain email?",
+                "Check the sender’s Sent folder first. Retrying can send a duplicate invoice email.",
+                "I checked · retry email",
+              )
+            )
+              await change("retry", { acknowledgeDuplicateRisk: true });
+          }),
+        );
+    }
+  }
+  append(
+    m.footer,
+    button("Close", m.close),
+    button("Refresh email status", read),
+  );
+  m.content.replaceChildren(
+    el("p", { role: "status" }, "Loading email status…"),
+  );
+  await read();
 }

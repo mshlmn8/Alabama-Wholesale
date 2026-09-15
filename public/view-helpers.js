@@ -12,6 +12,95 @@ export function formatSavedDate(value, locale = "en-US") {
         year: "numeric",
       });
 }
+const catalogText = (value) =>
+  typeof value === "string" || typeof value === "number"
+    ? String(value).normalize("NFKC").toLowerCase().trim().replace(/\s+/g, " ")
+    : "";
+const catalogTokens = (value) => value.match(/[\p{L}\p{N}]+/gu) || [];
+export function indexCatalogProducts(products) {
+  return products.map((product, index) => {
+    const name = catalogText(product.name);
+    const identifiers = [
+      product.sku,
+      product.barcode,
+      product.id,
+      ...Object.values(product.variantBarcodes || {}),
+    ]
+      .map(catalogText)
+      .filter(Boolean);
+    const brands = [product.brand, product.brandName]
+      .map(catalogText)
+      .filter(Boolean);
+    const terms = [
+      name,
+      ...identifiers,
+      ...brands,
+      ...(product.variants || []).map(catalogText),
+    ].filter(Boolean);
+    return {
+      product,
+      index,
+      name,
+      identifiers,
+      brands,
+      terms,
+      tokens: [...new Set(terms.flatMap(catalogTokens))],
+    };
+  });
+}
+export function rankCatalogProducts(index, query) {
+  const normalized = catalogText(query);
+  if (!normalized) return index.map((entry) => entry.product);
+  const tokens = catalogTokens(normalized);
+  const score = (entry) => {
+    if (entry.name === normalized) return 0;
+    if (entry.identifiers.includes(normalized)) return 1;
+    if (entry.brands.includes(normalized)) return 2;
+    if (entry.name.startsWith(normalized)) return 3;
+    if (entry.terms.some((term) => term.startsWith(normalized))) return 4;
+    if (tokens.length && tokens.every((token) => entry.tokens.includes(token)))
+      return 5;
+    if (
+      tokens.length &&
+      tokens.every((token) =>
+        entry.tokens.some((term) => term.startsWith(token)),
+      )
+    )
+      return 6;
+    // A short product abbreviation must not match incidental suffixes such as
+    // "ss" in "glass" or "floss". Longer queries retain substring discovery.
+    if (normalized.length > 2 && entry.name.includes(normalized)) return 7;
+    if (
+      normalized.length > 2 &&
+      entry.terms.some((term) => term.includes(normalized))
+    )
+      return 8;
+    if (
+      tokens.length > 1 &&
+      tokens.every(
+        (token) =>
+          token.length > 2 && entry.terms.some((term) => term.includes(token)),
+      )
+    )
+      return 9;
+    return Infinity;
+  };
+  return index
+    .map((entry) => ({ entry, score: score(entry) }))
+    .filter((item) => Number.isFinite(item.score))
+    .sort((a, b) => a.score - b.score || a.entry.index - b.entry.index)
+    .map((item) => item.entry.product);
+}
+export function normalizeCatalogLayout(raw, defaultColumns = 2) {
+  const columns = Number(raw?.columns);
+  return {
+    columns:
+      Number.isInteger(columns) && columns >= 1 && columns <= 5
+        ? columns
+        : Math.max(1, Math.min(5, defaultColumns)),
+    compact: raw?.compact !== false,
+  };
+}
 export function isHistoricalOrder(order) {
   return Boolean(
     order.status === "legacy" ||

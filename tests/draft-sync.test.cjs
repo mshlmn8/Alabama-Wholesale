@@ -888,3 +888,104 @@ test("forgetting an in-flight draft releases capacity for other drafts", async (
   await tick();
   assert.equal(f.sync.status("d3").cloudConfirmed, true);
 });
+
+test("unchanged cloud refreshes do not downgrade an existing durable empty draft under quota", async () => {
+  const f = await fixture();
+  const remote = await f.actual({
+    id: "seed-empty",
+    type: "order.save",
+    payload: {
+      id: "d1",
+      storeId: "s1",
+      lines: [],
+      notes: "",
+      expectedVersion: 0,
+    },
+  });
+  f.ws.mergeRemoteDrafts([remote]);
+  const before = f.storage.getItem(f.ws.key);
+  f.storage.full = true;
+  f.sync.seed([remote]);
+  f.sync.seed([remote]);
+  await f.timers.advance(2000);
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.sync.status("d1").cloudConfirmed, true);
+  assert.equal(f.sync.status("d1").localPersisted, true);
+  assert.equal(f.ws.storageStatus().warning, null);
+  assert.equal(f.storage.getItem(f.ws.key), before);
+});
+
+test("autosave recovery stays small without deleting original draft metadata or changing an uncertain request", async () => {
+  let first = true;
+  const f = await fixture({
+    send: async (command, actual) => {
+      const result = await actual(command);
+      if (first) {
+        first = false;
+        throw new Error("response lost");
+      }
+      return result;
+    },
+  });
+  const originalText = "archived-original-".repeat(20000);
+  f.edit({
+    lines: [],
+    notes: "small visible draft",
+    legacy: { requiresReview: false, rawLines: [originalText] },
+  });
+  await f.timers.advance(600);
+  const recovery = f.ws.autosaveRecovery().d1;
+  assert.ok(
+    JSON.stringify(recovery).length < 3000,
+    "The recovery record must not duplicate large retained metadata.",
+  );
+  assert.deepEqual(recovery.command, f.calls[0]);
+  assert.equal(f.ws.exportBackup().drafts[0].legacy.rawLines[0], originalText);
+  f.edit({ notes: "newer edit" });
+  f.sync.dispose();
+  f.sync = f.setup();
+  f.sync.seed([]);
+  await f.timers.advance(1200);
+  assert.deepEqual(f.calls[0], f.calls[1]);
+  assert.equal(f.calls[2].payload.expectedVersion, 1);
+  assert.equal((await f.repo.get("orders", "d1")).notes, "newer edit");
+  assert.equal(f.ws.exportBackup().drafts[0].legacy.rawLines[0], originalText);
+});
+test("empty and unfinished drafts save automatically and restore in a fresh device workspace", async () => {
+  const f = await fixture();
+  f.edit({ lines: [], notes: "" }, "empty");
+  f.edit({ lines: [], notes: "Finish this order later" }, "unfinished");
+  await f.timers.advance(600);
+  const remote = await f.repo.list("orders");
+  assert.equal(remote.length, 2);
+  assert.ok(remote.every((draft) => draft.status === "draft"));
+  assert.equal((await f.repo.list("ledger")).length, 0);
+  const { Workspace } = await load("storage.js"),
+    { createDraftSync } = await load("draft-sync.js");
+  const data = new Map();
+  const second = new Workspace(
+    {
+      getItem: (key) => data.get(key) || null,
+      setItem: (key, value) => data.set(key, value),
+    },
+    "owner",
+  );
+  second.mergeRemoteDrafts(remote);
+  let writes = 0;
+  const sync = createDraftSync({
+    workspace: second,
+    send: async () => {
+      writes++;
+    },
+    online: () => true,
+    onChange: () => {},
+  });
+  sync.seed(remote);
+  assert.equal(second.listDrafts().length, 2);
+  assert.equal(second.getDraft("empty").lines.length, 0);
+  assert.equal(second.getDraft("unfinished").notes, "Finish this order later");
+  assert.equal(sync.status("empty").cloudConfirmed, true);
+  assert.equal(sync.status("unfinished").cloudConfirmed, true);
+  assert.equal(writes, 0);
+  sync.dispose();
+});

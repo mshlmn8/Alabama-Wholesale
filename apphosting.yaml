@@ -29,3 +29,6 @@ env:
   - variable: LEGACY_WRITES_FROZEN
     value: "true"
     availability: [RUNTIME]
+  - variable: ORDER_MAIL_WORKER_TOKEN
+    secret: ORDER_MAIL_WORKER_TOKEN
+    availability: [RUNTIME]

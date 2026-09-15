@@ -33,6 +33,8 @@ export class Workspace {
     this.key = `aw:v2:${key}`;
     this.remoteDrafts = new Map();
     this.workingDrafts = new Map();
+    this.retiredDrafts = new Map();
+    this.confirmedOrderVersions = new Map();
     this.recoveryOverrides = new Map();
     this.temporaryPreferences = {};
     this.writeWarning = null;
@@ -82,6 +84,16 @@ export class Workspace {
     this.writeWarning = null;
   }
   storageStatus() {
+    const data = this.workingDrafts.size ? this.read() : null;
+    const unprotectedDraftCount = [...this.workingDrafts].filter(
+      ([id, entry]) =>
+        entry.draft.syncState !== "synced" || this.workingConflict(data, id),
+    ).length;
+    const cloudOnlyDraftCount =
+      [...this.remoteDrafts.keys()].filter((id) => !this.workingDrafts.has(id))
+        .length +
+      this.workingDrafts.size -
+      unprotectedDraftCount;
     const remoteDraftCount = this.remoteDrafts.size;
     const preferencesTemporary =
       Object.keys(this.temporaryPreferences).length > 0;
@@ -95,6 +107,9 @@ export class Workspace {
           ? "Some cloud drafts or preferences are available only in this session because device storage could not save them. Your existing saved work is preserved."
           : null),
       remoteDraftCount,
+      cloudOnlyDraftCount,
+      unprotectedDraftCount,
+      temporaryRecoveryCount: this.recoveryOverrides.size,
       preferencesTemporary,
     };
   }
@@ -137,7 +152,7 @@ export class Workspace {
       )
         this.remoteDrafts.delete(id);
     }
-    return {
+    const view = {
       ...data.drafts,
       ...Object.fromEntries(
         [...this.remoteDrafts].map(([id, entry]) => [id, entry.draft]),
@@ -146,6 +161,30 @@ export class Workspace {
         [...this.workingDrafts].map(([id, entry]) => [id, entry.draft]),
       ),
     };
+    for (const [id, retired] of this.retiredDrafts) {
+      const current = view[id];
+      if (
+        current?.syncState === "synced" &&
+        JSON.stringify(current) === retired.fingerprint &&
+        JSON.stringify(this.durableBase(data, id)) ===
+          JSON.stringify(retired.base) &&
+        !this.draftHasPending(data, id)
+      )
+        delete view[id];
+      else this.retiredDrafts.delete(id);
+    }
+    return view;
+  }
+  draftHasPending(data, id) {
+    return !!(
+      data.queue.some(
+        (entry) =>
+          entry.command?.payload?.id === id ||
+          entry.command?.payload?.orderId === id,
+      ) ||
+      data.draftAutosave?.[id] ||
+      this.recoveryOverrides.get(id)
+    );
   }
   getDraft(id) {
     const drafts = this.draftView(this.read());
@@ -171,6 +210,10 @@ export class Workspace {
         "This draft is being submitted. Wait for confirmation or retry the pending submission before editing it.",
       );
     const current = this.draftView(data)[draft.id];
+    if (this.retiredDrafts.has(draft.id))
+      throw new Error(
+        "This order was submitted or closed elsewhere. Open the confirmed order or start a new draft.",
+      );
     if (
       current &&
       ((draft.localRevision ?? 0) !== (current.localRevision ?? 0) ||
@@ -228,6 +271,19 @@ export class Workspace {
     if ((current.version || 0) > remote.version)
       return { draft: clone(current), ...this.localDraftStatus(sent.id) };
     const same = current.localRevision === sent.localRevision;
+    // A fresh cloud read is not a new local edit. Rewriting an identical synced
+    // copy only to update lastSyncedAt can create a quota warning at sign-in.
+    if (
+      same &&
+      current.version === remote.version &&
+      current.syncState === "synced" &&
+      ["legacy", "migrationBlocked"].every(
+        (key) =>
+          !Object.hasOwn(remote, key) ||
+          JSON.stringify(current[key]) === JSON.stringify(remote[key]),
+      )
+    )
+      return { draft: clone(current), ...this.localDraftStatus(sent.id) };
     const updated = {
       ...clone(current),
       version: remote.version,
@@ -321,8 +377,15 @@ export class Workspace {
           record.sentDraft?.id !== id))
     )
       throw new Error("Invalid draft save recovery record.");
-    this.recoveryOverrides.set(id, record === null ? null : clone(record));
     const data = this.read();
+    const durable = Object.hasOwn(data.draftAutosave || {}, id)
+      ? data.draftAutosave[id]
+      : null;
+    if (JSON.stringify(durable) === JSON.stringify(record)) {
+      this.recoveryOverrides.delete(id);
+      return true;
+    }
+    this.recoveryOverrides.set(id, record === null ? null : clone(record));
     data.draftAutosave = this.autosaveRecovery();
     data.revision++;
     try {
@@ -340,6 +403,58 @@ export class Workspace {
     });
     this.remoteDrafts.delete(id);
     this.workingDrafts.delete(id);
+  }
+  retireConfirmedDraft(order) {
+    // Absence from a list is not proof of submission: use a canonical order read.
+    if (
+      !validId(order?.id) ||
+      !validId(order.storeId) ||
+      !["submitted", "approved", "picking", "delivered", "cancelled"].includes(
+        order.status,
+      ) ||
+      !Number.isSafeInteger(order.version) ||
+      order.version < 1
+    )
+      return { retired: false, reason: "unconfirmed" };
+    const data = this.read();
+    const current = this.draftView(data)[order.id];
+    if (!current) return { retired: false, reason: "missing" };
+    if (
+      current.storeId !== order.storeId ||
+      (current.version || 0) > order.version
+    )
+      return { retired: false, reason: "stale" };
+    if (this.workingConflict(data, order.id))
+      return { retired: false, reason: "conflict" };
+    if (current.syncState !== "synced")
+      return { retired: false, reason: "dirty" };
+    if (this.draftHasPending(data, order.id))
+      return { retired: false, reason: "pending" };
+    const retirement = {
+      fingerprint: JSON.stringify(current),
+      base: this.durableBase(data, order.id),
+    };
+    if (Object.hasOwn(data.drafts, order.id)) {
+      delete data.drafts[order.id];
+      data.revision++;
+      // A failed write must leave both the durable copy and session overlays intact.
+      try {
+        this.write(data);
+      } catch (error) {
+        if (!(error instanceof StorageFailure)) throw error;
+        // Hide only this exact clean cache from editing/autosave. Keep the original
+        // bytes and overlays recoverable until a successful storage retry.
+        this.retiredDrafts.set(order.id, retirement);
+        this.confirmedOrderVersions.set(order.id, order.version);
+        return { retired: true, localPersisted: false };
+      }
+    }
+    this.remoteDrafts.delete(order.id);
+    this.workingDrafts.delete(order.id);
+    this.recoveryOverrides.delete(order.id);
+    this.retiredDrafts.delete(order.id);
+    this.confirmedOrderVersions.set(order.id, order.version);
+    return { retired: true, localPersisted: true };
   }
   markDraftSynced(id, localRevision, remote) {
     this.mutate((data) => {
@@ -359,6 +474,9 @@ export class Workspace {
       if (
         remote.status !== "draft" ||
         !validId(remote.id) ||
+        (this.confirmedOrderVersions.has(remote.id) &&
+          (remote.version || 0) <=
+            this.confirmedOrderVersions.get(remote.id)) ||
         this.workingDrafts.has(remote.id)
       )
         continue;
@@ -473,19 +591,21 @@ export class Workspace {
       if (this.workingConflict(data, id)) throw new DraftConflict();
     }
     for (const [id, entry] of this.remoteDrafts)
-      if (!this.workingDrafts.has(id))
+      if (!this.workingDrafts.has(id) && !this.retiredDrafts.has(id))
         data.drafts[id] = {
           ...clone(entry.draft),
           localRevision: entry.localRevision + 1,
         };
     for (const [id, entry] of this.workingDrafts)
-      data.drafts[id] = clone(entry.draft);
+      if (!this.retiredDrafts.has(id)) data.drafts[id] = clone(entry.draft);
+    for (const id of this.retiredDrafts.keys()) delete data.drafts[id];
     data.draftAutosave = this.autosaveRecovery();
     data.preferences = { ...data.preferences, ...this.temporaryPreferences };
     data.revision++;
     this.write(data);
     this.remoteDrafts.clear();
     this.workingDrafts.clear();
+    this.retiredDrafts.clear();
     this.recoveryOverrides.clear();
     this.temporaryPreferences = {};
     return this.storageStatus();
