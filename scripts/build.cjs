@@ -23,6 +23,8 @@ for (const file of [
   "public/product-photos.js",
   "public/firebase.js",
   "public/storage.js",
+  "public/device-storage.js",
+  "public/storage-recovery.js",
   "public/session.js",
   "public/draft-sync.js",
   "public/order-downloads.js",
