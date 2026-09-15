@@ -241,3 +241,37 @@ test("bounds provider output and rejects malformed JSON", async () => {
     );
   }
 });
+
+test("checks real existing library photos before any external lookup", async () => {
+  let calls = 0;
+  const provider = createProductImageProvider({
+    apiKey: "private",
+    library: async () => [{ page, image: photo }],
+    fetchImpl: async () => {
+      calls++;
+      return response(verdict);
+    },
+    sourcePage: async () => {
+      throw Error("unnecessary network");
+    },
+  });
+  const result = await provider(product);
+  assert.equal(result.image.data, photo.data);
+  assert.equal(calls, 1);
+});
+test("does not use an unlisted Kids or PM version despite a confident brand match", async () => {
+  for (const reason of [
+    "The photo shows Brand Water for Kids.",
+    "The photo shows Brand Water PM.",
+  ]) {
+    const provider = createProductImageProvider({
+      apiKey: "private",
+      sourcePage: async () => page,
+      sourceImage: async () => photo,
+      fetchImpl: async () => response({ ...verdict, reason }),
+    });
+    const result = await provider(product, { sourcePage: page.url });
+    assert.equal(result.review, true);
+    assert.equal(result.image, undefined);
+  }
+});

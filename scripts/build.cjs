@@ -12,6 +12,7 @@ for (const file of [
   "lib/assistant-chat.cjs",
   "lib/product-images.cjs",
   "lib/product-image-provider.cjs",
+  "lib/product-image-library.cjs",
   "lib/product-image-routes.cjs",
   "lib/image-source.cjs",
   "lib/documents.cjs",

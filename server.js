@@ -1064,6 +1064,11 @@ function production() {
   const productImageProvider = process.env.PRODUCT_IMAGE_GEMINI_KEY
     ? require("./lib/product-image-provider.cjs").createProductImageProvider({
         apiKey: process.env.PRODUCT_IMAGE_GEMINI_KEY,
+        library:
+          require("./lib/product-image-library.cjs").createProductImageLibrary({
+            directory: path.join(PUBLIC, "images"),
+            appOrigin: config.appOrigin,
+          }),
         model: firebaseConfig.aiModel || "gemini-3.8-flash",
       })
     : null;
