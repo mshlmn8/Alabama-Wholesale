@@ -10,6 +10,8 @@ for (const file of [
   "lib/migration.cjs",
   "lib/assistant.cjs",
   "lib/documents.cjs",
+  "lib/order-mail.cjs",
+  "lib/order-mail-routes.cjs",
   "public/app.js",
   "public/firebase.js",
   "public/storage.js",

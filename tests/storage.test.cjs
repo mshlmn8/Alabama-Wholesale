@@ -328,6 +328,9 @@ test("explicit storage retry preserves queued work and durably caches the curren
   assert.deepEqual(ws.storageStatus(), {
     warning: null,
     remoteDraftCount: 0,
+    cloudOnlyDraftCount: 0,
+    unprotectedDraftCount: 0,
+    temporaryRecoveryCount: 0,
     preferencesTemporary: false,
   });
   const reloaded = new Workspace(store, "owner");
@@ -1074,4 +1077,421 @@ test("a replaced local draft with reused revision numbers is not overwritten by 
     JSON.parse(store.getItem(ws.key)).drafts.draft.notes,
     "restored from a different backup",
   );
+});
+
+test("an already durable cloud acknowledgement does not rewrite timestamps or manufacture a quota warning", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "ack-noop");
+  const remote = {
+    id: "d",
+    storeId: "s",
+    status: "draft",
+    version: 1,
+    lines: [],
+    notes: "",
+  };
+  ws.mergeRemoteDrafts([remote]);
+  const before = store.getItem(ws.key),
+    sent = ws.getDraft("d");
+  let attempts = 0;
+  store.setItem = () => {
+    attempts++;
+    throw new Error("quota");
+  };
+  const ack = ws.ackCloudDraft(sent, remote);
+  ws.ackCloudDraft(ack.draft, remote);
+  assert.equal(attempts, 0);
+  assert.equal(ack.localPersisted, true);
+  assert.equal(ws.storageStatus().warning, null);
+  assert.equal(store.getItem(ws.key), before);
+});
+test("clearing absent recovery metadata is a no-op and removes only its temporary tombstone", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "recovery-noop");
+  ws.saveDraft({ id: "d", lines: [] });
+  const before = store.getItem(ws.key);
+  let attempts = 0;
+  store.setItem = () => {
+    attempts++;
+    throw new Error("quota");
+  };
+  assert.equal(ws.rememberDraftSave("d", null), true);
+  assert.equal(ws.rememberDraftSave("d", null), true);
+  assert.equal(attempts, 0);
+  assert.equal(ws.storageStatus().warning, null);
+  assert.equal(store.getItem(ws.key), before);
+});
+test("a repeated immutable recovery record does not consume another device write", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "recovery-identical");
+  const record = {
+    command: {
+      id: "request",
+      type: "order.save",
+      payload: {
+        id: "d",
+        storeId: "s",
+        expectedVersion: 0,
+        lines: [],
+        notes: "",
+      },
+    },
+    sentDraft: {
+      id: "d",
+      storeId: "s",
+      version: 0,
+      localRevision: 1,
+      lines: [],
+      notes: "",
+    },
+    attempts: 1,
+  };
+  ws.rememberDraftSave("d", record);
+  let attempts = 0;
+  store.setItem = () => {
+    attempts++;
+    throw new Error("quota");
+  };
+  assert.equal(ws.rememberDraftSave("d", record), true);
+  assert.equal(attempts, 0);
+  assert.deepEqual(ws.autosaveRecovery().d, record);
+});
+
+test("storage status distinguishes protected cloud cache from session-only unsaved edits", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "storage-protection");
+  store.setItem = () => {
+    throw new Error("quota");
+  };
+  const remote = {
+    id: "d",
+    storeId: "s",
+    status: "draft",
+    version: 1,
+    lines: [],
+    notes: "",
+  };
+  ws.mergeRemoteDrafts([remote]);
+  assert.equal(ws.storageStatus().cloudOnlyDraftCount, 1);
+  assert.equal(ws.storageStatus().unprotectedDraftCount, 0);
+  const edited = ws.saveDraftForCloud({
+    ...ws.getDraft("d"),
+    notes: "Unconfirmed edit",
+  }).draft;
+  assert.equal(ws.storageStatus().unprotectedDraftCount, 1);
+  ws.ackCloudDraft(edited, { ...edited, status: "draft", version: 2 });
+  assert.equal(ws.storageStatus().cloudOnlyDraftCount, 1);
+  assert.equal(ws.storageStatus().unprotectedDraftCount, 0);
+  assert.equal(ws.localDraftStatus("d").localPersisted, false);
+});
+
+const retirementDraft = (extra = {}) => ({
+  id: "retire-me",
+  storeId: "store-one",
+  status: "draft",
+  version: 2,
+  lines: [],
+  notes: "Confirmed original notes",
+  ...extra,
+});
+const retirementOrder = (extra = {}) => ({
+  id: "retire-me",
+  storeId: "store-one",
+  status: "submitted",
+  version: 3,
+  invoiceNumber: "AW-SYNTHETIC-1",
+  ...extra,
+});
+const recoveryForRetirement = () => ({
+  command: {
+    id: "uncertain-save",
+    type: "order.save",
+    payload: {
+      id: "retire-me",
+      storeId: "store-one",
+      expectedVersion: 2,
+      lines: [],
+      notes: "Confirmed original notes",
+    },
+  },
+  sentDraft: retirementDraft({ localRevision: 1 }),
+  attempts: 1,
+});
+test("canonical confirmed order retires only its clean device draft and preserves unrelated work", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "retirement");
+  ws.mergeRemoteDrafts([
+    retirementDraft(),
+    retirementDraft({ id: "other", storeId: "store-two" }),
+  ]);
+  ws.enqueue({
+    id: "unrelated-payment",
+    type: "payment.report",
+    payload: { storeId: "store-two", amountCents: 100 },
+  });
+  const before = ws.read();
+  assert.deepEqual(ws.retireConfirmedDraft(retirementOrder()), {
+    retired: true,
+    localPersisted: true,
+  });
+  assert.equal(ws.getDraft("retire-me"), null);
+  assert.deepEqual(ws.getDraft("other"), before.drafts.other);
+  assert.deepEqual(ws.pending(), before.queue);
+  assert.equal(new Workspace(store, "retirement").getDraft("retire-me"), null);
+});
+test("absent, draft, wrong-store and older cloud records cannot retire saved drafts", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "retirement-proof");
+  ws.mergeRemoteDrafts([retirementDraft()]);
+  const raw = store.getItem(ws.key);
+  for (const [order, reason] of [
+    [null, "unconfirmed"],
+    [retirementOrder({ status: "draft" }), "unconfirmed"],
+    [retirementOrder({ storeId: "store-two" }), "stale"],
+    [retirementOrder({ version: 1 }), "stale"],
+    [retirementOrder({ version: NaN }), "unconfirmed"],
+  ]) {
+    assert.deepEqual(ws.retireConfirmedDraft(order), {
+      retired: false,
+      reason,
+    });
+    assert.equal(store.getItem(ws.key), raw);
+  }
+});
+test("dirty drafts and matching queued commands or durable recovery are never retired", async () => {
+  const { Workspace } = await load();
+  for (const setup of [
+    (ws) =>
+      ws.saveDraftForCloud({
+        ...ws.getDraft("retire-me"),
+        notes: "Only local edit",
+      }),
+    (ws) =>
+      ws.enqueue({
+        id: "save",
+        type: "order.save",
+        payload: { id: "retire-me" },
+      }),
+    (ws) =>
+      ws.enqueue({
+        id: "submit",
+        type: "order.submit",
+        payload: { id: "retire-me" },
+      }),
+    (ws) => ws.rememberDraftSave("retire-me", recoveryForRetirement()),
+  ]) {
+    const store = memory(),
+      ws = new Workspace(store, "retirement-pending");
+    ws.mergeRemoteDrafts([retirementDraft()]);
+    setup(ws);
+    const raw = store.getItem(ws.key);
+    assert.equal(ws.retireConfirmedDraft(retirementOrder()).retired, false);
+    assert.equal(store.getItem(ws.key), raw);
+    assert.ok(ws.getDraft("retire-me"));
+  }
+});
+test("temporary save recovery and working-overlay conflicts block retirement", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "retirement-memory");
+  ws.mergeRemoteDrafts([retirementDraft()]);
+  const realWrite = store.setItem;
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  ws.rememberDraftSave("retire-me", recoveryForRetirement());
+  assert.deepEqual(ws.retireConfirmedDraft(retirementOrder()), {
+    retired: false,
+    reason: "pending",
+  });
+  store.setItem = realWrite;
+  const store2 = memory(),
+    a = new Workspace(store2, "conflict"),
+    b = new Workspace(store2, "conflict");
+  a.mergeRemoteDrafts([retirementDraft()]);
+  const realWrite2 = store2.setItem;
+  store2.setItem = () => {
+    throw Error("quota");
+  };
+  const local = a.saveDraftForCloud({
+    ...a.getDraft("retire-me"),
+    notes: "First tab",
+  }).draft;
+  a.ackCloudDraft(local, { ...local, status: "draft", version: 3 });
+  store2.setItem = realWrite2;
+  b.saveDraftForCloud({ ...b.getDraft("retire-me"), notes: "Second tab" });
+  assert.deepEqual(a.retireConfirmedDraft(retirementOrder({ version: 4 })), {
+    retired: false,
+    reason: "conflict",
+  });
+});
+test("quota failure during retirement preserves durable bytes and confirmed memory overlay until retry", async () => {
+  const { Workspace, StorageFailure } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "retirement-quota");
+  ws.mergeRemoteDrafts([retirementDraft()]);
+  const before = store.getItem(ws.key),
+    realWrite = store.setItem;
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  const local = ws.saveDraftForCloud({
+    ...ws.getDraft("retire-me"),
+    notes: "Cloud confirmed newer notes",
+  }).draft;
+  ws.ackCloudDraft(local, { ...local, status: "draft", version: 3 });
+  const memoryDraft = ws.getDraft("retire-me");
+  assert.deepEqual(ws.retireConfirmedDraft(retirementOrder({ version: 4 })), {
+    retired: true,
+    localPersisted: false,
+  });
+  assert.equal(store.getItem(ws.key), before);
+  assert.equal(ws.getDraft("retire-me"), null);
+  assert.deepEqual(ws.workingDrafts.get("retire-me").draft, memoryDraft);
+  assert.equal(ws.listDrafts().length, 0);
+  store.setItem = realWrite;
+  ws.retryStorage();
+  assert.equal(ws.getDraft("retire-me"), null);
+  assert.equal(ws.workingDrafts.size, 0);
+  assert.equal(ws.remoteDrafts.size, 0);
+});
+test("canonical retirement of a cloud-only cache needs no unnecessary quota-blocked write", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "retirement-cloud-cache");
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  ws.mergeRemoteDrafts([retirementDraft()]);
+  assert.equal(ws.localDraftStatus("retire-me").localPersisted, false);
+  assert.deepEqual(ws.retireConfirmedDraft(retirementOrder()), {
+    retired: true,
+    localPersisted: true,
+  });
+  assert.equal(ws.getDraft("retire-me"), null);
+  assert.equal(store.getItem(ws.key), null);
+});
+test("retirement read failures never hide saved work", async () => {
+  const { Workspace, StorageFailure } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "retirement-error-proof");
+  ws.mergeRemoteDrafts([retirementDraft()]);
+  const realRead = store.getItem;
+  store.getItem = () => {
+    throw Error("read unavailable");
+  };
+  assert.throws(
+    () => ws.retireConfirmedDraft(retirementOrder()),
+    StorageFailure,
+  );
+  store.getItem = realRead;
+  assert.ok(ws.getDraft("retire-me"));
+});
+test("safe quota retirement excludes autosave view but preserves raw backup until storage recovery", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "retired-overlay");
+  ws.mergeRemoteDrafts([retirementDraft()]);
+  const previous = ws.getDraft("retire-me"),
+    raw = store.getItem(ws.key),
+    write = store.setItem;
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  assert.deepEqual(ws.retireConfirmedDraft(retirementOrder()), {
+    retired: true,
+    localPersisted: false,
+  });
+  assert.equal(store.getItem(ws.key), raw);
+  assert.equal(ws.getDraft("retire-me"), null);
+  assert.deepEqual(ws.listDrafts(), []);
+  assert.throws(
+    () => ws.saveDraftForCloud({ ...previous, notes: "Stale edit" }),
+    /submitted|closed|confirmed/i,
+  );
+  store.setItem = write;
+  ws.retryStorage();
+  assert.equal(
+    JSON.parse(store.getItem(ws.key)).drafts["retire-me"],
+    undefined,
+  );
+  assert.equal(ws.retiredDrafts.size, 0);
+});
+test("a newer same-account local revision invalidates a retired cache tombstone", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    a = new Workspace(store, "retired-tabs"),
+    b = new Workspace(store, "retired-tabs");
+  a.mergeRemoteDrafts([retirementDraft()]);
+  const write = store.setItem;
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  a.retireConfirmedDraft(retirementOrder());
+  store.setItem = write;
+  b.saveDraftForCloud({
+    ...b.getDraft("retire-me"),
+    notes: "New dirty edits from the other tab",
+  });
+  assert.equal(
+    a.getDraft("retire-me").notes,
+    "New dirty edits from the other tab",
+  );
+  assert.equal(a.retiredDrafts.size, 0);
+});
+test("a pending command or recovery added by another tab invalidates retired-cache hiding", async () => {
+  const { Workspace } = await load();
+  for (const addPending of [
+    (b) =>
+      b.enqueue({
+        id: "submit-lost",
+        type: "order.submit",
+        payload: { id: "retire-me" },
+      }),
+    (b) => b.rememberDraftSave("retire-me", recoveryForRetirement()),
+  ]) {
+    const store = memory(),
+      a = new Workspace(store, "retired-pending"),
+      b = new Workspace(store, "retired-pending");
+    a.mergeRemoteDrafts([retirementDraft()]);
+    const write = store.setItem;
+    store.setItem = () => {
+      throw Error("quota");
+    };
+    a.retireConfirmedDraft(retirementOrder());
+    store.setItem = write;
+    addPending(b);
+    assert.ok(a.getDraft("retire-me"));
+    assert.equal(a.retiredDrafts.size, 0);
+  }
+});
+test("a delayed older cloud draft response cannot revive a canonically retired cache", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "retired-delayed-cloud");
+  ws.mergeRemoteDrafts([retirementDraft()]);
+  const write = store.setItem;
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  ws.retireConfirmedDraft(retirementOrder());
+  store.setItem = write;
+  ws.mergeRemoteDrafts([retirementDraft()]);
+  assert.equal(ws.getDraft("retire-me"), null);
+  assert.equal(ws.listDrafts().length, 0);
+});
+
+test("older cloud responses cannot revive a durably retired draft either", async () => {
+  const { Workspace } = await load();
+  const ws = new Workspace(memory(), "retired-durable-oldread");
+  ws.mergeRemoteDrafts([retirementDraft()]);
+  ws.retireConfirmedDraft(retirementOrder());
+  ws.mergeRemoteDrafts([retirementDraft()]);
+  assert.equal(ws.getDraft("retire-me"), null);
 });

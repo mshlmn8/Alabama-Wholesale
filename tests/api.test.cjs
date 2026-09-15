@@ -16,7 +16,7 @@ const customer = {
   email_verified: true,
   firebase: { sign_in_provider: "password" },
 };
-async function fixture(t) {
+async function fixture(t, config = {}) {
   const repo = new MemoryRepository({
     users: [
       {
@@ -73,6 +73,7 @@ async function fixture(t) {
     config: {
       firebaseConfig: { projectId: "test" },
       recaptchaSiteKey: "public",
+      ...config,
     },
     assistant: async () => ({ lines: [], ambiguities: [] }),
   });
@@ -93,6 +94,57 @@ async function fixture(t) {
   };
   return { repo, auth, request };
 }
+
+test("draft refresh reads only live drafts in the requested authorized store", async (t) => {
+  const { repo, request } = await fixture(t);
+  const lines = [{ id: "line", productId: "p", quantity: 2, unit: "each" }];
+  await repo.transaction(async (tx) => {
+    await tx.set("orders", "empty", { storeId: "one", status: "draft", version: 1, lines: [], notes: "Unfinished" });
+    await tx.set("orders", "review", { storeId: "one", status: "draft", version: 2, lines, legacy: { requiresReview: true, rawLines: ["original archive"] } });
+    await tx.set("orders", "deleted", { storeId: "one", status: "draft", deleted: true });
+    await tx.set("orders", "submitted", { storeId: "one", status: "submitted", lines });
+    await tx.set("orders", "private", { storeId: "two", status: "draft", notes: "Other store" });
+  });
+  const calls = [];
+  const list = repo.list.bind(repo);
+  repo.list = async (collection, options) => {
+    calls.push({ collection, options });
+    assert.equal(collection, "orders", "Draft polling must not reload financial or catalog collections.");
+    assert.deepEqual(options.where, [["storeId", "==", "one"], ["status", "==", "draft"]]);
+    return list(collection, options);
+  };
+  const response = await request("/api/drafts?storeId=one", "customer");
+  assert.equal(response.status, 200, response.body);
+  assert.match(response.headers.get("cache-control"), /no-store/);
+  const drafts = JSON.parse(response.body).orders;
+  assert.deepEqual(drafts.map((draft) => draft.id).sort(), ["empty", "review"]);
+  assert.deepEqual(drafts.find((draft) => draft.id === "empty").lines, []);
+  const review = drafts.find((draft) => draft.id === "review");
+  assert.deepEqual(review.lines, lines);
+  assert.equal(review.legacy.requiresReview, true);
+  assert.equal(review.legacy.rawLines, undefined);
+  assert.equal(calls.length, 1);
+  assert.deepEqual((await repo.get("orders", "review")).legacy.rawLines, ["original archive"]);
+});
+
+test("draft refresh validates store access, current membership, and migration readiness before listing", async (t) => {
+  const { repo, request } = await fixture(t, { requireMigration: true });
+  const list = repo.list.bind(repo);
+  let reads = 0;
+  repo.list = async (...args) => { reads++; return list(...args); };
+  assert.equal((await request("/api/drafts?storeId=one", null)).status, 401);
+  assert.equal((await request("/api/drafts?storeId=one", "customer")).status, 503);
+  await repo.put("settings", "migrationGate", { complete: true });
+  for (const query of ["", "?storeId=", "?storeId=one&storeId=two", "?storeId=one%2Ftwo", "?storeId=%20", "?storeId=.", "?storeId=..", `?storeId=${"x".repeat(701)}`])
+    assert.equal((await request(`/api/drafts${query}`, "owner")).status, 400, query);
+  assert.equal((await request("/api/drafts?storeId=two", "customer")).status, 403);
+  assert.equal((await request("/api/drafts?storeId=missing", "owner")).status, 404);
+  await repo.put("users", "customer", { id: "customer", uid: "customer", role: "customer", active: true, email: customer.email, storeIds: [] });
+  assert.equal((await request("/api/drafts?storeId=one", "customer")).status, 403);
+  assert.equal(reads, 0, "Rejected polling requests must not list order records.");
+  assert.equal((await request("/api/drafts?storeId=one", "owner")).status, 200);
+  assert.equal(reads, 1);
+});
 test("public health works while private source paths cannot be downloaded", async (t) => {
   const { request } = await fixture(t);
   assert.equal((await request("/healthz", null)).status, 200);
@@ -556,4 +608,23 @@ test("repeated state reads keep financial values, assignments and revocation fre
   assert.equal(changed.ledger.length, 0);
   await repo.put("users", "customer", { id: "customer", uid: "customer", role: "customer", active: false, storeIds: ["two"] });
   assert.equal((await request("/api/state", "customer")).status, 403);
+});
+
+test('order command responses omit duplicate migration lines while original records and idempotent receipts remain intact', async (t) => {
+  const {request,repo}=await fixture(t);
+  const rawLines=[{original:'Saved original migration detail '.repeat(2000)}];
+  await repo.put('products','p',{id:'p',name:'Original product',variants:['Lime'],priceCents:125,packSize:12,active:true,version:1});
+  await repo.put('stores','one',{id:'one',name:'One',taxRateBps:0,creditLimitCents:null,active:true,version:1});
+  const lines=[{id:'line',productId:'p',variant:'Lime',quantity:2,unit:'each',note:'Keep this note'}];
+  await repo.put('orders','recovered',{id:'recovered',storeId:'one',status:'draft',version:1,createdAt:1,createdBy:'customer',lines,notes:'Original notes',legacy:{requiresReview:true,archiveDraftId:'archive-reference',rawLines}});
+  const save={id:'review-save',type:'order.save',payload:{id:'recovered',storeId:'one',expectedVersion:1,lines,notes:'Reviewed notes',acknowledgeLegacyReview:true}};
+  const saved=await request('/api/commands','customer',save);assert.equal(saved.status,200,saved.body);const draft=JSON.parse(saved.body).result;
+  assert.equal(draft.legacy.rawLines,undefined);assert.equal(draft.legacy.requiresReview,false);assert.equal(draft.legacy.archiveDraftId,'archive-reference');assert.deepEqual(draft.lines,lines);assert.equal(draft.notes,'Reviewed notes');
+  assert.deepEqual((await repo.get('orders','recovered')).legacy.rawLines,rawLines);
+  const receipt=(await repo.list('commandReceipts'))[0];assert.deepEqual(receipt.result.legacy.rawLines,rawLines);
+  const replay=await request('/api/commands','customer',save);assert.deepEqual(JSON.parse(replay.body).result,draft);assert.equal((await repo.get('orders','recovered')).version,2);
+  const submitted=await request('/api/commands','customer',{id:'submit-reviewed',type:'order.submit',payload:{id:'recovered',expectedVersion:2,expectedTotalCents:250}});assert.equal(submitted.status,200,submitted.body);const invoice=JSON.parse(submitted.body).result;
+  assert.equal(invoice.legacy.rawLines,undefined);assert.equal(invoice.totalCents,250);assert.equal(invoice.lines[0].name,'Original product');assert.equal(invoice.lines[0].unitPriceCents,125);assert.equal(invoice.storeSnapshot.name,'One');assert.ok(invoice.invoiceNumber);
+  const transitioned=await request('/api/commands','owner',{id:'approve-reviewed',type:'order.transition',payload:{id:'recovered',status:'approved',expectedVersion:invoice.version}});assert.equal(transitioned.status,200,transitioned.body);const approved=JSON.parse(transitioned.body).result;
+  assert.equal(approved.legacy.rawLines,undefined);assert.equal(approved.status,'approved');assert.equal(approved.totalCents,250);assert.deepEqual((await repo.get('orders','recovered')).legacy.rawLines,rawLines);assert.equal((await repo.list('ledger')).length,1);
 });

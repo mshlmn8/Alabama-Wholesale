@@ -49,6 +49,7 @@ const BACKUP_COLLECTIONS = [
   "commandReceipts",
   "invites",
   "outbox",
+  "orderMailJobs",
   "aiLimits",
   "inviteVersions",
 ];
@@ -61,6 +62,7 @@ function createApp({
   assets,
   emailTransport,
   emailFrom,
+  orderMailWorkerToken,
   now = () => Date.now(),
 }) {
   const app = express();
@@ -124,6 +126,9 @@ function createApp({
       emailDeliveryConfigured,
     });
   });
+  const orderMailOptions = { repo, transport: emailTransport, from: emailFrom, now, ...(documents ? { render: documents } : {}) };
+  const { registerOrderMailWorker, registerOrderMailApi } = require("./lib/order-mail-routes.cjs");
+  registerOrderMailWorker(app, orderMailOptions, orderMailWorkerToken);
   app.use("/api", (req, res, next) => {
     res.set("Cache-Control", "private, no-store");
     next();
@@ -151,6 +156,7 @@ function createApp({
       next(e);
     }
   });
+  registerOrderMailApi(app, orderMailOptions);
   const catalogCache = new Map();
   async function catalog(collection) {
     const cached = catalogCache.get(collection);
@@ -276,6 +282,36 @@ function createApp({
       nextCursor: orders.length > limit ? orders[limit - 1].id : null,
     };
   }
+
+  app.get("/api/drafts", async (req, res) => {
+    if (
+      config.requireMigration &&
+      !(await repo.get("settings", "migrationGate"))?.complete
+    )
+      throw error(
+        503,
+        "upgrade_in_progress",
+        "The app upgrade is being completed. Please try again shortly.",
+      );
+    const storeId = req.query.storeId;
+    if (
+      typeof storeId !== "string" ||
+      !storeId.trim() ||
+      storeId.length > 700 ||
+      storeId === "." ||
+      storeId === ".." ||
+      storeId.includes("/")
+    )
+      throw error(400, "invalid_store", "Choose a valid store to refresh drafts.");
+    access(req.actor, storeId);
+    const store = await repo.get("stores", storeId);
+    if (!store || store.deleted)
+      throw error(404, "store_not_found", "This store was not found.");
+    const orders = await repo.list("orders", {
+      where: [["storeId", "==", storeId], ["status", "==", "draft"]],
+    });
+    res.json({ orders: orders.filter((order) => !order.deleted).map(publicOrder) });
+  });
 
   app.get("/api/state", async (req, res) => {
     const actor = req.actor;
@@ -422,9 +458,20 @@ function createApp({
         "The app upgrade is being completed. Please try again shortly.",
       );
     const { executeCommand } = require("./lib/domain.cjs");
-    const result = await repo.transaction((tx) =>
-      executeCommand(tx, req.actor, req.body, { now: now(), id: randomUUID }),
-    );
+    const result = await repo.transaction(async (tx) => {
+      const orderId = req.body?.type === "order.submit" && req.body?.payload?.id;
+      const previous = typeof orderId === "string" && orderId && !orderId.includes("/")
+        ? await tx.get("orders", orderId)
+        : null;
+      const submittedAt = now();
+      const result = await executeCommand(tx, req.actor, req.body, { now: submittedAt, id: randomUUID });
+      if (previous?.status === "draft" && result?.status === "submitted")
+        await require("./lib/order-mail.cjs").queueAutomaticOrderMail(tx, req.actor, result, {
+          now: submittedAt,
+          configured: typeof emailTransport?.sendMail === "function" && !!emailFrom,
+        });
+      return result;
+    });
     try {
       if (
         [
@@ -452,7 +499,11 @@ function createApp({
     }
     if (req.body.type === "product.save") catalogCache.delete("products");
     if (req.body.type === "category.save") catalogCache.delete("categories");
-    res.json({ result });
+    res.json({
+      result: ["order.save", "order.submit", "order.transition"].includes(req.body.type)
+        ? publicOrder(result)
+        : result,
+    });
   });
   app.post("/api/assets/upload", async (req, res) => {
     master(req);
@@ -880,7 +931,7 @@ function production() {
       ? createSmtpTransport({ smtpUrl: process.env.SMTP_URL })
       : null;
   config.emailDeliveryConfigured = !!emailTransport;
-  return createApp({ repo, auth, config, assets, emailTransport, emailFrom });
+  return createApp({ repo, auth, config, assets, emailTransport, emailFrom, orderMailWorkerToken: process.env.ORDER_MAIL_WORKER_TOKEN });
 }
 if (require.main === module)
   production().listen(process.env.PORT || 8080, () =>

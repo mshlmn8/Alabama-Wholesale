@@ -150,7 +150,17 @@ export function createDraftSync({
     return p
       ? {
           command: clone(p.command),
-          sentDraft: clone(p.sentDraft),
+          // Recovery needs the exact submitted content and its local generation,
+          // not a second copy of retained migration/display metadata. The complete
+          // original draft stays in Workspace and its export.
+          sentDraft: {
+            ...body(p.sentDraft),
+            version: p.sentDraft.version ?? 0,
+            localRevision: p.sentDraft.localRevision ?? 0,
+            ...(p.sentDraft.acknowledgeLegacyReview === true
+              ? { acknowledgeLegacyReview: true }
+              : {}),
+          },
           attempts: p.attempts,
           ...(p.failure ? { failure: clone(p.failure) } : {}),
         }
