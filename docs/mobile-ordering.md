@@ -2,6 +2,10 @@
 
 Updated September 15, 2026.
 
+- **Choose a store.** Open the store dropdown in the header and type in **Search stores**. Tap the matching name, or use arrow keys and Enter. Searching or pressing Escape leaves the current store unchanged. Choosing a store restores its working draft. If the latest visible notes could not be saved, the app keeps you in that store so you can retry, copy or export the notes first.
+
+- **Add several flavors together.** Open a product and set each flavor's quantity with the − / + buttons or by typing. For example, set cranberry to 2 and apple to 2, then choose **Add selected flavors**. Leave unwanted flavors at 0. Search long flavor lists without losing selections. **Order unit** and the optional note apply to all selected flavors; each becomes a separate editable order line. One Undo removes the whole batch. Single-flavor products and scanned flavors start at 1. The batch uses the same automatic saving as other draft edits.
+
 - **Browse and search.** Catalog opens in the compact **List** view. Choose **Grid** to set **Columns** from 1–5 and turn **Compact** on or off. Switching views preserves your grid settings; these choices belong to your account on this device. On a narrow phone screen, four- and five-column tiles open the full product name, options, price and quantity controls when tapped. Exact product names and codes rank first; searching `SS` puts the exact name ahead of related products and excludes incidental matches such as “floss.” The current-order bar opens your working draft for review. Its total is an estimate until submission. Mobile fields avoid unwanted focus zoom; pinch zoom remains available.
 
 - **Appearance.** The Dispatch layout uses orange controls, warm ivory backgrounds, compact typography and the original Alabama Wholesale logo. Light is the default for a new account on a device; your explicit theme preference is retained. Use the sun icon to switch between light and dark.

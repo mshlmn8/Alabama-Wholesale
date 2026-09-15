@@ -5,6 +5,8 @@ import * as firebase from "./firebase.js";
 import { createProductPhotos } from "./product-photos.js";
 import { createGeminiChat } from "./gemini-chat.js";
 import { createDraftSync } from "./draft-sync.js";
+import { createStorePicker } from "./store-picker.js";
+import { productVariants, selectedProductLines } from "./order-selection.js";
 import {
   createOrderDownloads,
   normalizeDeviceCopyOptions,
@@ -400,6 +402,7 @@ let config,
   orderFilter = "",
   queueBusy = false,
   loading = false;
+let storePicker = null;
 let draftSync = null;
 let orderDownloads = null;
 let deviceStorageRecovery = null;
@@ -996,6 +999,7 @@ async function api(path, { method = "GET", body, raw = false, signal } = {}) {
 }
 function editorIsActive() {
   return (
+    !!storePicker?.isOpen() ||
     !!document.querySelector("dialog[open]") ||
     !!document.activeElement?.matches(
       "input, textarea, select, [contenteditable=true]",
@@ -1279,6 +1283,10 @@ function persistPreferences(values) {
   });
 }
 function changeStore(id) {
+  if (hasUnsavedDraftNotes())
+    throw new Error(
+      "Your latest notes could not be saved. Retry saving them, or copy or export them before switching stores.",
+    );
   storeId = id;
   geminiChat.refreshScope();
   productPhotos.reset();
@@ -1524,14 +1532,19 @@ function render() {
       button("Sign out", signOut, "text-button"),
     ),
   );
-  const switcher = select(
-    state.stores.map((store) => [store.id, store.name]),
-    storeId,
-    {
-      id: "store-switch",
-      onChange: (event) => act(() => changeStore(event.target.value)),
-    },
-  );
+  storePicker?.dispose();
+  const pickerScope = operationScope();
+  storePicker = createStorePicker({
+    stores: state.stores,
+    value: storeId,
+    id: "store-switch",
+    onSelect: (id) =>
+      act(() => {
+        if (!scopeCurrent(pickerScope)) throw new SessionChanged();
+        if (state.stores.some((store) => store.id === id)) changeStore(id);
+      }),
+  });
+  const switcher = storePicker.element;
   const notifications = iconButton("Notifications", "bell", () =>
     setView("notifications"),
   );
@@ -2303,21 +2316,17 @@ async function toggleFavorite(id) {
 }
 function showAddProduct(product, initialVariant) {
   if (!storeId) throw new Error("Select a store before adding products.");
+  const scope = operationScope(),
+    selectedStoreId = storeId;
+  const variants = productVariants(product);
+  const multiple = variants.length > 1;
   const m = modal(
     product.name,
-    "Choose a variant and quantity. Case sizes use the product’s configured pack size.",
+    multiple
+      ? "Choose quantities for any flavors, then add them together. Leave the others at 0."
+      : "Choose a quantity to add to your order.",
   );
-  const variants = product.variants?.length ? product.variants : [""];
-  const variant = select(
-    variants.map((v) => [v, v || "Standard"]),
-    variants.includes(initialVariant) ? initialVariant : variants[0],
-  );
-  const quantity = input("number", "1", {
-    min: 1,
-    step: 1,
-    inputmode: "numeric",
-    required: true,
-  });
+  m.dialog.classList.add("product-selection-dialog");
   const unit = select(
     [
       ["each", "Each"],
@@ -2328,43 +2337,161 @@ function showAddProduct(product, initialVariant) {
     "each",
   );
   const note = el("textarea", {
-    placeholder: "Packing or flavor instructions (optional)",
+    placeholder: "Instructions for these items (optional)",
     maxlength: 1000,
+    rows: 2,
   });
-  const price = el("p", { class: "mt" });
-  function updatePrice() {
-    const value = linePrice({
-      productId: product.id,
-      variant: variant.value,
-      unit: unit.value,
-    });
-    price.textContent =
-      value == null
-        ? "Price is missing. You can draft this item, but it must be priced before submission."
-        : `${cash(value)} per ${unit.value} · ${cash(value * Number(quantity.value || 0))} line total`;
-    const inventory = state.inventory.find(
-      (item) =>
-        item.productId === product.id && (item.variant || "") === variant.value,
+  const summary = el("div", {
+    class: "flavor-summary",
+    role: "status",
+    "aria-live": "polite",
+    "aria-atomic": "true",
+  });
+  const list = el("div", {
+    class: "flavor-list",
+    role: "group",
+    "aria-label": "Flavor quantities",
+  });
+  const rows = variants.map((variant) => {
+    const label = variant || "Standard";
+    const qtyId = `flavor-${uuid()}`;
+    const quantity = input(
+      "number",
+      !multiple || variant === initialVariant ? "1" : "0",
+      {
+        id: qtyId,
+        min: 0,
+        max: 1_000_000,
+        step: 1,
+        inputmode: "numeric",
+        "aria-label": `${label} quantity`,
+      },
     );
-    if (inventory?.onHand != null)
-      price.textContent += ` · ${inventory.onHand - (inventory.reserved || 0)} each available`;
-    else price.textContent += " · Stock count not yet set";
-  }
-  variant.addEventListener("change", updatePrice);
-  unit.addEventListener("change", updatePrice);
-  quantity.addEventListener("input", updatePrice);
-  updatePrice();
-  append(
-    m.content,
-    el(
+    const price = el("span", { class: "flavor-price" });
+    const less = button("−", () => step(-1), "flavor-step");
+    const more = button("+", () => step(1), "flavor-step");
+    less.setAttribute("aria-label", `Decrease ${label} quantity`);
+    more.setAttribute("aria-label", `Increase ${label} quantity`);
+    const row = el(
       "div",
-      { class: "form-grid" },
-      field("Variant", variant),
-      field("Quantity", quantity),
-      field("Order unit", unit),
-      field("Line note", note),
-    ),
-    price,
+      { class: "flavor-row" },
+      el(
+        "div",
+        { class: "flavor-info" },
+        el("label", { for: qtyId }, label),
+        price,
+      ),
+      el("div", { class: "flavor-quantity" }, less, quantity, more),
+    );
+    function step(delta) {
+      const count = Number(quantity.value);
+      const next = Math.min(
+        1_000_000,
+        Math.max(
+          0,
+          (Number.isSafeInteger(count) && count >= 0 ? count : 0) + delta,
+        ),
+      );
+      if (Number.isSafeInteger(next)) quantity.value = String(next);
+      updateSelection();
+    }
+    quantity.addEventListener("input", updateSelection);
+    append(list, row);
+    return { variant, row, quantity, price };
+  });
+  const add = button(
+    multiple ? "Add selected flavors" : "Add to draft",
+    () => {
+      if (!scopeCurrent(scope) || storeId !== selectedStoreId)
+        throw new SessionChanged();
+      const lines = selectedProductLines(
+        product,
+        rows.map((row) => row.quantity.value),
+        unit.value,
+        note.value,
+      );
+      if ((draft?.lines.length || 0) + lines.length > 150)
+        throw new Error(
+          "An order can have up to 150 lines. Choose fewer flavors or start another draft.",
+        );
+      editDraft((d) =>
+        d.lines.push(...lines.map((line) => ({ ...line, id: uuid() }))),
+      );
+      m.close();
+      toast(
+        `${product.name}: ${lines.length} ${lines.length === 1 ? "item" : "flavors"} added to your draft.`,
+      );
+    },
+    "primary",
+    "plus",
+  );
+  function updateSelection() {
+    let selected = 0,
+      subtotal = 0,
+      unpriced = 0,
+      invalid = false;
+    for (const row of rows) {
+      const count = Number(row.quantity.value);
+      const valid =
+        Number.isSafeInteger(count) &&
+        count >= 0 &&
+        row.quantity.validity.valid;
+      const value = linePrice({
+        productId: product.id,
+        variant: row.variant,
+        unit: unit.value,
+      });
+      row.quantity.setAttribute("aria-invalid", String(!valid));
+      row.row.classList.toggle("selected", valid && count > 0);
+      invalid ||= !valid;
+      if (valid && count > 0) {
+        selected++;
+        if (value == null || !Number.isSafeInteger(value * count)) unpriced++;
+        else subtotal += value * count;
+      }
+      const inventory = state.inventory.find(
+        (item) =>
+          item.productId === product.id && (item.variant || "") === row.variant,
+      );
+      row.price.textContent = `${value == null ? "Price needed" : `${cash(value)} / ${unit.value}`}${inventory?.onHand != null ? ` · ${inventory.onHand - (inventory.reserved || 0)} each available` : ""}`;
+    }
+    summary.textContent = invalid
+      ? "Use whole-number quantities between 0 and 1,000,000."
+      : !selected
+        ? "Choose a quantity to get started."
+        : `${selected} ${multiple ? (selected === 1 ? "flavor" : "flavors") : "item"} selected · ${unpriced ? `${unpriced} ${unpriced === 1 ? "price" : "prices"} needed` : `${cash(subtotal)} subtotal`}`;
+    add.disabled = invalid || !selected;
+  }
+  const search =
+    variants.length > 6
+      ? input("search", "", {
+          placeholder: "Search flavors",
+          "aria-label": "Search flavors",
+          class: "flavor-search",
+        })
+      : null;
+  const noResults = el(
+    "p",
+    { class: "flavor-no-results", hidden: true },
+    "No matching flavors. Your selected quantities are kept.",
+  );
+  search?.addEventListener("input", () => {
+    const query = search.value.trim().toLocaleLowerCase();
+    let visible = 0;
+    for (const row of rows) {
+      row.row.hidden = !(row.variant || "Standard")
+        .toLocaleLowerCase()
+        .includes(query);
+      if (!row.row.hidden) visible++;
+    }
+    noResults.hidden = visible > 0;
+  });
+  unit.addEventListener("change", updateSelection);
+  const options = el(
+    "details",
+    { class: "flavor-options" },
+    el("summary", {}, "Notes & product options"),
+    field("Line note", note, "Applies to all selected flavors."),
     el(
       "div",
       { class: "actions" },
@@ -2383,31 +2510,19 @@ function showAddProduct(product, initialVariant) {
     ),
   );
   append(
-    m.footer,
-    button("Cancel", m.close),
-    button(
-      "Add to draft",
-      () => {
-        const count = Number(quantity.value);
-        if (!Number.isSafeInteger(count) || count <= 0)
-          throw new Error("Quantity must be a positive whole number.");
-        editDraft((d) =>
-          d.lines.push({
-            id: uuid(),
-            productId: product.id,
-            variant: variant.value,
-            quantity: count,
-            unit: unit.value,
-            note: note.value.trim(),
-          }),
-        );
-        m.close();
-        toast(`${product.name} added to your draft.`);
-      },
-      "primary",
-      "plus",
-    ),
+    m.content,
+    field("Order unit", unit),
+    search,
+    list,
+    noResults,
+    options,
   );
+  append(
+    m.footer,
+    summary,
+    el("div", { class: "flavor-actions" }, button("Cancel", m.close), add),
+  );
+  updateSelection();
 }
 function renderBuilder() {
   const root = el(
@@ -5971,6 +6086,8 @@ function showScanner() {
 }
 
 function renderAuth(error = "") {
+  storePicker?.dispose();
+  storePicker = null;
   state = null;
   session = null;
   const invite = new URL(location.href).searchParams.has("invite");
@@ -6481,6 +6598,8 @@ const productPhotos = createProductPhotos({
   onApplied: () => refresh({ renderPage: true, passive: true }),
 });
 async function onIdentity(user) {
+  storePicker?.dispose();
+  storePicker = null;
   geminiChat.reset();
   productPhotos.reset();
   deviceStorageRecovery?.dispose();

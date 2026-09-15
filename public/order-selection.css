@@ -1,0 +1,135 @@
+.product-selection-dialog .dialog-body {
+  padding-bottom: 0;
+}
+.product-selection-dialog .dialog-head {
+  margin-bottom: 16px;
+}
+.product-selection-dialog .dialog-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 12px 0 18px;
+  background: var(--panel);
+}
+.product-selection-dialog .flavor-summary {
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+.flavor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.flavor-actions button {
+  min-height: 44px;
+  padding: 10px 12px;
+}
+.flavor-actions .primary {
+  flex: 1;
+}
+.flavor-search {
+  margin-top: 14px;
+}
+.flavor-list {
+  display: grid;
+  margin: 14px 0;
+  border-top: 1px solid var(--line);
+}
+.flavor-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 76px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.flavor-row[hidden],
+.flavor-no-results[hidden] {
+  display: none;
+}
+.flavor-info {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.flavor-info label {
+  margin: 0;
+  line-height: 1.35;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+.flavor-row.selected .flavor-info label {
+  color: var(--accent-ink);
+}
+.flavor-price {
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+.flavor-quantity {
+  display: grid;
+  grid-template-columns: 44px 52px 44px;
+  align-items: stretch;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--panel2);
+}
+.flavor-quantity .flavor-step,
+.flavor-quantity input {
+  border: 0;
+  border-radius: 0;
+  min-width: 0;
+  width: 100%;
+  min-height: 44px;
+  margin: 0;
+  padding: 0;
+  text-align: center;
+  background: transparent;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+.flavor-quantity .flavor-step {
+  font-size: 22px;
+  font-weight: 600;
+}
+.flavor-quantity input {
+  appearance: textfield;
+  -moz-appearance: textfield;
+  background: var(--panel);
+}
+.flavor-quantity input::-webkit-inner-spin-button,
+.flavor-quantity input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.flavor-quantity input[aria-invalid="true"] {
+  box-shadow: inset 0 0 0 2px var(--red);
+}
+.flavor-quantity :focus-visible {
+  outline-offset: -3px;
+}
+.flavor-options summary {
+  min-height: 44px;
+  padding: 10px 0;
+  cursor: pointer;
+  color: var(--muted);
+  font-weight: 650;
+}
+.flavor-options .actions {
+  margin-top: 12px;
+}
+@media (max-width: 360px) {
+  .flavor-actions button {
+    font-size: 0.8125rem;
+    padding-inline: 9px;
+  }
+  .flavor-row {
+    gap: 8px;
+  }
+}
