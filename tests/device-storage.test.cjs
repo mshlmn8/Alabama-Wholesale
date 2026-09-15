@@ -113,6 +113,7 @@ function fakeIDB(options = {}) {
             get: (key) =>
               op(() => {
                 const value = structuredClone(views.get(name).get(key));
+                options.onGet?.({ key, mode });
                 return options.corruptRead && value
                   ? { ...value, raw: value.raw + "CORRUPT" }
                   : value;
@@ -706,5 +707,31 @@ test("a real legacy conflict discovered during a pending write retains its warni
   assert.equal(adapter.status().legacyConflict, true);
   assert.ok(adapter.status().warning);
   assert.equal(storage.getItem(KEY), raw("legacy writer"));
+  adapter.dispose();
+});
+
+test("flush waits for an edit that starts while a previous read warning is being verified", async () => {
+  const { createDeviceStorage } = await load();
+  const storage = memory({ [KEY]: raw() }),
+    indexedDB = fakeIDB();
+  const adapter = await createDeviceStorage(
+    KEY,
+    raw(),
+    options(storage, indexedDB),
+  );
+  indexedDB.options.openError = true;
+  await assert.rejects(() => adapter.refresh());
+  indexedDB.options.openError = false;
+  let staged = false;
+  indexedDB.options.onGet = ({ mode }) => {
+    if (mode === "readonly" && !staged) {
+      staged = true;
+      adapter.setItem(KEY, raw("edit during retry"));
+    }
+  };
+  await adapter.flush();
+  assert.equal(adapter.committedItem(KEY), raw("edit during retry"));
+  assert.equal(adapter.status().pending, false);
+  assert.equal(adapter.status().conflicted, false);
   adapter.dispose();
 });

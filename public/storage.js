@@ -670,6 +670,10 @@ export class Workspace {
       throw new StorageFailure(this.storage.databaseUnavailable);
     try {
       await this.storage.flush?.();
+      if (this.storage.status?.().pending)
+        throw new StorageFailure(
+          "The latest device backup is still saving. Keep this tab open and retry shortly.",
+        );
     } catch (error) {
       if (error.code === "DEVICE_STORAGE_CONFLICT") throw new DraftConflict();
       throw new StorageFailure(

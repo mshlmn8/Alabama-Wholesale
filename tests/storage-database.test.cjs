@@ -198,3 +198,22 @@ test("an unreadable database cannot authorize sending an old localStorage queue"
   await assert.rejects(f.workspace.flushStorage(), { name: "StorageFailure" });
   assert(f.workspace.storageStatus().warning);
 });
+test("a flush returning with a newer write still pending cannot authorize a financial send", async () => {
+  const f = await setup(),
+    database = adapter(JSON.stringify(f.workspace.persistenceSnapshot()));
+  f.workspace.adoptStorage(database);
+  await f.workspace.flushStorage();
+  f.workspace.enqueue({
+    id: "new-receipt",
+    type: "order.submit",
+    payload: { id: "new-order" },
+  });
+  database.flush = async () => ({ pending: true });
+  await assert.rejects(f.workspace.flushStorage(), { name: "StorageFailure" });
+  assert(f.workspace.pending().some((row) => row.command.id === "new-receipt"));
+  assert(
+    !JSON.parse(database.committedItem()).queue.some(
+      (row) => row.command.id === "new-receipt",
+    ),
+  );
+});

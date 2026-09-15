@@ -512,38 +512,60 @@ function createAdapter(key, initial, options) {
     },
     async flush() {
       try {
-        checkLegacy();
+        return await bounded(options.timeoutMs, async (signal) => {
+          for (;;) {
+            active(signal);
+            checkLegacy();
+            if (conflict)
+              throw (
+                lastError || failure("DEVICE_STORAGE_CONFLICT", legacyConflict)
+              );
+            // Observe writes staged while an earlier commit or warning check
+            // was in flight. A completed flush never reports pending content.
+            if (running) await withAbort(running, signal);
+            if (uncertain || cacheCanonical !== committedCanonical) {
+              await withAbort(schedule(), signal);
+              continue;
+            }
+            if (conflict)
+              throw (
+                lastError || failure("DEVICE_STORAGE_CONFLICT", legacyConflict)
+              );
+            if (warning) {
+              const beforeRead = row;
+              const verified = await withAbort(
+                withDatabase(options, async (db, readSignal) =>
+                  validateRecord(await getRecord(db, key, readSignal), key),
+                ),
+                signal,
+              );
+              if (
+                running ||
+                row !== beforeRead ||
+                uncertain ||
+                cacheCanonical !== committedCanonical
+              )
+                continue;
+              checkLegacy();
+              if (!sameRecord(verified, row))
+                throw failure("DEVICE_STORAGE_CONFLICT");
+              if (conflict)
+                throw (
+                  lastError ||
+                  failure("DEVICE_STORAGE_CONFLICT", legacyConflict)
+                );
+              warning = null;
+              lastError = null;
+              changed();
+            }
+            if (running || uncertain || cacheCanonical !== committedCanonical)
+              continue;
+            return status();
+          }
+        });
       } catch (error) {
         throw failed(error);
       }
-      if (conflict)
-        throw lastError || failure("DEVICE_STORAGE_CONFLICT", legacyConflict);
-      // A failed first attempt may be retried, but success is reported only
-      // after the queued latest value has a verified transaction commit.
-      if (running) await running;
-      if (uncertain || cacheCanonical !== committedCanonical) await schedule();
-      if (conflict)
-        throw lastError || failure("DEVICE_STORAGE_CONFLICT", legacyConflict);
-      if (warning) {
-        try {
-          checkLegacy();
-          const verified = await withDatabase(options, async (db, signal) =>
-            validateRecord(await getRecord(db, key, signal), key),
-          );
-          if (!sameRecord(verified, row))
-            throw failure("DEVICE_STORAGE_CONFLICT");
-          if (conflict)
-            throw (
-              lastError || failure("DEVICE_STORAGE_CONFLICT", legacyConflict)
-            );
-          warning = null;
-          lastError = null;
-          changed();
-        } catch (error) {
-          throw failed(error);
-        }
-      }
-      return status();
     },
     status,
     refresh,
