@@ -1,5 +1,7 @@
 import { Workspace, StorageFailure, createDraft } from "./storage.js";
 import * as firebase from "./firebase.js";
+import { createProductPhotos } from "./product-photos.js";
+import { createGeminiChat } from "./gemini-chat.js";
 import { createDraftSync } from "./draft-sync.js";
 import {
   createOrderDownloads,
@@ -918,7 +920,7 @@ function scopeCurrent(scope) {
     scope.identity?.uid === firebase.identity()?.uid
   );
 }
-async function api(path, { method = "GET", body, raw = false } = {}) {
+async function api(path, { method = "GET", body, raw = false, signal } = {}) {
   const scope = operationScope();
   return runSessionTask(scope, scopeCurrent, async () => {
     if (!navigator.onLine)
@@ -940,6 +942,9 @@ async function api(path, { method = "GET", body, raw = false } = {}) {
       );
     const controller = new AbortController(),
       timeout = setTimeout(() => controller.abort(), 45000);
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) controller.abort();
     let response;
     try {
       response = await fetch(path, {
@@ -950,6 +955,8 @@ async function api(path, { method = "GET", body, raw = false } = {}) {
         cache: "no-store",
       });
     } catch (error) {
+      if (signal?.aborted)
+        throw new DOMException("Request cancelled", "AbortError");
       throw Object.assign(
         new Error(
           error.name === "AbortError"
@@ -960,6 +967,7 @@ async function api(path, { method = "GET", body, raw = false } = {}) {
       );
     } finally {
       clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
     }
     if (!scopeCurrent(scope)) throw new SessionChanged();
     if (!response.ok) {
@@ -1252,6 +1260,8 @@ function persistPreferences(values) {
 }
 function changeStore(id) {
   storeId = id;
+  geminiChat.refreshScope();
+  productPhotos.reset();
   resetOrderHistory();
   const prefs = preferences();
   ws.rememberPreferences({ storeId: id });
@@ -1524,12 +1534,27 @@ function render() {
     ),
     el(
       "div",
-      { class: "sync-bar" },
-      el("span", {
-        id: "workspace-sync-dot",
-        class: `sync-dot ${protection.tone}`,
-      }),
-      el("span", { id: "workspace-sync-label" }, protection.label),
+      { class: "sync-and-chat" },
+      el(
+        "div",
+        { class: "sync-bar" },
+        el("span", {
+          id: "workspace-sync-dot",
+          class: `sync-dot ${protection.tone}`,
+        }),
+        el("span", { id: "workspace-sync-label" }, protection.label),
+      ),
+      el(
+        "button",
+        {
+          type: "button",
+          class: "gemini-launch",
+          "aria-label": "Chat with Gemini",
+          onClick: () => geminiChat.open(),
+        },
+        icon("spark"),
+        "Gemini",
+      ),
     ),
     el(
       "div",
@@ -2024,7 +2049,7 @@ function renderCatalog() {
         ? button("Add product", () => showProductEditor(), "", "plus")
         : null,
       scanButton,
-      button("Ask AI", showAssistant, "primary", "spark"),
+      button("Draft with AI", showAssistant, "primary", "spark"),
     ]),
     el(
       "div",
@@ -2406,7 +2431,7 @@ function renderBuilder() {
         "Build a cart from the catalog, repeat a previous order, or turn a note into a proposed cart.",
         [
           button("Start an order", beginDraft, "primary"),
-          button("Ask AI", showAssistant, "", "spark"),
+          button("Draft with AI", showAssistant, "", "spark"),
         ],
         "cart",
       ),
@@ -2627,7 +2652,7 @@ function renderBuilder() {
               "Choose products from the catalog or start with a note. Changes save online automatically when connected.",
               [
                 button("Browse catalog", () => setView("catalog"), "primary"),
-                button("Ask AI", showAssistant),
+                button("Draft with AI", showAssistant),
               ],
             ),
         el(
@@ -3720,7 +3745,11 @@ function showProductEditor(product = {}) {
         variants,
         "New variants can be priced individually after saving.",
       ),
-      field("Product image URL", image),
+      field(
+        "Product image URL",
+        image,
+        "Leave empty for automatic Gemini photo matching. Review progress in Workspace → Product photos.",
+      ),
       field(
         "Upload product photo",
         upload,
@@ -3810,7 +3839,11 @@ function showProductEditor(product = {}) {
           expectedVersion: product.version || 0,
         });
         m.close();
-        toast("Product saved.");
+        toast(
+          imageUrl
+            ? "Product saved."
+            : "Product saved. Missing photos are checked automatically; see Workspace → Product photos.",
+        );
       },
       "primary",
     ),
@@ -4550,6 +4583,22 @@ function renderNotifications() {
 function renderMore() {
   const me = state.me;
   const options = [
+    [
+      "Chat with Gemini",
+      "Ask questions about products or get help using the app.",
+      "spark",
+      () => geminiChat.open(),
+    ],
+    ...(master()
+      ? [
+          [
+            "Product photos",
+            "Find matching photos with Gemini and review products that need details.",
+            "box",
+            () => productPhotos.open(),
+          ],
+        ]
+      : []),
     [
       "Account & payments",
       "Report payments and view confirmed account activity.",
@@ -6278,7 +6327,25 @@ function renderEnrollment(user, error = "") {
   $("app").replaceChildren(content);
 }
 let identityGeneration = 0;
+const geminiChat = createGeminiChat({
+  request: api,
+  getScope: () => ({
+    ...operationScope(),
+    storeId,
+    storeName: state?.stores?.find((s) => s.id === storeId)?.name || "",
+  }),
+  isCurrent: (scope) => scopeCurrent(scope) && scope.storeId === storeId,
+});
+const productPhotos = createProductPhotos({
+  request: api,
+  getScope: () => ({ ...operationScope(), storeId }),
+  isCurrent: (scope) =>
+    scopeCurrent(scope) && scope.storeId === storeId && master(),
+  onApplied: () => refresh({ renderPage: true, passive: true }),
+});
 async function onIdentity(user) {
+  geminiChat.reset();
+  productPhotos.reset();
   const previousWorkspace = ws?.key === `aw:v2:${user?.uid}` ? ws : null;
   draftSync?.dispose();
   draftSync = null;
