@@ -1028,3 +1028,242 @@ test("Gemini chat accepts valid imported store IDs", async (t) => {
     200,
   );
 });
+
+test("all-store Orders returns a master’s global history with status filtering and compact summaries", async (t) => {
+  const { request, repo } = await fixture(t);
+  await repo.transaction(async (tx) => {
+    for (const row of await tx.list("orders"))
+      await tx.delete("orders", row.id);
+    for (const row of [
+      {
+        id: "one-submitted",
+        storeId: "one",
+        status: "submitted",
+        createdAt: 40,
+      },
+      {
+        id: "two-submitted",
+        storeId: "two",
+        status: "submitted",
+        createdAt: 30,
+      },
+      {
+        id: "one-delivered",
+        storeId: "one",
+        status: "delivered",
+        createdAt: 20,
+      },
+      { id: "two-draft", storeId: "two", status: "draft", createdAt: 10 },
+      {
+        id: "archived",
+        storeId: "two",
+        status: "submitted",
+        createdAt: 50,
+        deleted: true,
+      },
+    ])
+      await tx.set("orders", row.id, {
+        ...row,
+        storeName: row.storeId === "one" ? "One" : "Two",
+        lines: [{ id: "line", productId: "p", quantity: 1, unit: "each" }],
+        notes: "Full detail",
+        billText: "PRIVATE_LARGE_BODY",
+      });
+  });
+  const all = await request("/api/orders", "owner");
+  assert.equal(all.status, 200, all.body);
+  const page = JSON.parse(all.body);
+  assert.deepEqual(
+    page.orders.map((row) => row.id),
+    ["one-submitted", "two-submitted", "one-delivered", "two-draft"],
+  );
+  assert.equal(page.nextCursor, null);
+  assert.equal(page.orders[0].summary, true);
+  assert.equal(page.orders[0].storeName, "One");
+  assert.equal(page.orders[0].billText, undefined);
+  assert.equal(page.orders[0].lines, undefined);
+  assert.equal(page.orders[3].summary, undefined);
+  assert.equal(page.orders[3].lines.length, 1);
+  const submitted = JSON.parse(
+    (await request("/api/orders?status=submitted", "owner")).body,
+  );
+  assert.deepEqual(
+    submitted.orders.map((row) => row.id),
+    ["one-submitted", "two-submitted"],
+  );
+  const one = JSON.parse(
+    (await request("/api/orders?storeId=one&status=submitted", "owner")).body,
+  );
+  assert.deepEqual(
+    one.orders.map((row) => row.id),
+    ["one-submitted"],
+  );
+});
+
+test("all-store Orders exposes only assigned stores and rechecks access on every request and cursor", async (t) => {
+  const { request, repo } = await fixture(t);
+  const actor = await repo.get("users", "customer");
+  await repo.put("users", "customer", {
+    ...actor,
+    role: "salesman",
+    storeIds: ["one", "two"],
+  });
+  await repo.put("orders", "private", {
+    id: "private",
+    storeId: "unassigned",
+    createdAt: 100,
+    status: "submitted",
+    notes: "UNAUTHORIZED_SECRET",
+  });
+  await repo.put("orders", "assigned-second", {
+    id: "assigned-second",
+    storeId: "two",
+    createdAt: 50,
+    status: "submitted",
+  });
+  const first = await request("/api/orders", "customer");
+  assert.equal(first.status, 200, first.body);
+  const rows = JSON.parse(first.body).orders;
+  assert.deepEqual(
+    new Set(rows.map((row) => row.storeId)),
+    new Set(["one", "two"]),
+  );
+  assert.equal(first.body.includes("UNAUTHORIZED_SECRET"), false);
+  assert.equal(first.body.includes('"private"'), false);
+  assert.equal(
+    (await request("/api/orders?storeId=unassigned", "customer")).status,
+    403,
+  );
+  assert.equal(
+    (await request("/api/orders?cursor=private", "customer")).status,
+    403,
+  );
+  await repo.put("users", "customer", { ...actor, storeIds: ["one"] });
+  assert.equal(
+    (await request("/api/orders?cursor=assigned-second", "customer")).status,
+    403,
+  );
+  const revoked = JSON.parse((await request("/api/orders", "customer")).body);
+  assert.ok(revoked.orders.every((row) => row.storeId === "one"));
+  await repo.put("users", "customer", { ...actor, storeIds: [] });
+  const empty = JSON.parse((await request("/api/orders", "customer")).body);
+  assert.deepEqual(empty, { orders: [], nextCursor: null });
+});
+
+test("all-store pagination spans more than thirty assigned stores without duplicates, omissions, archives or unauthorized rows", async (t) => {
+  const { request, repo } = await fixture(t);
+  const storeIds = Array.from({ length: 65 }, (_, i) => `assigned-${i}`);
+  const actor = await repo.get("users", "customer");
+  await repo.put("users", "customer", { ...actor, role: "salesman", storeIds });
+  const expected = [];
+  await repo.transaction(async (tx) => {
+    for (const row of await tx.list("orders"))
+      await tx.delete("orders", row.id);
+    for (let i = 0; i < 220; i++) {
+      const row = {
+        id: `${i % 2 ? "a" : "B"}-${String(i).padStart(3, "0")}`,
+        storeId: storeIds[i % storeIds.length],
+        status: i % 4 === 0 ? "delivered" : "submitted",
+        createdAt: 1000 - Math.floor(i / 4),
+        deleted: i % 37 === 0,
+      };
+      await tx.set("orders", row.id, row);
+      if (row.status === "submitted" && !row.deleted) expected.push(row);
+    }
+    await tx.set("orders", "private", {
+      id: "private",
+      storeId: "unassigned",
+      status: "submitted",
+      createdAt: 10000,
+      notes: "UNAUTHORIZED_SECRET",
+    });
+  });
+  expected.sort(
+    (a, b) =>
+      b.createdAt - a.createdAt ||
+      Buffer.compare(Buffer.from(b.id), Buffer.from(a.id)),
+  );
+  const received = [],
+    cursors = new Set();
+  let cursor;
+  for (let count = 0; count < 10; count++) {
+    const response = await request(
+      "/api/orders?status=submitted" +
+        (cursor ? "&cursor=" + encodeURIComponent(cursor) : ""),
+      "customer",
+    );
+    assert.equal(response.status, 200, response.body);
+    const page = JSON.parse(response.body);
+    assert.ok(page.orders.length <= 50);
+    assert.ok(
+      page.orders.every(
+        (row) =>
+          storeIds.includes(row.storeId) &&
+          row.status === "submitted" &&
+          !row.deleted,
+      ),
+    );
+    assert.equal(response.body.includes("UNAUTHORIZED_SECRET"), false);
+    received.push(...page.orders);
+    if (!page.nextCursor) {
+      cursor = null;
+      break;
+    }
+    assert.equal(
+      cursors.has(page.nextCursor),
+      false,
+      "A cursor must not repeat",
+    );
+    cursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+  assert.equal(cursor, null, "Pagination terminates");
+  assert.equal(
+    new Set(received.map((row) => row.id)).size,
+    received.length,
+    "No duplicate orders across store-query chunks",
+  );
+  assert.deepEqual(
+    received.map((row) => row.id),
+    expected.map((row) => row.id),
+  );
+});
+
+test("master all-store status pages remain globally ordered across store boundaries", async (t) => {
+  const { request, repo } = await fixture(t);
+  const expected = [];
+  await repo.transaction(async (tx) => {
+    for (const row of await tx.list("orders"))
+      await tx.delete("orders", row.id);
+    for (let i = 0; i < 117; i++) {
+      const row = {
+        id: "global-" + String(i).padStart(3, "0"),
+        storeId: i % 2 ? "one" : "two",
+        status: i % 5 ? "submitted" : "delivered",
+        createdAt: 500 - Math.floor(i / 3),
+      };
+      await tx.set("orders", row.id, row);
+      if (row.status === "submitted") expected.push(row);
+    }
+  });
+  expected.sort(
+    (a, b) =>
+      b.createdAt - a.createdAt ||
+      Buffer.compare(Buffer.from(b.id), Buffer.from(a.id)),
+  );
+  const a = JSON.parse((await request("/api/orders?status=submitted")).body),
+    b = JSON.parse(
+      (
+        await request(
+          "/api/orders?status=submitted&cursor=" +
+            encodeURIComponent(a.nextCursor),
+        )
+      ).body,
+    );
+  assert.equal(a.orders.length, 50);
+  assert.equal(b.nextCursor, null);
+  assert.deepEqual(
+    [...a.orders, ...b.orders].map((row) => row.id),
+    expected.map((row) => row.id),
+  );
+});

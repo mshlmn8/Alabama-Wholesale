@@ -402,6 +402,7 @@ let config,
   category = "",
   favoritesOnly = false,
   orderFilter = "",
+  orderStoreScope = "selected",
   queueBusy = false,
   loading = false;
 let storePicker = null;
@@ -413,10 +414,16 @@ const pendingProtectionUpdates = new Set();
 let protectionFrame = null;
 let lastRefresh = 0,
   orderCursor = undefined,
+  orderHistoryLoading = false,
+  orderHistoryError = "",
+  orderHistoryRevision = 0,
   cameraCleanup = null;
 const orderHistoryRequests = createRequestGate();
 function resetOrderHistory() {
   orderHistoryRequests.invalidate();
+  orderHistoryRevision += 1;
+  orderHistoryLoading = false;
+  orderHistoryError = "";
   orderCursor = undefined;
 }
 const staff = () =>
@@ -3004,15 +3011,95 @@ async function copyText(text) {
     textarea.select();
   }
 }
+function orderHistoryStoreId() {
+  return orderStoreScope === "all" ? "" : storeId;
+}
+async function loadOlderOrders() {
+  if (orderHistoryLoading || orderCursor === null) return;
+  const scope = operationScope();
+  const revision = ++orderHistoryRevision;
+  const queryStoreId = orderHistoryStoreId();
+  const queryStatus = orderFilter;
+  const params = new URLSearchParams();
+  if (queryStoreId) params.set("storeId", queryStoreId);
+  if (queryStatus) params.set("status", queryStatus);
+  if (orderCursor) params.set("cursor", orderCursor);
+  orderHistoryLoading = true;
+  orderHistoryError = "";
+  if (view === "orders") render();
+  try {
+    await orderHistoryRequests.run(
+      () => api(`/api/orders?${params}`),
+      (result) => {
+        if (
+          !scopeCurrent(scope) ||
+          revision !== orderHistoryRevision ||
+          queryStoreId !== orderHistoryStoreId() ||
+          queryStatus !== orderFilter
+        )
+          return;
+        const map = new Map(state.orders.map((order) => [order.id, order]));
+        for (const order of result.orders || []) {
+          const existing = map.get(order.id);
+          if ((existing?.version || 0) > (order.version || 0)) continue;
+          // A history summary must not replace already-loaded items at the same version.
+          if (
+            order.summary &&
+            existing &&
+            !existing.summary &&
+            existing.version === order.version
+          )
+            continue;
+          map.set(order.id, order);
+        }
+        state.orders = [...map.values()];
+        orderCursor = result.nextCursor || null;
+      },
+    );
+  } catch (error) {
+    if (scopeCurrent(scope) && revision === orderHistoryRevision)
+      orderHistoryError = friendlyError(error);
+  } finally {
+    if (scopeCurrent(scope) && revision === orderHistoryRevision) {
+      orderHistoryLoading = false;
+      if (view === "orders") render();
+    }
+  }
+}
 function renderOrders() {
-  const orders = state.orders.filter(
-    (order) =>
-      (!storeId || order.storeId === storeId) &&
-      (!orderFilter || order.status === orderFilter),
-  );
+  const historyStoreId = orderHistoryStoreId();
+  const orders = state.orders
+    .filter(
+      (order) =>
+        !order.deleted &&
+        (!historyStoreId || order.storeId === historyStoreId) &&
+        (!orderFilter || order.status === orderFilter),
+    )
+    .sort(
+      (a, b) =>
+        (b.createdAt || 0) - (a.createdAt || 0) ||
+        String(b.id).localeCompare(String(a.id)),
+    );
+  const allStores = orderStoreScope === "all";
+  const scopeButton = (label, value) => {
+    const node = button(
+      label,
+      async () => {
+        if (orderStoreScope === value) return;
+        orderStoreScope = value;
+        resetOrderHistory();
+        await loadOlderOrders();
+      },
+      "",
+      value === "all" ? "stores" : undefined,
+    );
+    node.id = `order-scope-${value}`;
+    node.setAttribute("aria-pressed", String(orderStoreScope === value));
+    return node;
+  };
   const root = el(
     "div",
-    {},
+    { class: "orders-page" },
     heading(
       "Orders & deliveries",
       "Track progress and keep every invoice tied to its original prices.",
@@ -3020,7 +3107,17 @@ function renderOrders() {
     ),
     el(
       "div",
-      { class: "filters" },
+      { class: "filters order-history-filters" },
+      el(
+        "div",
+        {
+          class: "order-scope-switch",
+          role: "group",
+          "aria-label": "Order history stores",
+        },
+        scopeButton("Selected store", "selected"),
+        scopeButton("All stores", "all"),
+      ),
       select(
         [
           ["", "All statuses"],
@@ -3034,58 +3131,71 @@ function renderOrders() {
         ],
         orderFilter,
         {
+          id: "order-status-filter",
           "aria-label": "Filter order status",
           onChange: (event) => {
             orderFilter = event.target.value;
             resetOrderHistory();
-            render();
+            act(loadOlderOrders);
           },
         },
       ),
     ),
+    el(
+      "p",
+      { class: "small order-history-caption", role: "status" },
+      `${allStores ? "All stores you can access" : currentStore()?.name || "Selected store"} · ${orders.length} loaded order${orders.length === 1 ? "" : "s"}`,
+    ),
   );
+  if (orderHistoryError) append(root, notice(orderHistoryError, true));
   if (!orders.length)
     append(
       root,
       empty(
-        "No orders in this view",
-        "Try another status or start your next order.",
-        [button("Build an order", beginDraft, "primary")],
+        orderHistoryLoading ? "Loading orders…" : "No orders in this view",
+        orderHistoryLoading
+          ? "Checking saved order history."
+          : orderHistoryError
+            ? "Retry loading your saved orders below."
+            : "Try another status or start your next order.",
+        orderHistoryLoading || orderHistoryError
+          ? []
+          : [button("Build an order", beginDraft, "primary")],
         "orders",
       ),
     );
-  else append(root, el("section", { class: "panel" }, orderList(orders)));
+  else
+    append(
+      root,
+      el(
+        "section",
+        {
+          class: "panel",
+          "aria-label": "Order history",
+          "aria-busy": String(orderHistoryLoading),
+        },
+        orderList(orders),
+      ),
+    );
+  const loadButton = button(
+    orderHistoryLoading
+      ? "Loading orders…"
+      : orderHistoryError
+        ? "Retry loading orders"
+        : "Load older orders",
+    loadOlderOrders,
+  );
+  loadButton.id = "load-older-orders";
+  loadButton.disabled = orderHistoryLoading;
+  loadButton.setAttribute("aria-busy", String(orderHistoryLoading));
   append(
     root,
     el(
       "div",
       { class: "actions mt" },
-      button("Load older orders", async () => {
-        const queryStoreId = storeId;
-        const queryStatus = orderFilter;
-        const params = new URLSearchParams();
-        if (queryStoreId) params.set("storeId", queryStoreId);
-        if (queryStatus) params.set("status", queryStatus);
-        if (orderCursor === null) {
-          toast("You’ve reached the end of this order history.");
-          return;
-        }
-        const cursor = orderCursor;
-        if (cursor) params.set("cursor", cursor);
-        await orderHistoryRequests.run(
-          () => api(`/api/orders?${params}`),
-          (result) => {
-            if (queryStoreId !== storeId || queryStatus !== orderFilter) return;
-            const map = new Map(state.orders.map((order) => [order.id, order]));
-            for (const order of result.orders || []) map.set(order.id, order);
-            state.orders = [...map.values()];
-            orderCursor = result.nextCursor || null;
-            render();
-            if (!result.nextCursor)
-              toast("You’ve reached the end of order history.");
-          },
-        );
-      }),
+      orderCursor === null && !orderHistoryError
+        ? el("p", { class: "small" }, "All orders in this view are loaded.")
+        : loadButton,
     ),
   );
   return root;
@@ -4499,6 +4609,7 @@ function renderReturns() {
           "Choose delivered order",
           () => {
             orderFilter = "delivered";
+            orderStoreScope = "selected";
             resetOrderHistory();
             setView("orders");
           },
@@ -4519,6 +4630,7 @@ function renderReturns() {
         [
           button("View delivered orders", () => {
             orderFilter = "delivered";
+            orderStoreScope = "selected";
             resetOrderHistory();
             setView("orders");
           }),
@@ -6692,6 +6804,9 @@ const productPhotos = createProductPhotos({
   onApplied: () => refresh({ renderPage: true, passive: true }),
 });
 async function onIdentity(user) {
+  orderStoreScope = "selected";
+  orderFilter = "";
+  resetOrderHistory();
   storePicker?.dispose();
   storePicker = null;
   geminiChat.reset();
