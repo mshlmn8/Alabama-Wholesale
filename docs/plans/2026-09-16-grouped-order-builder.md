@@ -1,0 +1,7 @@
+# Group products and edit flavors in Build
+
+Build will display one card for each product, containing its flavor lines. Existing saved draft lines keep their IDs, quantities, units and notes; grouping changes presentation only. Inline flavor, quantity and unit controls and an Edit flavor dialog provide changes from Build. Add flavors opens the multi-flavor picker; removing one row affects only that draft line. Owners can open Edit product from a group to manage the catalog with explicit Add variant / Remove variant rows and immediate price/barcode fields.
+
+Repeated additions merge only when product, flavor, unit and note match exactly. Different units or notes remain separate. Each batch is validated before touching the draft; limits, autosave, Undo/Redo and stale-session safeguards remain in place. Catalog edits still require Save product and version checks. Removing a flavor from an order does not delete it from the catalog. No migration or rewrite of saved orders is needed.
+
+Verify grouping and edit/add/remove behavior in Chromium and WebKit, including mobile alignment, prices/totals, IDs, autosave/reload, Undo/Redo, mixed units/notes, missing catalog flavors, failures and stale dialogs. Verify owner catalog variant editing and preserved metadata with synthetic records. Run unit/API, build, audit and CI checks; deploy only after review and verify the live App Hosting source and assets.
