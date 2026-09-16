@@ -8,7 +8,13 @@ import { preparePhotoProduct } from "./catalog-photo-edit.js";
 import { createGeminiChat } from "./gemini-chat.js";
 import { createDraftSync } from "./draft-sync.js";
 import { createStorePicker } from "./store-picker.js";
-import { productVariants, selectedProductLines } from "./order-selection.js";
+import {
+  productVariants,
+  selectedProductLines,
+  groupDraftLines,
+  addSelectedProductLines,
+} from "./order-selection.js";
+import { serializeCatalogVariants } from "./catalog-variants.js";
 import {
   createOrderDownloads,
   normalizeDeviceCopyOptions,
@@ -2328,8 +2334,13 @@ async function toggleFavorite(id) {
 }
 function showAddProduct(product, initialVariant) {
   if (!storeId) throw new Error("Select a store before adding products.");
+  if (hasUnsavedDraftNotes())
+    throw new Error(
+      "Save or copy your latest order notes before adding flavors.",
+    );
   const scope = operationScope(),
-    selectedStoreId = storeId;
+    selectedStoreId = storeId,
+    selectedDraftId = draft?.id;
   const variants = productVariants(product);
   const multiple = variants.length > 1;
   const m = modal(
@@ -2416,19 +2427,44 @@ function showAddProduct(product, initialVariant) {
     () => {
       if (!scopeCurrent(scope) || storeId !== selectedStoreId)
         throw new SessionChanged();
+      if (draft?.id !== selectedDraftId)
+        throw new Error(
+          "The active draft changed. Reopen the product before adding flavors.",
+        );
+      if (hasUnsavedDraftNotes())
+        throw new Error(
+          "Save or copy your latest order notes before adding flavors.",
+        );
       const lines = selectedProductLines(
         product,
         rows.map((row) => row.quantity.value),
         unit.value,
         note.value,
       );
-      if ((draft?.lines.length || 0) + lines.length > 150)
+      const currentProduct = productById(product.id);
+      if (
+        !currentProduct ||
+        currentProduct.active === false ||
+        currentProduct.deleted ||
+        lines.some(
+          (line) => !productVariants(currentProduct).includes(line.variant),
+        ) ||
+        (unit.value === "case" &&
+          (!Number.isSafeInteger(currentProduct.packSize) ||
+            currentProduct.packSize <= 0 ||
+            currentProduct.packSize !== product.packSize))
+      )
         throw new Error(
-          "An order can have up to 150 lines. Choose fewer flavors or start another draft.",
+          "This product's options changed. Reopen it and review the available flavors.",
         );
-      editDraft((d) =>
-        d.lines.push(...lines.map((line) => ({ ...line, id: uuid() }))),
+      const nextLines = addSelectedProductLines(
+        draft?.lines || [],
+        lines,
+        uuid,
       );
+      editDraft((d) => {
+        d.lines = nextLines;
+      });
       m.close();
       toast(
         `${product.name}: ${lines.length} ${lines.length === 1 ? "item" : "flavors"} added to your draft.`,
@@ -2536,6 +2572,141 @@ function showAddProduct(product, initialVariant) {
   );
   updateSelection();
 }
+function assertBuilderDraft(scope, id, selectedStoreId) {
+  if (!scopeCurrent(scope) || storeId !== selectedStoreId)
+    throw new SessionChanged();
+  if (!draft || draft.id !== id)
+    throw new Error(
+      "The active draft changed. Reopen the item before editing it.",
+    );
+  if (hasUnsavedDraftNotes())
+    throw new Error(
+      "Save or copy your latest order notes before editing items.",
+    );
+}
+function findBuilderLine(order, id) {
+  const line = order.lines.find((item) => item.id === id);
+  if (!line)
+    throw new Error(
+      "This item changed elsewhere. Reopen the draft before editing it.",
+    );
+  return line;
+}
+function builderUnitOptions(product, currentUnit) {
+  const hasCase =
+    Number.isSafeInteger(product?.packSize) && product.packSize > 0;
+  return [
+    ["each", "Each"],
+    ...(hasCase || currentUnit === "case"
+      ? [
+          [
+            "case",
+            hasCase ? `Case (${product.packSize})` : "Case — size needed",
+          ],
+        ]
+      : []),
+  ];
+}
+function showEditDraftLine(id) {
+  const scope = operationScope(),
+    selectedStoreId = storeId,
+    selectedDraftId = draft?.id;
+  assertBuilderDraft(scope, selectedDraftId, selectedStoreId);
+  const original = clone(findBuilderLine(draft, id));
+  const product = productById(original.productId);
+  const variants = product ? productVariants(product) : [];
+  const options = variants.map((variant) => [variant, variant || "Standard"]);
+  if (!variants.includes(original.variant || ""))
+    options.unshift([
+      original.variant || "",
+      `${original.variant || "Standard"} (unavailable)`,
+    ]);
+  const m = modal("Edit order item", product?.name || "Product unavailable");
+  const variant = select(options, original.variant || "", {
+    disabled: !product,
+  });
+  const quantity = input("number", original.quantity, {
+    min: 1,
+    max: 1_000_000,
+    step: 1,
+    inputmode: "numeric",
+  });
+  const unit = select(
+    builderUnitOptions(product, original.unit),
+    original.unit,
+  );
+  const note = el("textarea", {
+    maxlength: 1000,
+    rows: 3,
+    placeholder: "Packing or flavor instructions (optional)",
+  });
+  note.value = original.note || "";
+  append(
+    m.content,
+    el(
+      "div",
+      { class: "form-grid" },
+      field("Flavor", variant),
+      field("Quantity", quantity),
+      field("Order unit", unit),
+      field("Line note", note),
+    ),
+  );
+  append(
+    m.footer,
+    button("Cancel", m.close),
+    button(
+      "Update item",
+      () => {
+        assertBuilderDraft(scope, selectedDraftId, selectedStoreId);
+        if (!m.dialog.open) return;
+        const current = findBuilderLine(draft, id);
+        if (JSON.stringify(current) !== JSON.stringify(original))
+          throw new Error(
+            "This item changed while you were editing. Close and reopen it to keep the latest changes.",
+          );
+        const count = Number(quantity.value);
+        if (!Number.isSafeInteger(count) || count < 1 || count > 1_000_000)
+          throw new Error(
+            "Quantity must be a whole number from 1 to 1,000,000.",
+          );
+        const currentProduct = productById(original.productId);
+        if (
+          variant.value !== (original.variant || "") &&
+          (!currentProduct ||
+            !productVariants(currentProduct).includes(variant.value))
+        )
+          throw new Error("Choose an available flavor.");
+        if (
+          unit.value === "case" &&
+          currentProduct?.packSize !== product?.packSize
+        )
+          throw new Error(
+            "The product's case size changed. Close and reopen this item before choosing cases.",
+          );
+        if (
+          unit.value === "case" &&
+          original.unit !== "case" &&
+          (!Number.isSafeInteger(currentProduct?.packSize) ||
+            currentProduct.packSize <= 0)
+        )
+          throw new Error("Set the product's case size before choosing cases.");
+        editDraft((d) => {
+          Object.assign(findBuilderLine(d, id), {
+            variant: variant.value,
+            quantity: count,
+            unit: unit.value,
+            note: note.value.trim(),
+          });
+        });
+        m.close();
+        toast("Item updated. Changes save online automatically.");
+      },
+      "primary",
+      "check",
+    ),
+  );
+}
 function renderBuilder() {
   const root = el(
     "div",
@@ -2595,95 +2766,244 @@ function renderBuilder() {
       ),
     );
   const totals = draftTotals();
+  const groups = groupDraftLines(draft.lines);
+  const builderScope = operationScope(),
+    builderDraftId = draft.id,
+    builderStoreId = storeId;
+  const checkDraft = () =>
+    assertBuilderDraft(builderScope, builderDraftId, builderStoreId);
+  function updateBuilderEstimates() {
+    if (
+      !scopeCurrent(builderScope) ||
+      draft?.id !== builderDraftId ||
+      !summary.isConnected
+    )
+      return;
+    const next = draftTotals();
+    summary
+      .querySelector("[data-builder-totals]")
+      .replaceChildren(totalRows(next));
+    summary.querySelector("button").disabled =
+      !draft.lines.length || next.missing.length > 0;
+    draftStatus.querySelectorAll("[data-draft-history] button")[0].disabled =
+      !undo.length;
+    draftStatus.querySelectorAll("[data-draft-history] button")[1].disabled =
+      !redo.length;
+  }
   const lines = el(
     "div",
     { class: "builder-lines" },
-    draft.lines.map((line) => {
-      const product = productById(line.productId);
-      const quantity = input("number", line.quantity, {
-        id: `qty-${line.id}`,
-        min: 1,
-        step: 1,
-        "aria-label": `Quantity for ${product?.name || "product"}`,
-        onInput: (event) => {
-          const number = Number(event.target.value);
-          if (!Number.isSafeInteger(number) || number <= 0) return;
-          act(() => {
-            try {
-              editDraft(
-                (d) => {
-                  const target = d.lines.find((item) => item.id === line.id);
-                  if (!target)
-                    throw new Error(
-                      "This item changed elsewhere. Refresh the draft before editing it.",
-                    );
-                  target.quantity = number;
-                },
-                { renderPage: false },
-              );
-              updateDraftProtection(draft.id);
-            } catch (error) {
-              event.target.value =
-                draft?.lines.find((item) => item.id === line.id)?.quantity ??
-                line.quantity;
-              throw error;
-            }
+    groups.map((group) => {
+      const product = productById(group.productId);
+      const name = product?.name || "Product unavailable";
+      const groupLabel = `builder-product-${uuid()}`;
+      const add = button(
+        "Add flavors",
+        () => {
+          checkDraft();
+          showAddProduct(productById(group.productId));
+        },
+        "",
+        "plus",
+      );
+      add.disabled = !product || product.active === false || product.deleted;
+      const removeProduct = iconButton(
+        `Remove ${name} from order`,
+        "close",
+        () => {
+          checkDraft();
+          editDraft((d) => {
+            d.lines = d.lines.filter(
+              (line) => line.productId !== group.productId,
+            );
           });
         },
-        onChange: (event) => {
-          const number = Number(event.target.value);
-          if (!Number.isSafeInteger(number) || number <= 0)
-            toast(
-              "Use a positive whole number. Your last valid quantity is saved.",
-              true,
-            );
-          if (!hasUnsavedDraftNotes()) render();
-        },
-      });
-      const units = select(
-        [["each", "Each"], ...(product?.packSize ? [["case", "Case"]] : [])],
-        line.unit,
-        {
-          "aria-label": `Unit for ${product?.name || "product"}`,
-          onChange: (event) =>
-            act(() => {
-              try {
-                editDraft((d) => {
-                  d.lines.find((item) => item.id === line.id).unit =
-                    event.target.value;
-                });
-              } catch (error) {
-                event.target.value = line.unit;
-                throw error;
-              }
-            }),
-        },
       );
-      const price = linePrice(line);
       return el(
-        "div",
-        { class: "line-card" },
+        "section",
+        {
+          class: "builder-product-group",
+          "data-product-id": group.productId,
+          "aria-labelledby": groupLabel,
+        },
         el(
           "div",
-          { class: "line-title" },
-          el("strong", {}, product?.name || "Product unavailable"),
+          { class: "builder-product-head" },
           el(
-            "small",
+            "div",
             {},
-            line.variant || "Standard",
-            price == null
-              ? " · Price needed"
-              : ` · ${cash(price)} / ${line.unit}`,
+            el("h2", { id: groupLabel }, name),
+            el(
+              "p",
+              { class: "small" },
+              `${group.lines.length} flavor ${group.lines.length === 1 ? "line" : "lines"}`,
+            ),
+          ),
+          removeProduct,
+          el(
+            "div",
+            { class: "builder-product-actions" },
+            add,
+            product && master()
+              ? button(
+                  "Edit product",
+                  () => {
+                    checkDraft();
+                    showProductEditor(productById(group.productId));
+                  },
+                  "text-button",
+                  "edit",
+                )
+              : null,
           ),
         ),
-        quantity,
-        units,
-        iconButton(`Remove ${product?.name || "item"}`, "close", () =>
-          editDraft((d) => {
-            d.lines = d.lines.filter((item) => item.id !== line.id);
+        el(
+          "div",
+          { class: "builder-flavors" },
+          group.lines.map((line) => {
+            const label = `${name} / ${line.variant || "Standard"}`;
+            const price = linePrice(line);
+            const available = product ? productVariants(product) : [];
+            const options = available.map((variant) => [
+              variant,
+              variant || "Standard",
+            ]);
+            if (!available.includes(line.variant || ""))
+              options.unshift([
+                line.variant || "",
+                `${line.variant || "Standard"} (unavailable)`,
+              ]);
+            const flavor = select(options, line.variant || "", {
+              id: `variant-${line.id}`,
+              "aria-label": `Flavor for ${name}`,
+              disabled: !product,
+              onChange: (event) =>
+                act(() => {
+                  try {
+                    checkDraft();
+                    const next = event.target.value;
+                    if (
+                      !productVariants(productById(group.productId)).includes(
+                        next,
+                      )
+                    )
+                      throw new Error("Choose an available flavor.");
+                    editDraft((d) => {
+                      findBuilderLine(d, line.id).variant = next;
+                    });
+                  } catch (error) {
+                    event.target.value = line.variant || "";
+                    throw error;
+                  }
+                }),
+            });
+            const quantity = input("number", line.quantity, {
+              id: `qty-${line.id}`,
+              min: 1,
+              max: 1_000_000,
+              step: 1,
+              inputmode: "numeric",
+              "aria-label": `Quantity for ${label}`,
+              onInput: (event) => {
+                const number = Number(event.target.value);
+                if (
+                  !Number.isSafeInteger(number) ||
+                  number <= 0 ||
+                  number > 1_000_000
+                )
+                  return;
+                act(() => {
+                  try {
+                    checkDraft();
+                    editDraft(
+                      (d) => {
+                        findBuilderLine(d, line.id).quantity = number;
+                      },
+                      { renderPage: false },
+                    );
+                    updateDraftProtection(draft.id);
+                    updateBuilderEstimates();
+                  } catch (error) {
+                    event.target.value =
+                      draft?.lines.find((item) => item.id === line.id)
+                        ?.quantity ?? line.quantity;
+                    throw error;
+                  }
+                });
+              },
+              onChange: (event) => {
+                const number = Number(event.target.value);
+                if (
+                  !Number.isSafeInteger(number) ||
+                  number <= 0 ||
+                  number > 1_000_000
+                )
+                  toast(
+                    "Use a whole number from 1 to 1,000,000. Your last valid quantity is saved.",
+                    true,
+                  );
+                event.target.value =
+                  draft?.lines.find((item) => item.id === line.id)?.quantity ??
+                  line.quantity;
+              },
+            });
+            const units = select(
+              builderUnitOptions(product, line.unit),
+              line.unit,
+              {
+                id: `unit-${line.id}`,
+                "aria-label": `Unit for ${label}`,
+                onChange: (event) =>
+                  act(() => {
+                    try {
+                      checkDraft();
+                      editDraft((d) => {
+                        findBuilderLine(d, line.id).unit = event.target.value;
+                      });
+                    } catch (error) {
+                      event.target.value = line.unit;
+                      throw error;
+                    }
+                  }),
+              },
+            );
+            return el(
+              "div",
+              { class: "builder-flavor-row", "data-line-id": line.id },
+              el(
+                "div",
+                { class: "builder-flavor-name" },
+                field("Flavor", flavor),
+              ),
+              field("Quantity", quantity),
+              field("Unit", units),
+              iconButton(`Edit ${label}`, "edit", () => {
+                checkDraft();
+                showEditDraftLine(line.id);
+              }),
+              iconButton(`Remove ${label} from order`, "close", () => {
+                checkDraft();
+                editDraft((d) => {
+                  d.lines = d.lines.filter((item) => item.id !== line.id);
+                });
+              }),
+              el(
+                "div",
+                { class: "builder-line-details small" },
+                el(
+                  "span",
+                  {},
+                  price == null
+                    ? "Price needed"
+                    : `${cash(price)} / ${line.unit}`,
+                ),
+                line.note
+                  ? el("span", { class: "builder-line-note" }, line.note)
+                  : null,
+              ),
+            );
           }),
         ),
-        line.note ? el("p", { class: "line-note small" }, line.note) : null,
       );
     }),
   );
@@ -2737,8 +3057,24 @@ function renderBuilder() {
     el(
       "div",
       { class: "actions", "data-draft-history": "true" },
-      button("Undo", () => undoDraft(), "", null),
-      button("Redo", () => undoDraft(true), "", null),
+      button(
+        "Undo",
+        () => {
+          checkDraft();
+          undoDraft();
+        },
+        "",
+        null,
+      ),
+      button(
+        "Redo",
+        () => {
+          checkDraft();
+          undoDraft(true);
+        },
+        "",
+        null,
+      ),
     ),
   );
   draftStatus.querySelectorAll("[data-draft-history] button")[0].disabled =
@@ -2752,14 +3088,14 @@ function renderBuilder() {
     el(
       "p",
       { class: "small" },
-      `${draft.lines.length} lines · ${currentStore()?.name || ""}`,
+      `${groups.length} ${groups.length === 1 ? "product" : "products"} · ${draft.lines.length} flavor lines · ${currentStore()?.name || ""}`,
     ),
     totals.missing.length
       ? notice(
           `Price or case size needed for: ${[...new Set(totals.missing)].join(", ")}`,
         )
       : null,
-    totalRows(totals),
+    el("div", { "data-builder-totals": "true" }, totalRows(totals)),
     el(
       "p",
       { class: "small" },
@@ -3931,11 +4267,6 @@ function showProductEditor(product = {}, { photoFile = null } = {}) {
     inputmode: "numeric",
     maxlength: 200,
   });
-  const variants = el("textarea", {
-    placeholder: "One variant per line",
-    maxlength: 10000,
-  });
-  variants.value = (product.variants || []).join("\n");
   const taxable = input("checkbox", "", { checked: product.taxable !== false });
   const currentStatus = product.stockStatus ?? (product.id ? "" : "active");
   const statusField = select(
@@ -4002,9 +4333,40 @@ function showProductEditor(product = {}, { photoFile = null } = {}) {
       return el("label", { class: "check-field" }, checkbox, cat.name);
     }),
   );
-  const variantPricing = el("div", { class: "editor-rows" });
-  const variantInputs = new Map();
-  for (const variant of product.variants || []) {
+  let saving = false;
+  const variantInputs = [];
+  const variantRows = el("div", { class: "catalog-variant-rows" });
+  const variantCount = el("p", { class: "small", role: "status" });
+  const emptyVariants = el(
+    "p",
+    { class: "small catalog-variant-empty" },
+    "No catalog variants. Orders use the standard product.",
+  );
+  const addVariant = el(
+    "button",
+    { type: "button", class: "subtle", onClick: () => addVariantRow() },
+    icon("plus"),
+    "Add variant",
+  );
+  function updateVariantRows() {
+    variantInputs.forEach((row, index) => {
+      const number = index + 1;
+      row.legend.textContent = row.name.value.trim() || `New variant ${number}`;
+      row.nameLabel.textContent = `Variant ${number} name`;
+      row.priceLabel.textContent = `Variant ${number} price ($ / each)`;
+      row.barcodeLabel.textContent = `Variant ${number} barcode`;
+      row.remove.setAttribute("aria-label", `Remove variant ${number}`);
+    });
+    variantCount.textContent = `${variantInputs.length} of 200 catalog variants. Changes apply when you save the product.`;
+    emptyVariants.hidden = variantInputs.length > 0;
+    addVariant.disabled = saving || variantInputs.length >= 200;
+  }
+  function addVariantRow(variant = "", focus = true) {
+    if (saving || variantInputs.length >= 200) return;
+    const variantName = input("text", variant, {
+      maxlength: 200,
+      placeholder: "e.g. Apple",
+    });
     const priceNode = input(
       "number",
       product.variantPricesCents?.[variant] == null
@@ -4016,17 +4378,55 @@ function showProductEditor(product = {}, { photoFile = null } = {}) {
       maxlength: 200,
       placeholder: "Variant barcode",
     });
-    variantInputs.set(variant, { price: priceNode, barcode: code });
+    const nameField = field("Variant name", variantName);
+    const priceField = field("Variant price ($ / each)", priceNode);
+    const barcodeField = field("Variant barcode", code);
+    const legend = el("legend", {}, variant || "New variant");
+    const container = el("fieldset", { class: "catalog-variant-row" }, legend);
+    const remove = button(
+      "Remove variant",
+      () => {
+        if (saving) return;
+        const index = variantInputs.indexOf(row);
+        variantInputs.splice(index, 1);
+        container.remove();
+        updateVariantRows();
+        (
+          variantInputs[Math.min(index, variantInputs.length - 1)]?.name ||
+          addVariant
+        ).focus();
+      },
+      "subtle",
+    );
+    const row = {
+      name: variantName,
+      price: priceNode,
+      barcode: code,
+      legend,
+      remove,
+      nameLabel: nameField.querySelector("label"),
+      priceLabel: priceField.querySelector("label"),
+      barcodeLabel: barcodeField.querySelector("label"),
+    };
+    variantInputs.push(row);
+    variantName.addEventListener("input", updateVariantRows);
     append(
-      variantPricing,
+      container,
       el(
         "div",
-        { class: "form-grid" },
-        field(`${variant} price ($ / each)`, priceNode),
-        field(`${variant} barcode`, code),
+        { class: "catalog-variant-fields" },
+        nameField,
+        priceField,
+        barcodeField,
       ),
+      el("div", { class: "catalog-variant-actions" }, remove),
     );
+    append(variantRows, container);
+    updateVariantRows();
+    if (focus) variantName.focus();
   }
+  for (const variant of product.variants || []) addVariantRow(variant, false);
+  updateVariantRows();
   append(
     m.content,
     el(
@@ -4038,11 +4438,6 @@ function showProductEditor(product = {}, { photoFile = null } = {}) {
       field("Units per case", pack),
       field("Barcode", barcode),
       field("Availability label", statusField),
-      field(
-        "Variants",
-        variants,
-        "New variants can be priced individually after saving.",
-      ),
       field(
         "Product image URL",
         image,
@@ -4056,14 +4451,29 @@ function showProductEditor(product = {}, { photoFile = null } = {}) {
     ),
     el("div", { class: "mt" }, el("label", {}, "Categories"), categories),
     el("label", { class: "check-field mt" }, taxable, "Taxable product"),
-    variantInputs.size
-      ? el(
-          "details",
-          { class: "mt" },
-          el("summary", {}, "Variant prices and barcodes"),
-          el("div", { class: "mt" }, variantPricing),
-        )
-      : null,
+    el(
+      "section",
+      { class: "catalog-variant-editor mt", "aria-label": "Catalog variants" },
+      el(
+        "div",
+        { class: "catalog-variant-heading" },
+        el("h3", {}, "Catalog variants"),
+        addVariant,
+      ),
+      el(
+        "p",
+        { class: "small" },
+        "Owner catalog changes apply to this product for every store. A blank variant price uses the product’s base price.",
+      ),
+      el(
+        "p",
+        { class: "small" },
+        "Removing or renaming a variant leaves existing draft lines unchanged. Update those draft lines before submitting.",
+      ),
+      variantCount,
+      emptyVariants,
+      variantRows,
+    ),
   );
   append(
     m.footer,
@@ -4071,6 +4481,7 @@ function showProductEditor(product = {}, { photoFile = null } = {}) {
     button(
       "Save product",
       async () => {
+        if (saving) return;
         if (!scopeCurrent(fileScope) || !master()) throw new SessionChanged();
         if (!m.dialog.open) return;
         if (!name.value.trim()) throw new Error("Product name is required.");
@@ -4083,37 +4494,30 @@ function showProductEditor(product = {}, { photoFile = null } = {}) {
           (!Number.isSafeInteger(packSize) || packSize < 1)
         )
           throw new Error("Units per case must be a positive whole number.");
-        const variantNames = [
-          ...new Set(
-            variants.value
-              .split("\n")
-              .map((v) => v.trim())
-              .filter(Boolean),
-          ),
-        ];
-        const variantPricesCents = {},
-          variantBarcodes = {};
-        for (const variant of variantNames) {
-          const existing = variantInputs.get(variant);
-          if (existing) {
-            const cents = numberCents(
-              existing.price.value,
-              `${variant} price`,
+        const {
+          variants: variantNames,
+          variantPricesCents,
+          variantBarcodes,
+        } = serializeCatalogVariants(
+          variantInputs.map((row, index) => ({
+            name: row.name.value,
+            priceCents: numberCents(
+              row.price.value,
+              `Variant ${index + 1} price`,
               { nullable: true },
-            );
-            if (cents != null) variantPricesCents[variant] = cents;
-            if (existing.barcode.value.trim())
-              variantBarcodes[variant] = existing.barcode.value.trim();
-          }
-        }
+            ),
+            barcode: row.barcode.value,
+          })),
+        );
         if (image.value && !safeImage(image.value))
           throw new Error(
             "Use an HTTPS image URL or an existing product image path.",
           );
         const controls = [
-          ...m.content.querySelectorAll("input,select,textarea"),
+          ...m.content.querySelectorAll("input,select,textarea,button"),
         ];
         const disabledBeforeSave = controls.map((control) => control.disabled);
+        saving = true;
         controls.forEach((control) => {
           control.disabled = true;
         });
@@ -4163,9 +4567,11 @@ function showProductEditor(product = {}, { photoFile = null } = {}) {
               : "Product saved. Missing photos are checked automatically; see Workspace → Product photos.",
           );
         } finally {
+          saving = false;
           controls.forEach((control, index) => {
             control.disabled = disabledBeforeSave[index];
           });
+          updateVariantRows();
         }
       },
       "primary",

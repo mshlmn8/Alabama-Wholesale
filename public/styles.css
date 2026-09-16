@@ -2408,3 +2408,116 @@ button[aria-busy="true"]::after {
     flex: 1 1 100%;
   }
 }
+
+/* One product card holds all of its order flavors. */
+.builder-product-group {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow: hidden;
+}
+.builder-product-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px;
+  align-items: start;
+  gap: 8px 12px;
+  padding: 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel2);
+}
+.builder-product-head h2 {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.builder-product-head p {
+  margin: 3px 0 0;
+}
+.builder-product-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.builder-product-actions button {
+  min-height: 44px;
+  padding: 8px 12px;
+  font-size: 0.8rem;
+}
+.builder-flavors {
+  padding: 0 14px;
+}
+.builder-flavor-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) 74px 112px 44px 44px;
+  gap: 8px;
+  align-items: end;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+.builder-flavor-row:last-child {
+  border-bottom: 0;
+}
+.builder-flavor-row > *,
+.builder-flavor-name {
+  min-width: 0;
+}
+.builder-flavor-row .field {
+  margin: 0;
+}
+.builder-flavor-row label {
+  font-size: 0.75rem;
+  margin-bottom: 4px;
+}
+.builder-flavor-row input,
+.builder-flavor-row select {
+  min-height: 44px;
+  padding: 8px;
+  width: 100%;
+}
+.builder-flavor-row select {
+  padding-right: 27px;
+}
+.builder-flavor-name {
+  display: grid;
+  gap: 5px;
+}
+.builder-line-details {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.builder-line-note {
+  color: var(--ink);
+}
+.builder-flavor-row .icon-button {
+  width: 44px;
+  height: 44px;
+  min-height: 44px;
+  padding: 10px;
+}
+@media (max-width: 1100px) {
+  .builder-flavor-row {
+    grid-template-columns: minmax(0, 1fr) minmax(100px, 1fr) 44px 44px;
+  }
+  .builder-flavor-name {
+    grid-column: 1 / -1;
+  }
+}
+@media (max-width: 380px) {
+  .builder-flavor-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 44px 44px;
+    gap: 6px;
+  }
+  .builder-product-head {
+    padding: 10px;
+  }
+  .builder-flavors {
+    padding: 0 10px;
+  }
+}
