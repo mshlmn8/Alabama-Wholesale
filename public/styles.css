@@ -1424,7 +1424,8 @@ button[aria-busy="true"]::after {
   margin: 0;
   font-size: 0.8rem;
 }
-.catalog-view-switch {
+.catalog-view-switch,
+.order-scope-switch {
   display: inline-flex;
   padding: 3px;
   border: 1px solid var(--line);
@@ -1432,7 +1433,8 @@ button[aria-busy="true"]::after {
   background: var(--panel);
   gap: 2px;
 }
-.catalog-view-switch button {
+.catalog-view-switch button,
+.order-scope-switch button {
   min-height: 44px;
   padding: 6px 11px;
   border-color: transparent;
@@ -1441,11 +1443,13 @@ button[aria-busy="true"]::after {
   color: var(--muted);
   font-size: 0.8rem;
 }
-.catalog-view-switch button[aria-pressed="true"] {
+.catalog-view-switch button[aria-pressed="true"],
+.order-scope-switch button[aria-pressed="true"] {
   background: var(--ink);
   color: var(--panel);
 }
-.catalog-view-switch button .icon {
+.catalog-view-switch button .icon,
+.order-scope-switch button .icon {
   width: 16px;
   height: 16px;
 }
@@ -2380,5 +2384,27 @@ button[aria-busy="true"]::after {
   th {
     background: #eee;
     color: #333;
+  }
+}
+
+/* Keep the history scope independent from the ordering store selector. */
+.order-history-filters {
+  margin-bottom: 8px;
+}
+.order-history-caption {
+  margin: 0 0 16px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 600px) {
+  .order-scope-switch {
+    width: 100%;
+  }
+  .order-scope-switch button {
+    flex: 1;
+  }
+  .order-history-filters select {
+    width: 100%;
+    max-width: none;
+    flex: 1 1 100%;
   }
 }
