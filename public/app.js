@@ -2956,12 +2956,12 @@ async function showSubmit() {
     ),
   );
 }
-function lineTable(lines, isDraft = false) {
+function lineTable(lines, isDraft = false, store = currentStore()) {
   return table(
     ["Product / variant", "Quantity", "Unit price", "Line total"],
     lines.map((line) => {
       const p = productById(line.productId);
-      const unitPrice = isDraft ? linePrice(line) : line.unitPriceCents;
+      const unitPrice = isDraft ? linePrice(line, store) : line.unitPriceCents;
       const total = isDraft
         ? unitPrice == null
           ? null
@@ -3297,7 +3297,10 @@ async function showOrder(order) {
       ),
     );
   if (order.lines?.length)
-    append(m.content, lineTable(order.lines, order.status === "draft"));
+    append(
+      m.content,
+      lineTable(order.lines, order.status === "draft", store || null),
+    );
   if (order.totalCents != null)
     append(
       m.content,
