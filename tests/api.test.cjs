@@ -422,6 +422,23 @@ test("documents enforce store permissions before invoking the PDF generator", as
     403,
   );
 });
+test("invoice filenames and history titles retain the submitted store name after a rename", async (t) => {
+  const { repo, request } = await fixture(t);
+  await repo.put("orders", "o1", {
+    id: "o1", storeId: "one", storeName: "Draft shop", createdAt: 2,
+    status: "submitted", invoiceNumber: "AW-2026-000042",
+    storeSnapshot: { id: "one", name: "Original shop", address: "Private address" },
+    lines: [{ name: "Drink", quantity: 1, unit: "each", unitPriceCents: 100, lineTotalCents: 100, taxCents: 0 }],
+    subtotalCents: 100, taxCents: 0, totalCents: 100,
+  });
+  const document = await request("/api/documents/o1/invoice", "customer");
+  assert.equal(document.status, 200);
+  assert.equal(document.headers.get("content-disposition"), 'inline; filename="Original-shop-AW-2026-000042-o1-invoice.pdf"');
+  const history = await request("/api/orders?storeId=one", "customer");
+  assert.equal(history.status, 200, history.body);
+  const order = JSON.parse(history.body).orders.find((item) => item.id === "o1");
+  assert.deepEqual(order.storeSnapshot, { name: "Original shop" });
+});
 test("linked legacy profiles cannot be claimed by a different Firebase account", async (t) => {
   const { auth, repo } = await fixture(t);
   await repo.put("legacyProfiles", "legacy", {

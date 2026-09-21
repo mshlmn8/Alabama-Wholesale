@@ -17,6 +17,7 @@ const ORDER_SUMMARY_FIELDS = [
   "id",
   "storeId",
   "storeName",
+  "storeSnapshot.name",
   "status",
   "version",
   "deleted",
@@ -979,10 +980,11 @@ function createApp({
     const store = await repo.get("stores", order.storeId);
     const render = documents || require("./lib/documents.cjs").renderDocument;
     const buffer = await render(order, store, req.params.kind);
+    const { orderFilename } = await import("./public/order-names.mjs");
     res.type("application/pdf");
     res.set(
       "Content-Disposition",
-      `inline; filename="${req.params.kind}-${order.id.replace(/[^a-zA-Z0-9_-]/g, "")}.pdf"`,
+      `inline; filename="${orderFilename(order, { store, kind: req.params.kind })}"`,
     );
     res.send(buffer);
   });

@@ -1,5 +1,6 @@
 // Device copies are optional side effects of a confirmed order. None of these
 // operations submits an order or changes its financial retry state.
+import { orderFilename } from "./order-names.mjs";
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const FINAL_STATUSES = new Set([
   "submitted",
@@ -72,15 +73,6 @@ function validateOrder(order) {
       "ORDER_NOT_CONFIRMED",
       "The invoice totals do not match its original line items.",
     );
-}
-function safePart(value) {
-  return (
-    String(value)
-      .normalize("NFKC")
-      .replace(/[^a-zA-Z0-9_-]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 80) || "order"
-  );
 }
 const initial = (format) => ({
   phase: "idle",
@@ -184,7 +176,7 @@ export function createOrderDownloads({
         }
         if (!current()) return cancelled(value);
         await download(
-          `${safePart(order.invoiceNumber)}-${safePart(order.id)}.${format}`,
+          orderFilename(order, { format }),
           content,
           mime,
         );

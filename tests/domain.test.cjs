@@ -57,6 +57,18 @@ test('duplicate submit command returns the exact original and posts one invoice 
   const c=await f.run('order.submit',{id:d.id,expectedVersion:a.version},customer,'different-command');
   assert.equal(c.invoiceNumber,a.invoiceNumber);assert.equal(f.list('ledger').length,1);
 });
+test('orders submitted at the same time have unique invoice numbers and capture the submission store name',async()=>{
+  const f=fixture();
+  const first=await draft(f,{id:'first'}),second=await draft(f,{id:'second'});
+  await f.run('store.save',{...f.get('stores','s1'),name:'Renamed shop',expectedVersion:1});
+  const a=await f.run('order.submit',{id:first.id,expectedVersion:first.version},customer);
+  const b=await f.run('order.submit',{id:second.id,expectedVersion:second.version},customer);
+  assert.notEqual(a.invoiceNumber,b.invoiceNumber);
+  assert.equal(a.storeName,'Renamed shop');
+  assert.equal(a.storeSnapshot.name,a.storeName);
+  assert.equal(b.storeName,'Renamed shop');
+  assert.equal(f.list('ledger').length,2);
+});
 test('a command ID reused for different input fails instead of silently accepting stale content',async()=>{
   const f=fixture();await f.run('payment.report',{storeId:'s1',amountCents:10},customer,'fixed');
   await rejectsCode(()=>f.run('payment.report',{storeId:'s1',amountCents:20},customer,'fixed'),'COMMAND_CONFLICT');

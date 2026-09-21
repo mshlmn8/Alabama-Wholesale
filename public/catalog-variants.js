@@ -47,3 +47,25 @@ export function serializeCatalogVariants(rows) {
   }
   return { variants, variantPricesCents, variantBarcodes };
 }
+
+/** Add one flavor using the catalog snapshot's version and no unrelated fields. */
+export function prepareCatalogVariant(
+  product,
+  { name, priceCents = null, barcode = "" },
+) {
+  if (!product?.id || product.active === false || product.deleted)
+    throw new Error("This product is no longer available.");
+  const fields = serializeCatalogVariants([
+    ...(product.variants || []).map((variant) => ({
+      name: variant,
+      priceCents: product.variantPricesCents?.[variant] ?? null,
+      barcode: product.variantBarcodes?.[variant] || "",
+    })),
+    { name, priceCents, barcode },
+  ]);
+  return {
+    id: product.id,
+    expectedVersion: product.version || 0,
+    ...fields,
+  };
+}

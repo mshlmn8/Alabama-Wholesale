@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 let modulePromise;
 async function load() {
   const modulePath = path.join(__dirname, "../public/order-downloads.js");
@@ -11,7 +12,10 @@ async function load() {
   );
   return (modulePromise ||= import(
     "data:text/javascript;base64," +
-      Buffer.from(fs.readFileSync(modulePath, "utf8")).toString("base64")
+      Buffer.from(fs.readFileSync(modulePath, "utf8").replace(
+        '"./order-names.mjs"',
+        JSON.stringify(pathToFileURL(path.join(__dirname, '../public/order-names.mjs')).href),
+      )).toString("base64")
   ));
 }
 function order(overrides = {}) {
@@ -119,7 +123,7 @@ test("a confirmed submission requests an invoice PDF without claiming a disk sav
   assert.deepEqual(result.requestedFormats, ["pdf"]);
   assert.equal(f.downloads.length, 1);
   assert.equal(f.downloads[0].mime, "application/pdf");
-  assert.equal(f.downloads[0].name, "AW-2026-000123-order-1.pdf");
+  assert.equal(f.downloads[0].name, "Original-customer-AW-2026-000123-order-1-invoice.pdf");
   assert.equal(
     await f.downloads[0].content.text(),
     "%PDF-1.7\nconfirmed invoice\n%%EOF",
@@ -304,8 +308,17 @@ test("filenames are bounded path-safe names and do not embed raw invoice text", 
   );
   for (const item of f.downloads) {
     assert.match(item.name, /^[A-Za-z0-9_-]+\.(pdf|json)$/);
-    assert.ok(item.name.length < 170);
+    assert.ok(item.name.length < 245);
   }
+});
+
+test("device copy filenames identify the saved store and unique invoice", async () => {
+  const f = await fixture();
+  await f.downloader.save(order(), { format: "both" });
+  assert.deepEqual(f.downloads.map((item) => item.name), [
+    "Original-customer-AW-2026-000123-order-1-invoice.pdf",
+    "Original-customer-AW-2026-000123-order-1-invoice.json",
+  ]);
 });
 test("a late account change during PDF-byte validation prevents downloading private content", async () => {
   const gate = deferred();
