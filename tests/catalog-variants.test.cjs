@@ -104,3 +104,56 @@ test("variant count, money and barcode bounds match product storage", async () =
     /barcode/i,
   );
 });
+
+test("inline flavor creation sends only versioned variant fields and preserves existing overrides", async () => {
+  const { prepareCatalogVariant } = await helpers;
+  assert.equal(typeof prepareCatalogVariant, "function");
+  const product = {
+    id: "juice",
+    version: 7,
+    name: "Juice",
+    variants: ["Apple", "Orange"],
+    variantPricesCents: { Apple: 175 },
+    variantBarcodes: { Orange: "001" },
+    priceCents: 150,
+    packSize: 12,
+    categoryIds: ["drinks"],
+  };
+  const before = structuredClone(product);
+  assert.deepEqual(
+    prepareCatalogVariant(product, {
+      name: " Grape ",
+      priceCents: 200,
+      barcode: " 002 ",
+    }),
+    {
+      id: "juice",
+      expectedVersion: 7,
+      variants: ["Apple", "Orange", "Grape"],
+      variantPricesCents: { Apple: 175, Grape: 200 },
+      variantBarcodes: { Orange: "001", Grape: "002" },
+    },
+  );
+  assert.deepEqual(product, before);
+});
+
+test("the first inline flavor inherits base price and leaves Standard compatibility to the server", async () => {
+  const { prepareCatalogVariant } = await helpers;
+  assert.equal(typeof prepareCatalogVariant, "function");
+  assert.deepEqual(prepareCatalogVariant({ id: "plain", version: 3 }, { name: "Grape" }), {
+    id: "plain",
+    expectedVersion: 3,
+    variants: ["Grape"],
+    variantPricesCents: {},
+    variantBarcodes: {},
+  });
+});
+
+test("inline flavors reject unavailable parents and normalized duplicates", async () => {
+  const { prepareCatalogVariant } = await helpers;
+  assert.equal(typeof prepareCatalogVariant, "function");
+  for (const product of [null, {}, { id: "gone", deleted: true }, { id: "off", active: false }])
+    assert.throws(() => prepareCatalogVariant(product, { name: "Grape" }), /available/i);
+  for (const name of [" grape ", "Ｇｒａｐｅ"])
+    assert.throws(() => prepareCatalogVariant({ id: "juice", variants: ["Grape"] }, { name }), /already exists/i);
+});

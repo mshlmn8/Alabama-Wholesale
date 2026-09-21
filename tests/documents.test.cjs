@@ -30,6 +30,11 @@ test('real invoice PDF uses saved prices, customer snapshot and original order d
   assert.ok(content.includes('originalstorename'));assert.ok(!content.includes('newcurrentstorename'));
   assert.ok(content.includes('01/03/2025'));assert.ok(content.includes('$25.98'));assert.ok(content.includes('aw-2026-000042'));assert.ok(content.includes('sku-orange'));
 });
+test('PDF metadata names the original store together with its unique invoice number',async()=>{
+  const pdf=await renderDocument(fixture(),currentStore,'invoice');
+  assert.match(pdf.toString('latin1'),/Original store name/);
+  assert.match(pdf.toString('latin1'),/AW-2026-000042/);
+});
 test('invoice rejects drafts, missing frozen prices, and inconsistent recorded totals',async()=>{
   await assert.rejects(()=>renderDocument(fixture({status:'draft'}),currentStore,'invoice'),{code:'DOCUMENT_NOT_FINAL'});
   await assert.rejects(()=>renderDocument(fixture({lines:[{...fixture().lines[0],unitPriceCents:null}]}),currentStore,'invoice'),{code:'SNAPSHOT_REQUIRED'});

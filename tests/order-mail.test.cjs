@@ -167,6 +167,7 @@ test("scheduling persists across workers and waits until due with a PDF attachme
   assert.equal(calls[0].attachments[0].content.toString(), "%PDF-fixture");
   assert.equal(calls[0].attachments[0].contentType, "application/pdf");
   assert.match(calls[0].attachments[0].filename, /AW-2026-000042/);
+  assert.match(calls[0].attachments[0].filename, /^Original-shop-AW-2026-000042-/);
   assert.equal(calls[0].disableFileAccess, true);
   assert.equal(
     (await mail.getOrderMail(repo, customer, order.id)).status,
