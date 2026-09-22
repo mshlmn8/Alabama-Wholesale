@@ -878,7 +878,9 @@ function createApp({
           throw error(
             429,
             "assistant_rate_limit",
-            `Your ${period === "minute" ? "minute" : "daily"} AI request limit has been reached. Try again later.`,
+            `Your ${
+              period === "minute" ? "minute" : "daily"
+            } AI request limit has been reached. Try again later.`,
           );
         await tx.set("aiLimits", id, {
           id,
@@ -984,7 +986,10 @@ function createApp({
     res.type("application/pdf");
     res.set(
       "Content-Disposition",
-      `inline; filename="${orderFilename(order, { store, kind: req.params.kind })}"`,
+      `inline; filename="${orderFilename(order, {
+        store,
+        kind: req.params.kind,
+      })}"`,
     );
     res.send(buffer);
   });
@@ -1023,6 +1028,14 @@ function createApp({
   );
   app.use((_req, res) => res.status(404).send("Not found"));
   app.use((e, _req, res, _next) => {
+    if (e.type === "entity.too.large")
+      return res.status(413).json({
+        error: {
+          code: "request_too_large",
+          message:
+            "This request exceeds the 9 MiB upload capacity. Existing drafts are preserved and no order was changed. Export a copy, then shorten large notes or split the order before retrying.",
+        },
+      });
     const status = e.status || 500;
     if (status >= 500)
       console.error(

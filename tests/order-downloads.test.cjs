@@ -399,3 +399,13 @@ test("an account switch between format downloads suppresses the second private f
   assert.equal(f.downloads[0].mime, "application/pdf");
   assert.equal(result.code, "SESSION_CHANGED");
 });
+
+test("large order JSON copies preserve all lines above the old download cap", async () => {
+  const f = await fixture();
+  const base = order();
+  const lines = Array.from({ length: 1200 }, (_, i) => ({ ...base.lines[0], id: "large-" + i }));
+  const record = { ...base, lines, subtotalCents: base.subtotalCents * 1200, taxCents: base.taxCents * 1200, totalCents: base.totalCents * 1200 };
+  const result = await f.downloader.save(record, { format: "json" });
+  assert.equal(result.phase, "requested");
+  assert.deepEqual(JSON.parse(f.downloads[0].content).order.lines, lines);
+});

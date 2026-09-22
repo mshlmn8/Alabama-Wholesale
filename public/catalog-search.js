@@ -1,5 +1,7 @@
 export function bindCatalogSearch(field, onSearch) {
   let composing = false;
+  // The catalog owns the applied query, including programmatic filter resets.
+  // It avoids redrawing repeated values without retaining a second stale copy.
   const apply = () => onSearch(field.value);
 
   // Some browser search controls commit or clear with a search/change event.

@@ -1495,3 +1495,15 @@ test("older cloud responses cannot revive a durably retired draft either", async
   ws.mergeRemoteDrafts([retirementDraft()]);
   assert.equal(ws.getDraft("retire-me"), null);
 });
+
+test("device drafts and imported backups preserve every line above previous order limits", async () => {
+  const { Workspace, createDraft } = await load();
+  const ws = new Workspace(memory(), "large-original");
+  const draft = createDraft("s1");
+  draft.lines = Array.from({ length: 1200 }, (_, i) => ({ id: "line-" + i, productId: "p1", variant: "", quantity: 1, unit: "each", note: "line " + i }));
+  ws.saveDraft(draft);
+  assert.deepEqual(ws.getDraft(draft.id).lines, draft.lines);
+  const restored = new Workspace(memory(), "large-restored");
+  assert.equal(restored.importBackup(ws.exportBackup()).imported, 1);
+  assert.deepEqual(restored.getDraft(draft.id).lines, draft.lines);
+});

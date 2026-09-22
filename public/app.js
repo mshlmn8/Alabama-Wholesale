@@ -24,7 +24,12 @@ import {
   prepareCatalogVariant,
 } from "./catalog-variants.js";
 import { bindCatalogSearch } from "./catalog-search.js";
-import { orderName, orderFilename } from "./order-names.mjs";
+import {
+  orderName,
+  orderFilename,
+  orderStoreName,
+  orderReference,
+} from "./order-names.mjs";
 import {
   createOrderDownloads,
   normalizeDeviceCopyOptions,
@@ -1462,11 +1467,13 @@ function linePrice(line, store = currentStore()) {
       : override?.variantPricesCents?.[line.variant] ??
         override?.priceCents ??
         p.variantPricesCents?.[line.variant] ??
-        p.priceCents;
+        p.priceCents ??
+        0;
   if (!Number.isSafeInteger(cents) || cents < 0) return null;
   const pack = line.unit === "case" ? p.packSize : 1;
   if (!Number.isSafeInteger(pack) || pack <= 0) return null;
-  return cents * pack;
+  const total = cents * pack;
+  return Number.isSafeInteger(total) ? total : null;
 }
 function draftTotals(order = draft) {
   let subtotal = 0,
@@ -2056,6 +2063,7 @@ function renderCatalog() {
     "aria-label": "Search catalog",
   });
   bindCatalogSearch(searchField, (value) => {
+    if (search === value) return;
     search = value;
     drawResults();
   });
@@ -2204,9 +2212,7 @@ function renderCatalog() {
   );
   if (draft?.lines.length) {
     const totals = draftTotals();
-    const estimate = totals.missing.length
-      ? "Prices needed"
-      : cash(totals.total);
+    const estimate = totals.missing.length ? "Check items" : cash(totals.total);
     append(
       root,
       el(
@@ -2289,19 +2295,12 @@ function renderCatalog() {
       );
       return;
     }
-    const cards = products.slice(0, 120).map((product) => {
+    const cards = products.map((product) => {
       if (!cardCache.has(product.id))
         cardCache.set(product.id, renderProductCard(product, fav));
       return cardCache.get(product.id);
     });
     results.replaceChildren(el("div", { class: "catalog-grid" }, cards));
-    if (products.length > 120)
-      append(
-        results,
-        notice(
-          "Showing the first 120 matches. Narrow your search to find a specific product.",
-        ),
-      );
   }
   drawCategories();
   applyLayout();
@@ -2380,7 +2379,7 @@ function renderProductCard(product, fav) {
         el(
           "strong",
           { class: `product-price${base == null ? " muted" : ""}` },
-          base == null ? "Choose variant / price" : `${cash(base)} / each`,
+          base == null ? "Choose variant / price" : cash(base),
         ),
         add,
       ),
@@ -2475,7 +2474,7 @@ function inlineFlavorEditor(m, getProduct, onSaved, assertCurrent) {
       "div",
       { class: "form-grid" },
       field(
-        "Flavor price ($ / each)",
+        "Flavor price ($)",
         price,
         "Optional. Uses the product’s base price when blank.",
       ),
@@ -2508,15 +2507,6 @@ function showAddProduct(product, initialVariant) {
       : "Choose a quantity to add to your order.",
   );
   m.dialog.classList.add("product-selection-dialog");
-  const unit = select(
-    [
-      ["each", "Each"],
-      ...(Number.isSafeInteger(product.packSize) && product.packSize > 0
-        ? [["case", `Case (${product.packSize} each)`]]
-        : []),
-    ],
-    "each",
-  );
   const note = el("textarea", {
     placeholder: "Instructions for these items (optional)",
     maxlength: 1000,
@@ -2598,7 +2588,7 @@ function showAddProduct(product, initialVariant) {
       const lines = selectedProductLines(
         product,
         rows.map((row) => row.quantity.value),
-        unit.value,
+        "each",
         note.value,
       );
       const currentProduct = productById(product.id);
@@ -2608,11 +2598,7 @@ function showAddProduct(product, initialVariant) {
         currentProduct.deleted ||
         lines.some(
           (line) => !productVariants(currentProduct).includes(line.variant),
-        ) ||
-        (unit.value === "case" &&
-          (!Number.isSafeInteger(currentProduct.packSize) ||
-            currentProduct.packSize <= 0 ||
-            currentProduct.packSize !== product.packSize))
+        )
       )
         throw new Error(
           "This product's options changed. Reopen it and review the available flavors.",
@@ -2649,7 +2635,7 @@ function showAddProduct(product, initialVariant) {
       const value = linePrice({
         productId: product.id,
         variant: row.variant,
-        unit: unit.value,
+        unit: "each",
       });
       row.quantity.setAttribute("aria-invalid", String(!valid));
       row.row.classList.toggle("selected", valid && count > 0);
@@ -2663,11 +2649,9 @@ function showAddProduct(product, initialVariant) {
         (item) =>
           item.productId === product.id && (item.variant || "") === row.variant,
       );
-      row.price.textContent = `${
-        value == null ? "Price needed" : `${cash(value)} / ${unit.value}`
-      }${
+      row.price.textContent = `${value == null ? "Check item" : cash(value)}${
         inventory?.onHand != null
-          ? ` · ${inventory.onHand - (inventory.reserved || 0)} each available`
+          ? ` · ${inventory.onHand - (inventory.reserved || 0)} available`
           : ""
       }`;
     }
@@ -2679,7 +2663,9 @@ function showAddProduct(product, initialVariant) {
           multiple ? (selected === 1 ? "flavor" : "flavors") : "item"
         } selected · ${
           unpriced
-            ? `${unpriced} ${unpriced === 1 ? "price" : "prices"} needed`
+            ? `${unpriced} ${
+                unpriced === 1 ? "item needs" : "items need"
+              } review`
             : `${cash(subtotal)} subtotal`
         }`;
     add.disabled = invalid || !selected;
@@ -2707,7 +2693,6 @@ function showAddProduct(product, initialVariant) {
     noResults.hidden = visible > 0;
   }
   search.addEventListener("input", filterFlavors);
-  unit.addEventListener("change", updateSelection);
   const options = el(
     "details",
     { class: "flavor-options" },
@@ -2732,7 +2717,6 @@ function showAddProduct(product, initialVariant) {
   );
   append(
     m.content,
-    field("Order unit", unit),
     search,
     list,
     noResults,
@@ -2771,13 +2755,16 @@ function showAddProduct(product, initialVariant) {
   );
   updateSelection();
 }
-function assertBuilderDraft(scope, id, selectedStoreId) {
+function assertBuilderIdentity(scope, id, selectedStoreId) {
   if (!scopeCurrent(scope) || storeId !== selectedStoreId)
     throw new SessionChanged();
   if (!draft || draft.id !== id)
     throw new Error(
       "The active draft changed. Reopen the item before editing it.",
     );
+}
+function assertBuilderDraft(scope, id, selectedStoreId) {
+  assertBuilderIdentity(scope, id, selectedStoreId);
   if (hasUnsavedDraftNotes())
     throw new Error(
       "Save or copy your latest order notes before editing items.",
@@ -2791,20 +2778,16 @@ function findBuilderLine(order, id) {
     );
   return line;
 }
-function builderUnitOptions(product, currentUnit) {
-  const hasCase =
-    Number.isSafeInteger(product?.packSize) && product.packSize > 0;
-  return [
-    ["each", "Each"],
-    ...(hasCase || currentUnit === "case"
-      ? [
-          [
-            "case",
-            hasCase ? `Case (${product.packSize})` : "Case — size needed",
-          ],
-        ]
-      : []),
-  ];
+function savedCaseQuantityHint(line, product) {
+  if (line.unit !== "case") return "";
+  const packSize = Object.hasOwn(line, "packSize")
+    ? line.packSize
+    : product?.packSize;
+  return Number.isSafeInteger(packSize) && packSize > 0
+    ? `Existing case quantity · ${packSize} ${
+        packSize === 1 ? "item" : "items"
+      } per case`
+    : "Existing case quantity · original unit retained";
 }
 function showEditDraftLine(id) {
   const scope = operationScope(),
@@ -2830,10 +2813,6 @@ function showEditDraftLine(id) {
     step: 1,
     inputmode: "numeric",
   });
-  const unit = select(
-    builderUnitOptions(product, original.unit),
-    original.unit,
-  );
   const note = el("textarea", {
     maxlength: 1000,
     rows: 3,
@@ -2846,8 +2825,7 @@ function showEditDraftLine(id) {
       "div",
       { class: "form-grid" },
       field("Flavor", variant),
-      field("Quantity", quantity),
-      field("Order unit", unit),
+      field("Quantity", quantity, savedCaseQuantityHint(original, product)),
       field("Line note", note),
     ),
     inlineFlavorEditor(
@@ -2865,6 +2843,26 @@ function showEditDraftLine(id) {
   append(
     m.footer,
     button("Cancel", m.close),
+    button(
+      "Remove item",
+      () => {
+        assertBuilderDraft(scope, selectedDraftId, selectedStoreId);
+        if (!m.dialog.open) return;
+        if (
+          JSON.stringify(findBuilderLine(draft, id)) !==
+          JSON.stringify(original)
+        )
+          throw new Error(
+            "This item changed while you were editing. Close and reopen it to keep the latest changes.",
+          );
+        editDraft((d) => {
+          d.lines = d.lines.filter((line) => line.id !== id);
+        });
+        m.close();
+        toast("Item removed. Use Undo to restore it.");
+      },
+      "subtle",
+    ),
     button(
       "Update item",
       () => {
@@ -2888,24 +2886,16 @@ function showEditDraftLine(id) {
         )
           throw new Error("Choose an available flavor.");
         if (
-          unit.value === "case" &&
+          original.unit === "case" &&
           currentProduct?.packSize !== product?.packSize
         )
           throw new Error(
-            "The product's case size changed. Close and reopen this item before choosing cases.",
+            "The product's case size changed. Close and reopen this item before editing its case quantity.",
           );
-        if (
-          unit.value === "case" &&
-          original.unit !== "case" &&
-          (!Number.isSafeInteger(currentProduct?.packSize) ||
-            currentProduct.packSize <= 0)
-        )
-          throw new Error("Set the product's case size before choosing cases.");
         editDraft((d) => {
           Object.assign(findBuilderLine(d, id), {
             variant: variant.value,
             quantity: count,
-            unit: unit.value,
             note: note.value.trim(),
           });
         });
@@ -2917,40 +2907,118 @@ function showEditDraftLine(id) {
     ),
   );
 }
+function showBuilderActions() {
+  const scope = operationScope(),
+    selectedDraftId = draft?.id,
+    selectedStoreId = storeId;
+  const check = () => {
+    if (
+      !scopeCurrent(scope) ||
+      storeId !== selectedStoreId ||
+      draft?.id !== selectedDraftId
+    )
+      throw new SessionChanged();
+  };
+  const m = modal("Order options", currentStore()?.name || "");
+  const action = (label, fn, symbol, allowUnsaved = false) =>
+    button(
+      label,
+      async () => {
+        check();
+        if (!allowUnsaved && hasUnsavedDraftNotes())
+          throw new Error(
+            "Save or copy your latest order notes before continuing. Save details can help recover them.",
+          );
+        m.close();
+        await fn();
+      },
+      "",
+      symbol,
+    );
+  append(
+    m.content,
+    el(
+      "div",
+      { class: "stack" },
+      action("Item size", showBuilderSettings, "catalog"),
+      action(
+        "New draft",
+        async () => {
+          if (
+            draft?.lines.length &&
+            !(await confirmAction(
+              "Start a new draft?",
+              "Your current draft stays in this workspace. Check its save status before closing the app.",
+              "Start new",
+            ))
+          )
+            return;
+          check();
+          beginDraft();
+        },
+        "plus",
+      ),
+      draft
+        ? action(
+            "Save online now",
+            async () => {
+              await syncDraft();
+              toast("Draft saved online.");
+            },
+            "check",
+          )
+        : null,
+      draft
+        ? action(
+            "Copy order text",
+            () => copyText(draftText(draftRecoverySnapshot(draft.id))),
+            undefined,
+            true,
+          )
+        : null,
+      draft
+        ? action(
+            "Download draft",
+            () =>
+              download(
+                orderFilename(draft, {
+                  store: currentStore(),
+                  kind: "draft",
+                  format: "json",
+                }),
+                JSON.stringify(draftRecoverySnapshot(draft.id), null, 2),
+              ),
+            "download",
+            true,
+          )
+        : null,
+    ),
+  );
+  append(m.footer, button("Close", m.close));
+}
 function renderBuilder() {
   const root = el(
     "div",
     { class: "builder-page", "data-size": builderSize() },
     heading(
-      "Build an order",
+      "Current order",
       draft
         ? orderName(draft, currentStore())
         : currentStore()?.name || "Select a store to begin.",
       [
-        button("Item size", showBuilderSettings, "", "catalog"),
         button(
-          "New draft",
-          async () => {
-            if (
-              draft?.lines.length &&
-              !(await confirmAction(
-                "Start a new draft?",
-                "Your current draft stays in this workspace. Check its save status before closing the app.",
-                "Start new",
-              ))
-            )
-              return;
-            beginDraft();
+          "Add items",
+          () => {
+            if (hasUnsavedDraftNotes())
+              throw new Error(
+                "Save or copy your latest order notes before adding items.",
+              );
+            setView("catalog");
           },
-          "",
+          "primary",
           "plus",
         ),
-        button(
-          "Browse catalog",
-          () => setView("catalog"),
-          "primary",
-          "catalog",
-        ),
+        iconButton("Order options", "more", showBuilderActions),
       ],
     ),
   );
@@ -2960,7 +3028,7 @@ function renderBuilder() {
       root,
       empty(
         "A fresh order, ready when you are",
-        "Build a cart from the catalog, repeat a previous order, or turn a note into a proposed cart.",
+        "Choose products from the catalog, repeat a previous order, or start with a note.",
         [
           button("Start an order", beginDraft, "primary"),
           button("Draft with AI", showAssistant, "", "spark"),
@@ -2978,13 +3046,26 @@ function renderBuilder() {
         "Recovered draft: verify all products, variants and quantities against the original before syncing.",
       ),
     );
-  const totals = draftTotals();
-  const groups = groupDraftLines(draft.lines);
+  const totals = draftTotals(),
+    groups = groupDraftLines(draft.lines);
   const builderScope = operationScope(),
     builderDraftId = draft.id,
     builderStoreId = storeId;
   const checkDraft = () =>
     assertBuilderDraft(builderScope, builderDraftId, builderStoreId);
+  const review = button("Review & submit", showSubmit, "primary", "check");
+  const totalValue = el(
+    "strong",
+    { "data-builder-total": "true", "aria-live": "polite" },
+    cash(totals.total),
+  );
+  const itemIssue = el(
+    "p",
+    { class: "builder-issue small", hidden: !totals.missing.length },
+    `Check unavailable products, invalid amounts or case sizes: ${[
+      ...new Set(totals.missing),
+    ].join(", ")}`,
+  );
   function updateBuilderEstimates() {
     if (
       !scopeCurrent(builderScope) ||
@@ -2993,11 +3074,8 @@ function renderBuilder() {
     )
       return;
     const next = draftTotals();
-    summary
-      .querySelector("[data-builder-totals]")
-      .replaceChildren(totalRows(next));
-    summary.querySelector("button").disabled =
-      !draft.lines.length || next.missing.length > 0;
+    totalValue.textContent = cash(next.total);
+    review.disabled = !draft.lines.length || next.missing.length > 0;
     draftStatus.querySelectorAll("[data-draft-history] button")[0].disabled =
       !undo.length;
     draftStatus.querySelectorAll("[data-draft-history] button")[1].disabled =
@@ -3007,8 +3085,8 @@ function renderBuilder() {
     "div",
     { class: "builder-lines" },
     groups.map((group) => {
-      const product = productById(group.productId);
-      const name = product?.name || "Product unavailable";
+      const product = productById(group.productId),
+        name = product?.name || "Product unavailable";
       const groupLabel = `builder-product-${uuid()}`;
       const add = button(
         "Add flavors",
@@ -3016,22 +3094,54 @@ function renderBuilder() {
           checkDraft();
           showAddProduct(productById(group.productId));
         },
-        "",
+        "text-button",
         "plus",
       );
       add.disabled = !product || product.active === false || product.deleted;
-      const removeProduct = iconButton(
-        `Remove ${name} from order`,
-        "close",
+      const options = button(
+        name,
         () => {
           checkDraft();
-          editDraft((d) => {
-            d.lines = d.lines.filter(
-              (line) => line.productId !== group.productId,
-            );
-          });
+          const m = modal(name, "Product options");
+          append(
+            m.content,
+            el(
+              "div",
+              { class: "stack" },
+              product && master()
+                ? button(
+                    "Edit product",
+                    () => {
+                      checkDraft();
+                      m.close();
+                      showProductEditor(productById(group.productId));
+                    },
+                    "",
+                    "edit",
+                  )
+                : null,
+              button(
+                "Remove all flavors",
+                () => {
+                  checkDraft();
+                  editDraft((d) => {
+                    d.lines = d.lines.filter(
+                      (line) => line.productId !== group.productId,
+                    );
+                  });
+                  m.close();
+                  toast("Product removed. Use Undo to restore it.");
+                },
+                "subtle",
+                "close",
+              ),
+            ),
+          );
+          append(m.footer, button("Close", m.close));
         },
+        "builder-product-title",
       );
+      options.setAttribute("aria-label", `Options for ${name}`);
       return el(
         "section",
         {
@@ -3042,76 +3152,20 @@ function renderBuilder() {
         el(
           "div",
           { class: "builder-product-head" },
-          el(
-            "div",
-            {},
-            el("h2", { id: groupLabel }, name),
-            el(
-              "p",
-              { class: "small" },
-              `${group.lines.length} flavor ${
-                group.lines.length === 1 ? "line" : "lines"
-              }`,
-            ),
-          ),
-          removeProduct,
-          el(
-            "div",
-            { class: "builder-product-actions" },
-            add,
-            product && master()
-              ? button(
-                  "Edit product",
-                  () => {
-                    checkDraft();
-                    showProductEditor(productById(group.productId));
-                  },
-                  "text-button",
-                  "edit",
-                )
-              : null,
-          ),
+          el("h2", { id: groupLabel }, options),
+          el("div", { class: "builder-product-actions" }, add),
         ),
         el(
           "div",
           { class: "builder-flavors" },
           group.lines.map((line) => {
-            const label = `${name} / ${line.variant || "Standard"}`;
-            const price = linePrice(line);
-            const available = product ? productVariants(product) : [];
-            const options = available.map((variant) => [
-              variant,
-              variant || "Standard",
-            ]);
-            if (!available.includes(line.variant || ""))
-              options.unshift([
-                line.variant || "",
-                `${line.variant || "Standard"} (unavailable)`,
-              ]);
-            const flavor = select(options, line.variant || "", {
-              id: `variant-${line.id}`,
-              "aria-label": `Flavor for ${name}`,
-              disabled: !product,
-              onChange: (event) =>
-                act(() => {
-                  try {
-                    checkDraft();
-                    const next = event.target.value;
-                    if (
-                      !productVariants(productById(group.productId)).includes(
-                        next,
-                      )
-                    )
-                      throw new Error("Choose an available flavor.");
-                    editDraft((d) => {
-                      findBuilderLine(d, line.id).variant = next;
-                    });
-                  } catch (error) {
-                    event.target.value = line.variant || "";
-                    throw error;
-                  }
-                }),
-            });
+            const label = `${name} / ${line.variant || "Standard"}`,
+              price = linePrice(line);
+            const amount = el(
+              "span",
+              { class: "builder-line-amount", "data-line-amount": line.id },
+              cash(price == null ? null : price * line.quantity),
+            );
             const quantity = input("number", line.quantity, {
               id: `qty-${line.id}`,
               min: 1,
@@ -3135,6 +3189,13 @@ function renderBuilder() {
                         findBuilderLine(d, line.id).quantity = number;
                       },
                       { renderPage: false },
+                    );
+                    const current = findBuilderLine(draft, line.id),
+                      currentPrice = linePrice(current);
+                    amount.textContent = cash(
+                      currentPrice == null
+                        ? null
+                        : currentPrice * current.quantity,
                     );
                     updateDraftProtection(draft.id);
                     updateBuilderEstimates();
@@ -3162,60 +3223,26 @@ function renderBuilder() {
                   line.quantity;
               },
             });
-            const units = select(
-              builderUnitOptions(product, line.unit),
-              line.unit,
-              {
-                id: `unit-${line.id}`,
-                "aria-label": `Unit for ${label}`,
-                onChange: (event) =>
-                  act(() => {
-                    try {
-                      checkDraft();
-                      editDraft((d) => {
-                        findBuilderLine(d, line.id).unit = event.target.value;
-                      });
-                    } catch (error) {
-                      event.target.value = line.unit;
-                      throw error;
-                    }
-                  }),
-              },
-            );
             return el(
               "div",
               { class: "builder-flavor-row", "data-line-id": line.id },
               el(
                 "div",
                 { class: "builder-flavor-name" },
-                field("Flavor", flavor),
+                el("span", {}, line.variant || "Standard"),
+                line.note
+                  ? el("small", { class: "builder-note-marker" }, "Note added")
+                  : null,
+                line.unit === "case"
+                  ? el("small", {}, savedCaseQuantityHint(line, product))
+                  : null,
               ),
-              field("Quantity", quantity),
-              field("Unit", units),
-              iconButton(`Edit ${label}`, "edit", () => {
+              quantity,
+              amount,
+              iconButton(`Options for ${label}`, "more", () => {
                 checkDraft();
                 showEditDraftLine(line.id);
               }),
-              iconButton(`Remove ${label} from order`, "close", () => {
-                checkDraft();
-                editDraft((d) => {
-                  d.lines = d.lines.filter((item) => item.id !== line.id);
-                });
-              }),
-              el(
-                "div",
-                { class: "builder-line-details small" },
-                el(
-                  "span",
-                  {},
-                  price == null
-                    ? "Price needed"
-                    : `${cash(price)} / ${line.unit}`,
-                ),
-                line.note
-                  ? el("span", { class: "builder-line-note" }, line.note)
-                  : null,
-              ),
             );
           }),
         ),
@@ -3226,10 +3253,12 @@ function renderBuilder() {
     id: "draft-notes",
     "data-draft-id": draft.id,
     value: draft.notes || "",
+    rows: 2,
     placeholder: "Delivery instructions, packing notes or substitutions…",
     maxlength: 5000,
     onInput: (event) =>
       act(() => {
+        assertBuilderIdentity(builderScope, builderDraftId, builderStoreId);
         editDraft(
           (d) => {
             d.notes = event.target.value;
@@ -3237,59 +3266,37 @@ function renderBuilder() {
           { renderPage: false },
         );
         updateDraftProtection(draft.id);
-        draftStatus.querySelectorAll(
-          "[data-draft-history] button",
-        )[0].disabled = !undo.length;
-        draftStatus.querySelectorAll(
-          "[data-draft-history] button",
-        )[1].disabled = !redo.length;
+        updateBuilderEstimates();
       }),
   });
   note.value = draft.notes || "";
-  const draftSyncDot = el("span", {
-    id: "draft-sync-dot",
-    class: `sync-dot ${draftProtection(draft.id).tone}`,
-  });
-  const draftSyncMessage = el(
-    "span",
-    { id: "draft-sync-message" },
-    draftProtection(draft.id).label,
-  );
   const draftStatus = el(
     "div",
-    { class: "split mb" },
+    { class: "builder-draft-status" },
     el(
       "div",
       { class: "sync-bar" },
-      draftSyncDot,
-      draftSyncMessage,
-      button(
-        "Save details",
-        () => showDraftProtection(draft.id),
-        "text-button",
-      ),
+      el("span", {
+        id: "draft-sync-dot",
+        class: `sync-dot ${draftProtection(draft.id).tone}`,
+      }),
+      el("span", { id: "draft-sync-message" }, draftProtection(draft.id).label),
+      iconButton("Save details", "more", () => {
+        assertBuilderIdentity(builderScope, builderDraftId, builderStoreId);
+        showDraftProtection(draft.id);
+      }),
     ),
     el(
       "div",
       { class: "actions", "data-draft-history": "true" },
-      button(
-        "Undo",
-        () => {
-          checkDraft();
-          undoDraft();
-        },
-        "",
-        null,
-      ),
-      button(
-        "Redo",
-        () => {
-          checkDraft();
-          undoDraft(true);
-        },
-        "",
-        null,
-      ),
+      button("Undo", () => {
+        checkDraft();
+        undoDraft();
+      }),
+      button("Redo", () => {
+        checkDraft();
+        undoDraft(true);
+      }),
     ),
   );
   draftStatus.querySelectorAll("[data-draft-history] button")[0].disabled =
@@ -3298,96 +3305,76 @@ function renderBuilder() {
     !redo.length;
   const summary = el(
     "aside",
-    { class: "panel summary-box" },
-    el("h2", {}, "Order review"),
-    el(
-      "p",
-      { class: "small" },
-      `${groups.length} ${groups.length === 1 ? "product" : "products"} · ${
-        draft.lines.length
-      } flavor lines · ${currentStore()?.name || ""}`,
-    ),
-    totals.missing.length
-      ? notice(
-          `Price or case size needed for: ${[...new Set(totals.missing)].join(
-            ", ",
-          )}`,
-        )
-      : null,
-    el("div", { "data-builder-totals": "true" }, totalRows(totals)),
-    el(
-      "p",
-      { class: "small" },
-      "Prices and availability are checked again when submitted. Submission creates the invoice charge and reserves available stock.",
-    ),
+    { class: "builder-review-bar", "aria-label": "Order total and review" },
     el(
       "div",
-      { class: "stack mt" },
-      button("Review & submit", showSubmit, "primary", "check"),
-      button("Save online now", async () => {
-        await syncDraft();
-        toast("Draft saved online.");
-      }),
-      button("Copy order text", () => copyText(draftText(draft)), "subtle"),
-      button(
-        "Download draft",
-        () =>
-          download(
-            orderFilename(draft, {
-              store: currentStore(),
-              kind: "draft",
-              format: "json",
-            }),
-            JSON.stringify(draft, null, 2),
-          ),
-        "subtle",
-      ),
+      { class: "builder-review-total" },
+      el("small", {}, totals.missing.length ? "Known total" : "Order total"),
+      totalValue,
     ),
+    el(
+      "span",
+      { class: "builder-review-count small" },
+      `${groups.length} products · ${draft.lines.length} lines`,
+    ),
+    review,
   );
-  summary.querySelector("button").disabled =
-    !draft.lines.length || totals.missing.length > 0;
+  review.disabled = !draft.lines.length || totals.missing.length > 0;
   append(
     root,
     draftStatus,
-    el(
-      "div",
-      { class: "two-column" },
-      el(
-        "section",
-        { class: "stack" },
-        draft.lines.length
-          ? lines
-          : empty(
-              "Add your first product",
-              "Choose products from the catalog or start with a note. Changes save online automatically when connected.",
-              [
-                button("Browse catalog", () => setView("catalog"), "primary"),
-                button("Draft with AI", showAssistant),
-              ],
-            ),
-        el(
-          "div",
-          { class: "panel" },
-          field("Order notes", note),
+    draft.lines.length
+      ? el(
+          "section",
+          { class: "builder-sheet", "aria-label": "Order items" },
           el(
-            "p",
-            {
-              class: "small",
-              "data-draft-protection": draft.id,
-              "aria-live": "polite",
-            },
-            draftProtection(draft.id).label,
+            "div",
+            { class: "builder-columns small", "aria-hidden": "true" },
+            el("span", {}, "Product / flavor"),
+            el("span", {}, "Qty"),
+            el("span", {}, "Amount"),
+            el("span"),
           ),
+          lines,
+        )
+      : empty(
+          "Add your first product",
+          "Changes save online automatically when connected.",
+          [
+            button("Browse catalog", () => setView("catalog"), "primary"),
+            button("Draft with AI", showAssistant),
+          ],
+          "cart",
         ),
+    itemIssue,
+    el(
+      "details",
+      { class: "builder-notes" },
+      el("summary", {}, "Order notes & delivery instructions"),
+      field("Order notes", note),
+      el(
+        "p",
+        {
+          class: "small",
+          "data-draft-protection": draft.id,
+          "aria-live": "polite",
+        },
+        draftProtection(draft.id).label,
       ),
-      summary,
     ),
     saved.length > 1
-      ? renderDraftList(saved.filter((item) => item.id !== draft.id))
+      ? el(
+          "details",
+          { class: "builder-other-drafts" },
+          el("summary", {}, "Other saved drafts"),
+          renderDraftList(saved.filter((item) => item.id !== draft.id)),
+        )
       : null,
+    summary,
   );
   return root;
 }
+
 function renderDraftList(drafts) {
   return el(
     "section",
@@ -3461,7 +3448,7 @@ async function showSubmit() {
   const totals = draftTotals(reviewed);
   if (totals.missing.length)
     throw new Error(
-      "Every line needs a valid price and case size before submission.",
+      "Check unavailable products, invalid amounts, or missing case sizes before submission. Unpriced items submit at $0.",
     );
   const m = modal(
     "Review your order",
@@ -3472,7 +3459,7 @@ async function showSubmit() {
   append(
     m.content,
     notice(
-      "Submitting charges this account once and reserves available inventory. Review the order before continuing.",
+      "Submitting charges this account once and reserves available inventory. Items without a price submit at $0.",
     ),
     lineTable(draft.lines, true),
     totalRows(totals),
@@ -3521,7 +3508,7 @@ async function showSubmit() {
 }
 function lineTable(lines, isDraft = false, store = currentStore()) {
   return table(
-    ["Product / variant", "Quantity", "Unit price", "Line total"],
+    ["Product / variant", "Quantity", "Price", "Line total"],
     lines.map((line) => {
       const p = productById(line.productId);
       const unitPrice = isDraft ? linePrice(line, store) : line.unitPriceCents;
@@ -3542,7 +3529,7 @@ function lineTable(lines, isDraft = false, store = currentStore()) {
           el("p", { class: "small" }, line.variant || "Standard"),
           line.note ? el("p", { class: "small" }, line.note) : null,
         ),
-        td(`${line.quantity} ${line.unit || "each"}`),
+        td(`${line.quantity}${line.unit === "case" ? " cases" : ""}`),
         td(cash(unitPrice)),
         td(cash(total)),
       );
@@ -3554,7 +3541,7 @@ function draftText(order) {
     `${orderName(order, storeById(order.storeId))} — DRAFT`,
     ...order.lines.map(
       (line) =>
-        `${line.quantity} ${line.unit} · ${
+        `${line.quantity}${line.unit === "case" ? " cases" : ""} · ${
           productById(line.productId)?.name || line.productId
         }${line.variant ? ` / ${line.variant}` : ""}${
           line.note ? ` (${line.note})` : ""
@@ -3633,7 +3620,51 @@ async function loadOlderOrders() {
     }
   }
 }
+let orderHistorySearch = { scope: null, value: "" };
+function orderHistoryRow(order) {
+  const store = storeById(order.storeId);
+  return el(
+    "li",
+    { class: "order-history-row", "data-order-id": order.id },
+    el(
+      "div",
+      { class: "order-history-identity" },
+      el(
+        "strong",
+        { class: "order-history-store" },
+        orderStoreName(order, store),
+      ),
+      el(
+        "div",
+        { class: "order-history-meta" },
+        el("span", { class: "order-history-reference" }, orderReference(order)),
+        el(
+          "span",
+          {},
+          date(order.date || order.legacy?.date || order.createdAt),
+        ),
+        status(order.status),
+        order.paymentStatus ? status(order.paymentStatus) : null,
+      ),
+    ),
+    el(
+      "div",
+      { class: "order-history-amount" },
+      order.totalCents != null
+        ? cash(order.totalCents)
+        : order.total != null
+        ? cash(Math.round(order.total * 100))
+        : "Draft",
+    ),
+    iconButton(`Open ${orderName(order, store)}`, "arrow", () =>
+      showOrder(order),
+    ),
+  );
+}
 function renderOrders() {
+  const scope = operationScope();
+  if (!orderHistorySearch.scope || !scopeCurrent(orderHistorySearch.scope))
+    orderHistorySearch = { scope, value: "" };
   const historyStoreId = orderHistoryStoreId();
   const orders = state.orders
     .filter(
@@ -3664,17 +3695,95 @@ function renderOrders() {
     node.setAttribute("aria-pressed", String(orderStoreScope === value));
     return node;
   };
+  const caption = el("p", {
+    class: "small order-history-caption",
+    role: "status",
+  });
+  const results = el("div", { id: "order-history-results" });
+  const searchControl = input("search", orderHistorySearch.value, {
+    id: "order-history-search",
+    class: "search",
+    placeholder: "Find store or invoice…",
+    "aria-label": "Search loaded orders",
+    "aria-controls": "order-history-results",
+    onInput: (event) => {
+      if (!scopeCurrent(scope)) return;
+      orderHistorySearch.value = event.target.value;
+      updateResults();
+    },
+  });
+  const searchable = orders.map((order) => ({
+    order,
+    text: [
+      orderName(order, storeById(order.storeId)),
+      storeById(order.storeId)?.name,
+      order.id,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .normalize("NFKC")
+      .toLowerCase(),
+  }));
+  const updateResults = () => {
+    const terms = orderHistorySearch.value
+      .normalize("NFKC")
+      .toLowerCase()
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+    const matching = searchable
+      .filter(({ text }) => terms.every((term) => text.includes(term)))
+      .map(({ order }) => order);
+    caption.replaceChildren(
+      `${
+        allStores
+          ? "All stores you can access"
+          : currentStore()?.name || "Selected store"
+      } · ${
+        terms.length ? `${matching.length} of ${orders.length}` : orders.length
+      } loaded order${orders.length === 1 ? "" : "s"}`,
+    );
+    results.replaceChildren(
+      matching.length
+        ? el(
+            "ul",
+            {
+              class: "order-history-list",
+              "aria-label": "Order history",
+              "aria-busy": String(orderHistoryLoading),
+            },
+            matching.map(orderHistoryRow),
+          )
+        : empty(
+            orderHistoryLoading
+              ? "Loading orders…"
+              : terms.length
+              ? "No matching loaded orders"
+              : "No orders in this view",
+            orderHistoryLoading
+              ? "Checking saved order history."
+              : orderHistoryError
+              ? "Retry loading your saved orders below."
+              : terms.length
+              ? orderCursor === null
+                ? "Try another store name or invoice."
+                : "Try another store name or invoice, or load older orders below."
+              : "Try another status or start your next order.",
+            orderHistoryLoading || orderHistoryError || terms.length
+              ? []
+              : [button("Build an order", beginDraft, "primary")],
+            "orders",
+          ),
+    );
+  };
   const root = el(
     "div",
     { class: "orders-page" },
-    heading(
-      "Orders & deliveries",
-      "Track progress and keep every invoice tied to its original prices.",
-      [button("New order", beginDraft, "primary", "plus")],
-    ),
+    heading("Orders", "", [button("New order", beginDraft, "primary", "plus")]),
     el(
       "div",
       { class: "filters order-history-filters" },
+      searchControl,
       el(
         "div",
         {
@@ -3708,46 +3817,11 @@ function renderOrders() {
         },
       ),
     ),
-    el(
-      "p",
-      { class: "small order-history-caption", role: "status" },
-      `${
-        allStores
-          ? "All stores you can access"
-          : currentStore()?.name || "Selected store"
-      } · ${orders.length} loaded order${orders.length === 1 ? "" : "s"}`,
-    ),
+    caption,
   );
   if (orderHistoryError) append(root, notice(orderHistoryError, true));
-  if (!orders.length)
-    append(
-      root,
-      empty(
-        orderHistoryLoading ? "Loading orders…" : "No orders in this view",
-        orderHistoryLoading
-          ? "Checking saved order history."
-          : orderHistoryError
-          ? "Retry loading your saved orders below."
-          : "Try another status or start your next order.",
-        orderHistoryLoading || orderHistoryError
-          ? []
-          : [button("Build an order", beginDraft, "primary")],
-        "orders",
-      ),
-    );
-  else
-    append(
-      root,
-      el(
-        "section",
-        {
-          class: "panel",
-          "aria-label": "Order history",
-          "aria-busy": String(orderHistoryLoading),
-        },
-        orderList(orders),
-      ),
-    );
+  append(root, results);
+  updateResults();
   const loadButton = button(
     orderHistoryLoading
       ? "Loading orders…"
@@ -5392,7 +5466,7 @@ function showReturn(order) {
             el("strong", {}, line.name),
             el("p", { class: "small" }, line.variant || "Standard"),
           ),
-          td(`${remaining} ${line.unit}`),
+          td(`${remaining}${line.unit === "case" ? " cases" : ""}`),
           td(quantity),
         ),
       ),
@@ -5455,7 +5529,7 @@ function showReturnDetails(item) {
             el("strong", {}, line.name),
             el("p", { class: "small" }, line.variant),
           ),
-          td(`${line.quantity} ${line.unit}`),
+          td(`${line.quantity}${line.unit === "case" ? " cases" : ""}`),
           td(cash(line.totalCents)),
         ),
       ),
@@ -6116,14 +6190,15 @@ function showBuilderSettings() {
   );
 }
 function showCategories() {
+  if (!master()) throw new SessionChanged();
+  const scope = operationScope();
+  const assertCurrent = () => {
+    if (!scopeCurrent(scope) || !master()) throw new SessionChanged();
+  };
   const m = modal(
     "Catalog categories",
-    "Group products so customers can find them quickly.",
+    "Add a category, or choose Add subcategory beside its parent.",
   );
-  const name = input("text", "", {
-    maxlength: 150,
-    placeholder: "New category name",
-  });
   const parentOptions = (excluded = "") => {
     const invalid = excluded
       ? categoryFilterIds(state.categories, excluded)
@@ -6135,7 +6210,103 @@ function showCategories() {
         .map((item) => [item.id, categoryLabel(state.categories, item)]),
     ];
   };
-  const parent = select(parentOptions(), "", { id: "new-category-parent" });
+  function openEditor(category = null, parentId = "") {
+    assertCurrent();
+    const addingChild = !category && !!parentId;
+    const parentCategory = state.categories.find(
+      (item) => item.id === parentId,
+    );
+    if (
+      addingChild &&
+      (!parentCategory ||
+        parentCategory.active === false ||
+        parentCategory.deleted)
+    )
+      throw new Error(
+        "This parent category is no longer available. Reopen categories.",
+      );
+    const title = category
+      ? "Edit category"
+      : addingChild
+      ? "Add subcategory"
+      : "Add category";
+    const edit = modal(
+      title,
+      addingChild
+        ? `Create a child of ${categoryLabel(
+            state.categories,
+            parentCategory,
+          )}.`
+        : "Choose a name and where this category belongs.",
+    );
+    const name = input("text", category?.name || "", {
+      maxlength: 150,
+      required: true,
+      placeholder: addingChild ? "Subcategory name" : "Category name",
+    });
+    const parent = select(
+      parentOptions(category?.id),
+      category?.parentId || parentId,
+      { id: `category-parent-${uuid()}` },
+    );
+    const categoryId = category?.id || uuid();
+    let saving = false;
+    const save = async () => {
+      assertCurrent();
+      if (saving || !edit.dialog.open) return;
+      if (!name.value.trim()) throw new Error("Enter a category name.");
+      saving = true;
+      name.disabled = parent.disabled = true;
+      try {
+        const saved = await command("category.save", {
+          id: categoryId,
+          name: name.value.trim(),
+          parentId: parent.value,
+          ...(category ? {} : { sortOrder: state.categories.length }),
+          expectedVersion: category?.version || 0,
+        });
+        assertCurrent();
+        const known = state.categories.find((item) => item.id === saved.id);
+        // The write is confirmed even if its following workspace refresh failed.
+        if (!known || (known.version || 0) < saved.version) {
+          state.categories = known
+            ? state.categories.map((item) =>
+                item.id === saved.id ? saved : item,
+              )
+            : [...state.categories, saved];
+          render();
+        }
+        if (!edit.dialog.open) return;
+        edit.close();
+        m.close();
+        showCategories();
+        toast(`${saved.name} ${category ? "updated" : "added"}.`);
+      } finally {
+        saving = false;
+        name.disabled = parent.disabled = false;
+      }
+    };
+    const form = el(
+      "form",
+      {
+        id: `category-form-${uuid()}`,
+        onSubmit: (event) => {
+          event.preventDefault();
+          return act(save, submit);
+        },
+      },
+      field("Category name", name),
+      field("Parent category", parent),
+    );
+    const submit = el(
+      "button",
+      { type: "submit", form: form.id, class: "primary" },
+      category ? "Save changes" : title,
+    );
+    append(edit.content, form);
+    append(edit.footer, button("Cancel", edit.close), submit);
+    name.focus();
+  }
   append(
     m.content,
     el(
@@ -6149,76 +6320,21 @@ function showCategories() {
           el(
             "div",
             { class: "actions" },
-            button("Edit", () => {
-              const edit = modal("Edit category");
-              const renamed = input("text", category.name, { maxlength: 150 });
-              const parentField = select(
-                parentOptions(category.id),
-                category.parentId || "",
-                { id: "edit-category-parent" },
-              );
-              append(
-                edit.content,
-                field("Category name", renamed),
-                field("Parent category", parentField),
-              );
-              append(
-                edit.footer,
-                button(
-                  "Save",
-                  async () => {
-                    if (!renamed.value.trim())
-                      throw new Error("Enter a category name.");
-                    await command("category.save", {
-                      ...category,
-                      name: renamed.value.trim(),
-                      parentId: parentField.value,
-                      expectedVersion: category.version,
-                    });
-                    edit.close();
-                    m.close();
-                    showCategories();
-                  },
-                  "primary",
-                ),
-              );
-            }),
+            button("Edit", () => openEditor(category)),
             button(
               "Add subcategory",
-              () => {
-                parent.value = category.id;
-                name.focus();
-              },
+              () => openEditor(null, category.id),
               "subtle",
             ),
           ),
         ),
       ),
     ),
-    el("hr"),
-    field("New category", name),
-    field("Parent category", parent),
   );
   append(
     m.footer,
     button("Close", m.close),
-    button(
-      "Add category",
-      async () => {
-        if (!name.value.trim()) throw new Error("Enter a category name.");
-        await command("category.save", {
-          id: uuid(),
-          name: name.value.trim(),
-          parentId: parent.value,
-          sortOrder: state.categories.length,
-          expectedVersion: 0,
-        });
-        m.close();
-        showCategories();
-      },
-      "primary",
-      "plus",
-    ),
+    button("Add category", () => openEditor(), "primary", "plus"),
   );
 }
 function showInvite() {
@@ -6710,7 +6826,7 @@ function showAssistant() {
   const text = el("textarea", {
     id: "assistant-note",
     placeholder:
-      "For example: Add 2 cases of SS Original and 6 each of Raw cones. Ask me if a product or flavor is unclear.",
+      "For example: Add 2 SS Original and 6 Raw cones. Ask me if a product or flavor is unclear.",
     maxlength: 12000,
     rows: 5,
   });
@@ -6789,11 +6905,14 @@ function showAssistant() {
                 "div",
                 {},
                 el("strong", {}, product.name),
-                el(
-                  "p",
-                  { class: "small" },
-                  `${line.variant || "Standard"} · ${line.unit || "each"}`,
-                ),
+                el("p", { class: "small" }, line.variant || "Standard"),
+                line.unit === "case"
+                  ? el(
+                      "p",
+                      { class: "small" },
+                      `Requested case quantity · ${product.packSize} items per case`,
+                    )
+                  : null,
                 line.note ? el("p", { class: "small" }, line.note) : null,
               ),
               quantity,
@@ -7941,7 +8060,7 @@ function renderOfflineRecovery(user) {
     append(
       content,
       table(
-        ["Product reference / variant", "Unit", "Quantity"],
+        ["Product reference / variant", "Quantity"],
         quantities.map(({ line, node }) =>
           el(
             "tr",
@@ -7949,8 +8068,10 @@ function renderOfflineRecovery(user) {
             td(
               line.name || line.productName || line.productId,
               el("p", { class: "small" }, line.variant),
+              line.unit === "case"
+                ? el("p", { class: "small" }, savedCaseQuantityHint(line))
+                : null,
             ),
-            td(line.unit),
             td(node),
           ),
         ),

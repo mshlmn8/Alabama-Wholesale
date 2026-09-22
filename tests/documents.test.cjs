@@ -40,6 +40,13 @@ test('invoice rejects drafts, missing frozen prices, and inconsistent recorded t
   await assert.rejects(()=>renderDocument(fixture({lines:[{...fixture().lines[0],unitPriceCents:null}]}),currentStore,'invoice'),{code:'SNAPSHOT_REQUIRED'});
   await assert.rejects(()=>renderDocument(fixture({totalCents:999999}),currentStore,'invoice'),{code:'DOCUMENT_TOTAL_MISMATCH'});
 });
+test('explicit zero invoice snapshots render as zero while missing historical prices stay blocked',async()=>{
+  const original=fixture(),zero=fixture({lines:[{...original.lines[0],eachPriceCents:0,unitPriceCents:0,lineTotalCents:0,taxCents:0}],subtotalCents:0,taxCents:0,totalCents:0});
+  const pdf=await renderDocument(zero,currentStore,'invoice');
+  assert.ok(normalized(pdf).includes('$0.00'));assert.ok(normalized(pdf).includes('sku-orange'));
+  await assert.rejects(()=>renderDocument({...zero,legacy:{needsPriceReview:true}},currentStore,'invoice'),{code:'SNAPSHOT_REQUIRED'});
+  await assert.rejects(()=>renderDocument({...zero,lines:[{...zero.lines[0],unitPriceCents:null}]},currentStore,'invoice'),{code:'SNAPSHOT_REQUIRED'});
+});
 test('legacy history cannot masquerade as a finalized invoice and historical copy keeps saved totals',async()=>{
   const legacy=fixture({status:'legacy',createdAt:Date.UTC(2020,4,6,15),submittedAt:null,totalCents:12345,subtotalCents:null,taxCents:null,legacy:{needsPriceReview:true},lines:[{id:'line1',productId:'p1',name:'Saved product',quantity:3,unit:'each'}],billText:'Saved bill: $123.45'});
   await assert.rejects(()=>renderDocument(legacy,currentStore,'invoice'),{code:'SNAPSHOT_REQUIRED'});
@@ -99,4 +106,11 @@ test('ordinary item rows stay together across page boundaries',async()=>{
   const pdf=await renderDocument(fixture({lines,subtotalCents:30*2400,taxCents:30*198,totalCents:30*2598}),currentStore,'invoice');
   const pages=pdfPages(pdf).map(page=>page.replace(/\s+/g,''));
   for(let i=0;i<30;i++)assert.ok(pages.some(page=>page.includes('ROW-SKU-'+i)&&page.includes('End-of-row-'+i)),'Row split: '+i);
+});
+
+test('invoice PDFs retain every line above the old rendering cap',async()=>{
+  const lines=Array.from({length:1001},(_,i)=>({...fixture().lines[0],id:'large-'+i,sku:'LARGE-SKU-'+String(i).padStart(4,'0')}));
+  const pdf=await renderDocument(fixture({lines,subtotalCents:1001*2400,taxCents:1001*198,totalCents:1001*2598}),currentStore,'invoice');
+  const content=normalized(pdf);
+  for(let i=0;i<lines.length;i++)assert.ok(content.includes(('LARGE-SKU-'+String(i).padStart(4,'0')).toLowerCase()),'missing line '+i);
 });

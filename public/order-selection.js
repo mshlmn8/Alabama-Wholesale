@@ -110,10 +110,6 @@ export function addSelectedProductLines(existingLines, additions, makeId) {
       });
     }
   }
-  if (result.length > 150)
-    throw new Error(
-      "An order can contain up to 150 lines. Remove a line before adding another flavor.",
-    );
   const usedIds = new Set(existingLines.map((line) => line.id));
   for (let index = existingLines.length; index < result.length; index++) {
     if (typeof makeId !== "function")

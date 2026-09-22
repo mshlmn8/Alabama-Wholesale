@@ -33,6 +33,53 @@ test('matches Firebase GoogleAI SDK transport and sends only necessary catalog f
   assert.match(result.summary, /review/i);
 });
 
+test('ordinary quantities default to each internally without asking the user for a unit', async () => {
+  let body;
+  const propose = createProposer({ fetchImpl: async (_url, options) => {
+    body = JSON.parse(options.body);
+    return response(output());
+  } });
+  const result = await propose({ text: 'Add 2 Still Water' }, context);
+  assert.match(body.systemInstruction.parts[0].text, /Use each for ordinary quantities when the user does not explicitly request cases/);
+  assert.match(body.systemInstruction.parts[0].text, /do not ask the user to choose an order unit/i);
+  assert.ok(body.generationConfig.responseSchema.properties.lines.items.required.includes('unit'));
+  assert.deepEqual(body.generationConfig.responseSchema.properties.lines.items.properties.unit.enum, ['each', 'case']);
+  assert.deepEqual(result.lines, [line()]);
+});
+
+test('explicit case requests retain their original case count instead of converting silently', async () => {
+  let body;
+  const propose = createProposer({ fetchImpl: async (_url, options) => {
+    body = JSON.parse(options.body);
+    return response(output([line({ unit: 'case' })]));
+  } });
+  const result = await propose({ text: 'Add 2 cases of Still Water' }, context);
+  assert.match(body.systemInstruction.parts[0].text, /Use case only when the request explicitly says cases/);
+  assert.deepEqual(result.lines, [line({ unit: 'case' })]);
+});
+
+test('empty proposals request product and quantity information without a unit choice', () => {
+  const result = validateProposal(output([]), products);
+  assert.match(result.ambiguities.join(' '), /products.*quantities/i);
+  assert.doesNotMatch(result.ambiguities.join(' '), /units/i);
+});
+
+test('proposals preserve more than 100 distinct valid items and validate every line', () => {
+  const catalog = Array.from({ length: 151 }, (_, index) => ({
+    id: `large-${index}`, name: `Product ${index}`, variants: [], stockStatus: 'in'
+  }));
+  const lines = catalog.map(product => line({ productId: product.id, variant: '' }));
+  const result = validateProposal(output(lines), catalog);
+  assert.deepEqual(result.lines, lines);
+  assert.deepEqual(result.ambiguities, []);
+  const invalidLastLine = [...lines.slice(0, -1), { ...lines.at(-1), totalCents: 1 }];
+  assert.throws(() => validateProposal(output(invalidLastLine), catalog), error => error.code === 'invalid_ai_response');
+  const unknownLastLine = [...lines.slice(0, -1), { ...lines.at(-1), productId: 'unknown' }];
+  const checked = validateProposal(output(unknownLastLine), catalog);
+  assert.deepEqual(checked.lines, lines.slice(0, -1));
+  assert.match(checked.ambiguities.join(' '), /Suggestion 151 needs review/);
+});
+
 test('unknown products, wrong variants and invalid quantities never become proposed lines', () => {
   const result = validateProposal(output([
     line({ productId: 'invented' }), line({ variant: 'Invented' }), line({ quantity: -3 }), line({ quantity: 1.5 }), line({ quantity: '2' }), line({ quantity: Infinity })

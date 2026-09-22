@@ -31,7 +31,6 @@ function validateOrder(order) {
     order.legacy?.needsPriceReview ||
     !Array.isArray(order.lines) ||
     !order.lines.length ||
-    order.lines.length > 1000 ||
     ![order.subtotalCents, order.taxCents, order.totalCents].every(amount)
   )
     throw issue(

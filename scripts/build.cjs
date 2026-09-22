@@ -7,6 +7,7 @@ for (const file of [
   "lib/auth.cjs",
   "lib/domain.cjs",
   "lib/repository.cjs",
+  "lib/record-capacity.cjs",
   "lib/migration.cjs",
   "lib/assistant.cjs",
   "lib/assistant-chat.cjs",
@@ -46,6 +47,8 @@ for (const file of [
 for (const file of [
   "public/index.html",
   "public/styles.css",
+  "public/builder-layout.css",
+  "public/orders-layout.css",
   "public/catalog-photo.css",
   "public/catalog-variants.css",
   "public/order-selection.css",

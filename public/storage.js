@@ -711,8 +711,7 @@ export class Workspace {
       if (
         !draft ||
         !validId(draft.id) ||
-        !Array.isArray(draft.lines) ||
-        draft.lines.length > 1000
+        !Array.isArray(draft.lines)
       )
         throw new Error("Invalid draft in backup.");
       for (const line of draft.lines) {
