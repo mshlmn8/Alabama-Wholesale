@@ -101,3 +101,53 @@ test("ordinary navigation keys retain their native behavior", async () => {
   }
   assert.deepEqual(ids(), ["water", "ss", "floss"]);
 });
+
+test("the catalog guard avoids replacing cards when an Add click commits an already-rendered query", async () => {
+  const { bindCatalogSearch } = await helpers;
+  const field = new EventTarget();
+  field.value = "";
+  const rendered = [];
+  let query = "";
+  bindCatalogSearch(field, (value) => {
+    if (query === value) return;
+    query = value;
+    rendered.push(value);
+  });
+  field.value = "SS";
+  field.dispatchEvent(new Event("input"));
+  assert.deepEqual(rendered, ["SS"]);
+  // A pointer click on Add blurs the input and commits its change before click.
+  // Redrawing here moves the button between pointerdown and pointerup.
+  for (const type of ["change", "search", "compositionend"])
+    field.dispatchEvent(new Event(type));
+  const enter = new Event("keydown", { cancelable: true });
+  Object.assign(enter, { key: "Enter" });
+  field.dispatchEvent(enter);
+  assert.deepEqual(rendered, ["SS"]);
+  field.value = "Mint floss";
+  field.dispatchEvent(new Event("change"));
+  assert.deepEqual(rendered, ["SS", "Mint floss"]);
+});
+
+test("Clear filters followed by the same pasted query applies the query again", async () => {
+  const { bindCatalogSearch } = await helpers;
+  const field = new EventTarget();
+  field.value = "";
+  let query = "";
+  const rendered = [];
+  bindCatalogSearch(field, (value) => {
+    if (query === value) return;
+    query = value;
+    rendered.push(value);
+  });
+  field.value = "missing-product";
+  field.dispatchEvent(new Event("input"));
+  assert.equal(query, "missing-product");
+  // Clear filters changes the visible field and applied query programmatically.
+  query = "";
+  field.value = "";
+  field.value = "missing-product";
+  field.dispatchEvent(new Event("input"));
+  assert.equal(query, "missing-product");
+  assert.deepEqual(rendered, ["missing-product", "missing-product"]);
+});

@@ -95,10 +95,106 @@ test('quantities reject malformed, negative, fractional, nonfinite and unsafe nu
     assert.throws(()=>calculateOrder(lines(quantity),f.list('products'),f.get('stores','s1')));
   }
 });
-test('unknown products, variants and prices cannot become a charge',()=>{
+test('unknown products and variants cannot become a charge',()=>{
   const f=fixture();assert.throws(()=>calculateOrder([{...lines()[0],productId:'unknown'}],f.list('products'),f.get('stores','s1')),{code:'INVALID_PRODUCT'});
   assert.throws(()=>calculateOrder([{...lines()[0],variant:'fake'}],f.list('products'),f.get('stores','s1')),{code:'INVALID_VARIANT'});
-  const ps=f.list('products');ps[0].priceCents=null;ps[0].variantPricesCents={};assert.throws(()=>calculateOrder(lines(),ps,f.get('stores','s1')),{code:'PRICE_REQUIRED'});
+});
+test('missing and null effective prices produce explicit zero snapshots for each and case lines',()=>{
+  const f=fixture(),store={...f.get('stores','s1'),taxRateBps:825};
+  for(const base of [{},{priceCents:null}])for(const unit of ['each','case']){
+    const product={...f.get('products','p1'),variantPricesCents:{Orange:null}};delete product.priceCents;Object.assign(product,base);
+    const out=calculateOrder(lines(2,unit),[product],store),line=out.lines[0];
+    assert.equal(line.eachQuantity,unit==='case'?24:2);
+    for(const key of ['eachPriceCents','unitPriceCents','lineTotalCents','taxCents'])assert.equal(line[key],0,key);
+    assert.equal(line.taxRateBps,825);assert.equal(line.taxable,true);
+    assert.equal(out.subtotalCents,0);assert.equal(out.taxCents,0);assert.equal(out.totalCents,0);
+    assert.equal(product.priceCents,base.priceCents,'Calculation must not rewrite catalog prices.');
+  }
+});
+test('unpriced products preserve variant and store price precedence, including explicit zero overrides',()=>{
+  const f=fixture(),product={...f.get('products','p1'),priceCents:null,variantPricesCents:{}};
+  const scenarios=[
+    [{}, {}, 0],
+    [{Orange:700}, {}, 700],
+    [{Orange:700}, {p1:{priceCents:null,variantPricesCents:{Orange:null}}}, 700],
+    [{Orange:700}, {p1:500}, 500],
+    [{Orange:700}, {p1:0}, 0],
+    [{Orange:700}, {p1:{priceCents:0}}, 0],
+    [{Orange:700}, {p1:{priceCents:500,variantPricesCents:{Orange:0}}}, 0],
+    [{Orange:0}, {}, 0],
+    [{}, {p1:{priceCents:null,variantPricesCents:{Orange:null}}}, 0]
+  ];
+  for(const [variantPricesCents,priceOverrides,expected] of scenarios){
+    const out=calculateOrder(lines(),[{...product,variantPricesCents}],{...f.get('stores','s1'),priceOverrides});
+    assert.equal(out.lines[0].eachPriceCents,expected);assert.equal(out.totalCents,expected);
+  }
+});
+test('malformed effective prices still fail instead of becoming free items',()=>{
+  const f=fixture(),product={...f.get('products','p1'),priceCents:null,variantPricesCents:{}};
+  for(const price of [-1,1.5,'0','100',false,NaN,Infinity,Number.MAX_SAFE_INTEGER,{},[]]){
+    const scenarios=[
+      [{...product,priceCents:price},{}],
+      [{...product,variantPricesCents:{Orange:price}},{}],
+      [product,{p1:{priceCents:price}}],
+      [product,{p1:{variantPricesCents:{Orange:price}}}]
+    ];
+    for(const [p,priceOverrides] of scenarios)assert.throws(()=>calculateOrder(lines(),[p],{...f.get('stores','s1'),priceOverrides}),{code:'INVALID_INPUT'});
+  }
+});
+test('zero-priced submissions freeze invoice amounts and reserve, deliver, and return stock exactly once',async()=>{
+  const f=fixture({products:[{id:'p1',name:'Unpriced drink',variants:['Orange'],priceCents:null,packSize:12,taxable:true,version:1}],ledger:[{id:'opening',storeId:'s1',type:'opening',deltaCents:12345}]});
+  await f.run('store.save',{...f.get('stores','s1'),taxRateBps:825,expectedVersion:1});
+  const d=await draft(f,{quantity:2,unit:'case'}),payload={id:d.id,expectedVersion:d.version,expectedTotalCents:0};
+  const o=await f.run('order.submit',payload,customer,'zero-submit');
+  assert.equal(o.status,'submitted');assert.ok(o.invoiceNumber);
+  for(const key of ['subtotalCents','taxCents','totalCents','paidCents','amountDueCents'])assert.equal(o[key],0,key);
+  assert.equal(o.paymentStatus,'paid');assert.equal(o.lines[0].unitPriceCents,0);assert.equal(o.lines[0].eachPriceCents,0);
+  assert.equal(f.get('inventory',inventoryId('p1','Orange')).reserved,24);
+  assert.equal(f.get('ledger','charge-o1').deltaCents,0);assert.equal(storeBalance(f.list('ledger'),'s1'),12345);
+  await f.run('product.save',{...f.get('products','p1'),priceCents:2500,expectedVersion:1});
+  assert.deepEqual(await f.run('order.submit',payload,customer,'zero-submit'),o);
+  assert.deepEqual(await f.run('order.submit',{id:o.id,expectedVersion:o.version},customer),o);
+  assert.deepEqual(f.get('orders',o.id),o);assert.equal(f.list('ledger').length,2);
+  assert.equal(f.get('inventory',inventoryId('p1','Orange')).reserved,24);
+  let current=o;for(const status of ['approved','picking','delivered'])current=await f.run('order.transition',{id:o.id,status,expectedVersion:current.version},salesman);
+  assert.equal(f.get('inventory',inventoryId('p1','Orange')).onHand,76);
+  assert.equal(f.get('inventory',inventoryId('p1','Orange')).reserved,0);
+  const pending=await f.run('return.create',{orderId:o.id,lines:[{lineId:'line1',quantity:2}],reason:'Unopened cases'},customer);
+  const returned=await f.run('return.approve',{returnId:pending.id,restock:true},salesman);
+  assert.equal(returned.totalCents,0);assert.equal(returned.lines[0].unitPriceCents,0);
+  await f.run('return.approve',{returnId:pending.id,restock:true},salesman);
+  assert.equal(f.get('inventory',inventoryId('p1','Orange')).onHand,100);
+  assert.equal(storeBalance(f.list('ledger'),'s1'),12345);assert.equal(f.list('ledger').length,3);
+});
+test('mixed priced and unpriced lines charge and tax only their recorded prices',async()=>{
+  const f=fixture();await f.run('product.save',{...f.get('products','p1'),priceCents:null,expectedVersion:1});
+  await f.run('store.save',{...f.get('stores','s1'),taxRateBps:825,expectedVersion:1});
+  const d=await f.run('order.save',{id:'mixed',storeId:'s1',lines:[...lines(2),{...lines(2,'case')[0],id:'line2',variant:'Lime'}]},customer);
+  const o=await f.run('order.submit',{id:d.id,expectedVersion:d.version,expectedTotalCents:2598},customer);
+  assert.equal(o.lines.length,2);assert.equal(o.lines[0].unitPriceCents,1200);assert.equal(o.lines[0].taxCents,198);
+  assert.equal(o.lines[1].eachQuantity,24);assert.equal(o.lines[1].unitPriceCents,0);assert.equal(o.lines[1].taxCents,0);
+  assert.equal(o.subtotalCents,2400);assert.equal(o.taxCents,198);assert.equal(o.totalCents,2598);
+  assert.equal(o.amountDueCents,2598);assert.equal(storeBalance(f.list('ledger'),'s1'),2598);
+});
+test('a formerly unpriced draft requires review when its price changes before submission',async()=>{
+  const f=fixture();await f.run('product.save',{...f.get('products','p1'),priceCents:null,variantPricesCents:{},expectedVersion:1});
+  const d=await draft(f);assert.equal(calculateOrder(d.lines,f.list('products'),f.get('stores','s1')).totalCents,0);
+  await f.run('product.save',{...f.get('products','p1'),priceCents:500,expectedVersion:2});
+  await rejectsCode(()=>f.run('order.submit',{id:d.id,expectedVersion:d.version,expectedTotalCents:0},customer),'PRICE_CHANGED');
+  assert.equal(f.get('orders',d.id).status,'draft');assert.equal(f.list('ledger').length,0);assert.equal(f.list('counters').length,0);
+  assert.equal(f.get('inventory',inventoryId('p1','Orange')).reserved,0);
+  const o=await f.run('order.submit',{id:d.id,expectedVersion:d.version,expectedTotalCents:500},customer);assert.equal(o.totalCents,500);
+});
+test('unpriced products do not bypass authorization, legacy draft review, or account reconciliation',async()=>{
+  const products=[{id:'p1',name:'Unpriced drink',variants:['Orange'],priceCents:null,version:1}];
+  const f=fixture({products}),d=await draft(f);
+  await rejectsCode(()=>f.run('order.submit',{id:d.id,expectedVersion:d.version},{...customer,uid:'other'}),'FORBIDDEN');
+  await rejectsCode(()=>f.run('order.submit',{id:d.id,expectedVersion:d.version},{...customer,storeIds:['s2']}),'FORBIDDEN');
+  const legacy=fixture({products,orders:[{...d,legacy:{requiresReview:true},migrationBlocked:true}]});
+  await rejectsCode(()=>legacy.run('order.submit',{id:d.id,expectedVersion:d.version},customer),'LEGACY_REVIEW_REQUIRED');
+  const blocked=fixture({products,stores:[{...f.get('stores','s1'),migrationBlocked:true}]});const blockedDraft=await draft(blocked);
+  await rejectsCode(()=>blocked.run('order.submit',{id:blockedDraft.id,expectedVersion:blockedDraft.version},customer),'RECONCILIATION_REQUIRED');
+  for(const fixture of [f,legacy,blocked]){assert.equal(fixture.list('ledger').length,0);assert.equal(fixture.get('orders',d.id).status,'draft');}
 });
 test('case quantities use explicit pack sizes and store prices override catalog prices, including zero',()=>{
   const f=fixture();const store={...f.get('stores','s1'),taxRateBps:825,priceOverrides:{p1:{priceCents:900,variantPricesCents:{Orange:500}}}};

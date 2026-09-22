@@ -21,9 +21,13 @@ class Control {
     this.listeners = {};
     this.classList = { add() {}, toggle() {} };
     this.validity = { valid: true };
+    if (attrs.type === "file") this.files = [];
   }
   append(...children) {
     this.children.push(...children.filter((item) => item != null));
+  }
+  replaceChildren(...children) {
+    this.children = children.flat(Infinity).filter((item) => item != null);
   }
   setAttribute(key, value) {
     this[key] = value;
@@ -69,6 +73,9 @@ async function fixture({
   role = "master",
   standard = false,
   saveError = null,
+  originalUnit = "each",
+  packSize = 12,
+  proposal = { lines: [], ambiguities: [], summary: "" },
 } = {}) {
   const helpers = {
     ...(await load("catalog-variants.js")),
@@ -85,14 +92,14 @@ async function fixture({
     variantPricesCents: {},
     variantBarcodes: {},
     priceCents: 150,
-    packSize: 12,
+    packSize,
   };
   const original = {
     id: "line",
     productId: "juice",
     variant: standard ? "" : "Apple",
     quantity: 2,
-    unit: "each",
+    unit: originalUnit,
     note: "Original",
   };
   const state = { me: { role }, products: [product], inventory: [] };
@@ -115,6 +122,9 @@ async function fixture({
     toast() {},
     toggleFavorite() {},
     render() {},
+    setView() {},
+    notice: (message) => new Control("p", {}, [message]),
+    api: async () => structuredClone(proposal),
     numberCents: (value) =>
       value === "" ? null : Math.round(Number(value) * 100),
     el: (tag, attrs = {}, ...children) => new Control(tag, attrs, children),
@@ -175,6 +185,10 @@ async function fixture({
     source.slice(start, source.indexOf("function renderBuilder()", start)),
     context,
   );
+  vm.runInNewContext(
+    source.slice(source.indexOf("function showAssistant()"), source.indexOf("function showScanner()")),
+    context,
+  );
   const controls = () => walk(dialog.dialog);
   return {
     context,
@@ -182,6 +196,8 @@ async function fixture({
     product,
     openAdd: () => context.showAddProduct(product),
     openEdit: () => context.showEditDraftLine("line"),
+    openAssistant: () => context.showAssistant(),
+    controls,
     control: (label) =>
       controls().find(
         (item) => item.fieldLabel === label || item["aria-label"] === label,
@@ -194,12 +210,12 @@ async function fixture({
   };
 }
 
-test("saving a flavor in the item picker preserves quantities, unit, and note", async () => {
+test("saving a flavor in the item picker preserves quantities and note without a unit selector", async () => {
   const f = await fixture();
   f.openAdd();
   const apple = f.control("Apple quantity");
   apple.value = "4";
-  f.control("Order unit").value = "case";
+  assert.equal(f.control("Order unit"), undefined);
   f.control("Line note").value = "Keep cold";
   assert.ok(
     f.control("New flavor name"),
@@ -209,7 +225,7 @@ test("saving a flavor in the item picker preserves quantities, unit, and note", 
   await f.button("Save flavor").callback();
   assert.equal(f.control("Apple quantity"), apple);
   assert.equal(apple.value, "4");
-  assert.equal(f.control("Order unit").value, "case");
+  assert.equal(f.control("Order unit"), undefined);
   assert.equal(f.control("Line note").value, "Keep cold");
   assert.equal(f.control("Grape quantity").value, "0");
   f.control("Grape quantity").value = "2";
@@ -220,8 +236,8 @@ test("saving a flavor in the item picker preserves quantities, unit, and note", 
       .slice(1)
       .map((line) => [line.variant, line.quantity, line.unit, line.note]),
     [
-      ["Apple", 4, "case", "Keep cold"],
-      ["Grape", 2, "case", "Keep cold"],
+      ["Apple", 4, "each", "Keep cold"],
+      ["Grape", 2, "each", "Keep cold"],
     ],
   );
 });
@@ -246,7 +262,7 @@ test("builder flavor creation selects the new flavor and retains unsaved item fi
   const f = await fixture();
   f.openEdit();
   f.control("Quantity").value = "8";
-  f.control("Order unit").value = "case";
+  assert.equal(f.control("Order unit"), undefined);
   f.control("Line note").value = "Top shelf";
   assert.ok(f.control("New flavor name"));
   f.control("New flavor name").value = "Grape";
@@ -258,9 +274,29 @@ test("builder flavor creation selects the new flavor and retains unsaved item fi
     productId: "juice",
     variant: "Grape",
     quantity: 8,
-    unit: "case",
+    unit: "each",
     note: "Top shelf",
   });
+});
+
+test("row options remove only the selected line and close after saving", async () => {
+  const f = await fixture();
+  f.context.draft.lines.push({ ...f.context.draft.lines[0], id: "other", variant: "Orange" });
+  f.openEdit();
+  assert.ok(f.button("Remove item"));
+  await f.button("Remove item").callback();
+  assert.equal(f.context.draft.lines.length, 1);
+  assert.equal(f.context.draft.lines[0].id, "other");
+  assert.equal(f.dialog().dialog.open, false);
+});
+
+test("row options cannot remove a line changed after opening", async () => {
+  const f = await fixture();
+  f.openEdit();
+  f.context.draft.lines[0].quantity = 9;
+  assert.ok(f.button("Remove item"));
+  assert.throws(() => f.button("Remove item").callback(), /changed while/);
+  assert.equal(f.context.draft.lines[0].quantity, 9);
 });
 
 test("catalog conflicts preserve all unsaved dialog inputs and do not add a flavor", async () => {
@@ -289,4 +325,71 @@ test("customers cannot create catalog flavors from either item dialog", async ()
     assert.equal(f.button("Save flavor"), undefined);
   }
   assert.equal(f.calls.length, 0);
+});
+
+test("new items use simple quantities even when the draft already contains the same flavor in cases", async () => {
+  const f = await fixture({ originalUnit: "case" });
+  f.context.draft.lines[0].note = "";
+  f.openAdd();
+  assert.equal(f.control("Order unit"), undefined);
+  assert.doesNotMatch(f.dialog().dialog.textContent, /\/ each|each available/);
+  f.control("Apple quantity").value = "3";
+  await f.button("Add selected flavors").callback();
+  assert.equal(f.context.draft.lines.length, 2);
+  assert.equal(f.context.draft.lines[0].unit, "case");
+  assert.equal(f.context.draft.lines[0].quantity, 2);
+  assert.equal(f.context.draft.lines[1].unit, "each");
+  assert.equal(f.context.draft.lines[1].quantity, 3);
+});
+
+test("editing a legacy case item preserves its saved unit and explains the quantity", async () => {
+  const f = await fixture({ originalUnit: "case" });
+  f.openEdit();
+  assert.equal(f.control("Order unit"), undefined);
+  assert.equal(f.control("Quantity").value, "2");
+  assert.match(f.dialog().dialog.textContent, /existing case quantity.*12 items per case/i);
+  f.control("Quantity").value = "3";
+  f.control("Line note").value = "Keep original case count";
+  await f.button("Update item").callback();
+  assert.equal(f.context.draft.lines[0].unit, "case");
+  assert.equal(f.context.draft.lines[0].quantity, 3);
+  assert.equal(f.context.draft.lines[0].note, "Keep original case count");
+});
+
+test("a legacy case item never converts to individual quantities when its pack size is missing", async () => {
+  const f = await fixture({ originalUnit: "case", packSize: null });
+  f.openEdit();
+  assert.equal(f.control("Order unit"), undefined);
+  assert.match(f.dialog().dialog.textContent, /existing case quantity/i);
+  await f.button("Update item").callback();
+  assert.equal(f.context.draft.lines[0].unit, "case");
+  assert.equal(f.context.draft.lines[0].quantity, 2);
+});
+
+test("legacy case hints prefer an issued line's saved pack size over the current catalog", async () => {
+  const f = await fixture();
+  assert.equal(typeof f.context.savedCaseQuantityHint, "function");
+  assert.equal(f.context.savedCaseQuantityHint({ unit: "each" }, f.product), "");
+  assert.match(f.context.savedCaseQuantityHint({ unit: "case", packSize: 6 }, f.product), /6 items per case/);
+  assert.doesNotMatch(f.context.savedCaseQuantityHint({ unit: "case", packSize: null }, f.product), /12 items/);
+});
+
+test("AI review uses plain quantities and preserves explicit cases with context", async () => {
+  const f = await fixture({ proposal: {
+    lines: [
+      { productId: "juice", variant: "Apple", quantity: 3, unit: "each", note: "" },
+      { productId: "juice", variant: "Orange", quantity: 2, unit: "case", note: "" },
+    ], ambiguities: [], summary: "Review 2 flavors",
+  } });
+  f.openAssistant();
+  const note = f.control("Tell the AI what you need");
+  assert.doesNotMatch(note.placeholder, /cases|each/);
+  note.value = "3 Apple juice and 2 cases of Orange juice";
+  await f.button("Create proposed cart").callback();
+  assert.doesNotMatch(f.dialog().dialog.textContent, /Apple · each/);
+  assert.match(f.dialog().dialog.textContent, /Requested case quantity.*12 items per case/);
+  const acknowledgement = f.controls().find((item) => item.tag === "input" && item.type === "checkbox" && !item["aria-label"]);
+  acknowledgement.checked = true;
+  await f.button("Add reviewed items to draft").callback();
+  assert.deepEqual(f.context.draft.lines.slice(1).map((line) => [line.quantity, line.unit]), [[3, "each"], [2, "case"]]);
 });

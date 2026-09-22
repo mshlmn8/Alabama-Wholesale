@@ -1,0 +1,117 @@
+/* Compact history keeps saved identifiers and a single details action together. */
+.orders-page .page-heading {
+  align-items: center;
+  margin-bottom: 16px;
+}
+.orders-page .page-heading h1 {
+  font-size: 1.4rem;
+}
+.orders-page .page-heading p:empty {
+  display: none;
+}
+.orders-page .order-history-filters {
+  gap: 8px;
+}
+.orders-page .order-history-filters .search {
+  min-width: min(240px, 100%);
+}
+.orders-page .order-history-caption {
+  margin-bottom: 10px;
+  font-size: 0.75rem;
+}
+.orders-page .order-history-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  border-block: 1px solid var(--line);
+  background: var(--panel);
+}
+.orders-page .order-history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 44px;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+}
+.orders-page .order-history-row + .order-history-row {
+  border-top: 1px solid var(--line);
+}
+.orders-page .order-history-identity {
+  min-width: 0;
+}
+.orders-page .order-history-store {
+  display: block;
+  font-size: 0.9rem;
+  font-weight: 650;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.orders-page .order-history-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 9px;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+.orders-page .order-history-reference {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.orders-page .order-history-meta .status {
+  margin: 0;
+  padding: 1px 6px;
+  font-size: 0.65rem;
+  line-height: 1.6;
+  border-radius: 4px;
+}
+.orders-page .order-history-amount {
+  max-width: 14ch;
+  text-align: right;
+  font-size: 0.9rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.orders-page .order-history-row .icon-button {
+  width: 44px;
+  min-height: 44px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+.orders-page .order-history-row .icon-button:hover {
+  background: var(--panel2);
+  color: var(--ink);
+}
+@media (max-width: 600px) {
+  .orders-page .order-history-filters .search {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+  .orders-page .order-history-row {
+    gap: 8px;
+    padding: 11px 8px;
+  }
+  .orders-page .order-history-amount {
+    max-width: 10ch;
+    font-size: 0.8rem;
+  }
+}
+@media (max-width: 380px) {
+  .orders-page .order-history-row {
+    grid-template-columns: minmax(0, 1fr) 44px;
+    gap: 5px 8px;
+  }
+  .orders-page .order-history-amount {
+    grid-column: 1;
+    text-align: left;
+    max-width: none;
+  }
+  .orders-page .order-history-row .icon-button {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
+}

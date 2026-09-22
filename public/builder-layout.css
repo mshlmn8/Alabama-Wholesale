@@ -1,0 +1,311 @@
+/* A continuous order sheet, with size preferences controlling row spacing. */
+.builder-page {
+  --order-row-space: 7px;
+  --order-name-size: 0.92rem;
+}
+.builder-page[data-size="small"] {
+  --order-row-space: 3px;
+  --order-name-size: 0.87rem;
+}
+.builder-page[data-size="large"] {
+  --order-row-space: 12px;
+  --order-name-size: 1rem;
+}
+.builder-page .page-heading {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.builder-page .page-heading > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+.builder-page .page-heading h1 {
+  font-size: 1.5rem;
+}
+.builder-page .page-heading p {
+  font-size: 0.78rem;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+.builder-page .page-heading .actions {
+  width: auto;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+  gap: 4px;
+}
+.builder-page .page-heading .actions button {
+  min-height: 44px;
+}
+.builder-draft-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.builder-draft-status .sync-bar {
+  min-width: 0;
+  gap: 6px;
+  font-size: 0.75rem;
+}
+.builder-draft-status #draft-sync-message {
+  overflow-wrap: anywhere;
+}
+.builder-draft-status .actions {
+  gap: 2px;
+}
+.builder-draft-status .actions button {
+  min-height: 44px;
+  padding: 6px 10px;
+  border-color: transparent;
+  background: transparent;
+  font-size: 0.75rem;
+}
+.builder-page .builder-sheet {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.builder-page .builder-lines {
+  gap: 0;
+}
+.builder-page .builder-product-group {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.builder-page[data-size] .builder-product-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 12px;
+  min-height: 46px;
+  border-top: 1px solid var(--line);
+  border-bottom: 0;
+  background: var(--panel2);
+}
+.builder-page .builder-product-head h2 {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--order-name-size);
+  margin: 0;
+  line-height: 1.35;
+}
+.builder-page .builder-product-title {
+  display: block;
+  min-height: 44px;
+  width: 100%;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  line-height: inherit;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.builder-page .builder-product-title:hover {
+  color: var(--accent-ink);
+}
+.builder-page[data-size] .builder-product-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  grid-column: auto;
+  grid-row: auto;
+  gap: 0;
+  flex-shrink: 0;
+}
+.builder-page .builder-product-actions button {
+  min-height: 44px;
+  padding: 6px;
+  font-size: 0.73rem;
+}
+.builder-page .builder-product-actions .icon {
+  width: 16px;
+  height: 16px;
+}
+.builder-page .builder-product-actions .icon-button {
+  width: 44px;
+  height: 44px;
+  padding: 10px;
+}
+.builder-page[data-size] .builder-flavors {
+  padding: 0;
+}
+.builder-page[data-size] .builder-flavor-row,
+.builder-page .builder-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 84px 110px 44px;
+  gap: 12px;
+  align-items: center;
+  padding: var(--order-row-space) 12px;
+}
+.builder-page .builder-columns {
+  padding-top: 9px;
+  padding-bottom: 9px;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.builder-columns > :nth-child(2) {
+  text-align: center;
+}
+.builder-columns > :nth-child(3) {
+  text-align: right;
+}
+.builder-page[data-size] .builder-flavor-name {
+  grid-column: auto;
+  display: grid;
+  gap: 2px;
+  font-size: var(--order-name-size);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.builder-flavor-name small {
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+.builder-page .builder-flavor-row input {
+  min-width: 0;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px;
+  text-align: center;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.builder-page .builder-flavor-row input::-webkit-inner-spin-button,
+.builder-page .builder-flavor-row input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.builder-line-amount {
+  text-align: right;
+  font-size: 0.86rem;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.builder-page .builder-flavor-row .icon-button {
+  min-height: 44px;
+  width: 44px;
+  height: 44px;
+  padding: 10px;
+}
+.builder-notes,
+.builder-other-drafts {
+  padding: 12px 4px;
+  border-bottom: 1px solid var(--line);
+}
+.builder-notes > summary,
+.builder-other-drafts > summary {
+  min-height: 44px;
+  align-content: center;
+  font-size: 0.8rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+.builder-notes .field {
+  margin-top: 10px;
+}
+.builder-issue {
+  padding: 10px 12px;
+  background: var(--panel2);
+}
+.builder-review-bar {
+  position: sticky;
+  bottom: 12px;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-top: 2px solid var(--brand-orange);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px #00000012;
+}
+.builder-review-total {
+  display: grid;
+  min-width: 0;
+}
+.builder-review-total small {
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+.builder-review-total strong {
+  font-size: 1.25rem;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.builder-review-count {
+  flex: 1;
+}
+.builder-review-bar > button {
+  min-height: 44px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+@media (max-width: 800px) {
+  .builder-review-bar {
+    bottom: calc(72px + env(safe-area-inset-bottom));
+  }
+}
+@media (max-width: 480px) {
+  .builder-page .page-heading {
+    gap: 7px;
+  }
+  .builder-page .page-heading h1 {
+    font-size: 1.25rem;
+  }
+  .builder-page .page-heading .actions button {
+    padding: 7px;
+    font-size: 0.76rem;
+  }
+  .builder-page .page-heading .actions .icon-button {
+    width: 44px;
+    padding: 10px;
+  }
+  .builder-page .page-heading .primary .icon {
+    display: none;
+  }
+  .builder-page[data-size] .builder-product-head {
+    padding: 3px 8px;
+  }
+  .builder-page[data-size] .builder-flavor-row,
+  .builder-page .builder-columns {
+    grid-template-columns: minmax(0, 1fr) 68px 72px 44px;
+    gap: 4px;
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+  .builder-line-amount {
+    font-size: 0.78rem;
+  }
+  .builder-page .builder-product-actions .text-button .icon {
+    display: none;
+  }
+  .builder-review-count {
+    display: none;
+  }
+  .builder-review-bar {
+    padding: 9px 10px;
+    gap: 8px;
+  }
+  .builder-review-bar > button {
+    padding: 9px;
+    font-size: 0.8rem;
+  }
+  .builder-review-total strong {
+    font-size: 1rem;
+  }
+}

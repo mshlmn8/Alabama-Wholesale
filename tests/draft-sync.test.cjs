@@ -989,3 +989,29 @@ test("empty and unfinished drafts save automatically and restore in a fresh devi
   assert.equal(writes, 0);
   sync.dispose();
 });
+
+test("large drafts sync every line without truncating the device or server copy", async () => {
+  const f = await fixture();
+  const lines = Array.from({ length: 1200 }, (_, i) => ({ id: "line-" + i, productId: "p1", variant: "Lime", quantity: 1, unit: "each", note: String(i) }));
+  f.edit({ lines });
+  await f.sync.flush("d1");
+  assert.equal(f.sync.status("d1").cloudConfirmed, true);
+  assert.deepEqual((await f.repo.get("orders", "d1")).lines, lines);
+  assert.deepEqual(f.ws.getDraft("d1").lines, lines);
+  f.sync.dispose();
+});
+
+test("byte-capacity rejection preserves the complete working draft and previous online version", async () => {
+  const f = await fixture();
+  f.edit();
+  await f.sync.flush("d1");
+  const before = await f.repo.get("orders", "d1");
+  const lines = Array.from({ length: 1200 }, (_, i) => ({ id: "line-" + i, productId: "p1", variant: "Lime", quantity: 1, unit: "each", note: "n".repeat(1500) }));
+  f.edit({ lines });
+  await assert.rejects(() => f.sync.flush("d1"), (error) => error.code === "document_too_large" && error.status === 413);
+  assert.equal(f.sync.status("d1").cloudConfirmed, false);
+  assert.deepEqual(f.ws.getDraft("d1").lines, lines);
+  assert.deepEqual(f.ws.exportBackup().drafts[0].lines, lines);
+  assert.deepEqual(await f.repo.get("orders", "d1"), before);
+  f.sync.dispose();
+});

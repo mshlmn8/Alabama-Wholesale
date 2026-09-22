@@ -154,3 +154,46 @@ test("private archive retains all state fields, verifies bytes and stays under d
   );
   assert.deepEqual(restored, snapshot);
 });
+
+test("Firestore submits more than 500 tracked products with complete lines and one atomic charge", async () => {
+  await environment.clearFirestore();
+  const count = 601;
+  await repo.transaction(async (tx) => {
+    await tx.set("stores", "large-shop", { name: "Large shop", version: 1 });
+    for (let i = 0; i < count; i++) {
+      const id = "large-p" + i;
+      await tx.set("products", id, { name: "Product " + i, priceCents: 100, variants: [], taxable: false, version: 1 });
+      await tx.set("inventory", inventoryId(id, ""), { productId: id, variant: "", onHand: 5, reserved: 0, version: 1 });
+    }
+  });
+  const actor = { uid: "tester", role: "master", storeIds: [] };
+  const run = (type, payload, id = randomUUID()) => repo.transaction((tx) => executeCommand(tx, actor, { id, type, payload }));
+  const lines = Array.from({ length: count }, (_, i) => ({ id: "line-" + i, productId: "large-p" + i, variant: "", quantity: 1, unit: "each", note: "" }));
+  const draft = await run("order.save", { id: "large", storeId: "large-shop", lines });
+  const payload = { id: draft.id, expectedVersion: draft.version };
+  const order = await run("order.submit", payload, "large-submit");
+  assert.equal(order.lines.length, count);
+  assert.deepEqual(order.lines.map((line) => line.id), lines.map((line) => line.id));
+  assert.equal(order.totalCents, count * 100);
+  assert.ok((await repo.list("inventory")).every((row) => row.reserved === 1));
+  assert.deepEqual(await run("order.submit", payload, "large-submit"), order);
+  assert.equal((await repo.list("ledger")).length, 1);
+});
+
+test("Firestore preserves large drafts when the frozen invoice exceeds record byte capacity", async () => {
+  await environment.clearFirestore();
+  await repo.transaction(async (tx) => {
+    await tx.set("stores", "oversized-shop", { name: "Shop", version: 1 });
+    await tx.set("products", "oversized-product", { name: "N".repeat(300), sku: "S".repeat(200), barcode: "B".repeat(200), priceCents: 100, variants: [], taxable: false, version: 1 });
+    await tx.set("inventory", inventoryId("oversized-product", ""), { productId: "oversized-product", variant: "", onHand: 2000, reserved: 0, version: 1 });
+  });
+  const actor = { uid: "tester", role: "master", storeIds: [] };
+  const run = (type, payload) => repo.transaction((tx) => executeCommand(tx, actor, { id: randomUUID(), type, payload }));
+  const lines = Array.from({ length: 1200 }, (_, i) => ({ id: "line-" + i, productId: "oversized-product", variant: "", quantity: 1, unit: "each", note: "n".repeat(150) }));
+  const draft = await run("order.save", { id: "oversized", storeId: "oversized-shop", lines });
+  await assert.rejects(() => run("order.submit", { id: draft.id, expectedVersion: draft.version }), (error) => error.code === "document_too_large" && error.status === 413);
+  assert.deepEqual(await repo.get("orders", draft.id), draft);
+  assert.equal((await repo.list("ledger")).length, 0);
+  assert.equal((await repo.list("counters")).length, 0);
+  assert.equal((await repo.get("inventory", inventoryId("oversized-product", ""))).reserved, 0);
+});

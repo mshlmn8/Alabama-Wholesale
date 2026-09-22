@@ -422,6 +422,52 @@ test("documents enforce store permissions before invoking the PDF generator", as
     403,
   );
 });
+test("customers can submit ordinary unpriced items at zero and retrieve the frozen invoice", async (t) => {
+  const { repo, request } = await fixture(t);
+  const created = await request("/api/commands", "owner", {
+    id: "create-unpriced", type: "product.save", payload: { id: "unpriced", name: "Unpriced item", packSize: 6 },
+  });
+  assert.equal(created.status, 200, created.body);
+  assert.equal(JSON.parse(created.body).result.priceCents, null);
+  const saved = await request("/api/commands", "customer", {
+    id: "save-unpriced", type: "order.save",
+    payload: { id: "zero-order", storeId: "one", lines: [{ id: "zero-line", productId: "unpriced", variant: "", quantity: 2, unit: "case" }] },
+  });
+  assert.equal(saved.status, 200, saved.body);
+  const submit = { id: "submit-unpriced", type: "order.submit", payload: { id: "zero-order", expectedVersion: JSON.parse(saved.body).result.version, expectedTotalCents: 0 } };
+  const submitted = await request("/api/commands", "customer", submit);
+  assert.equal(submitted.status, 200, submitted.body);
+  const invoice = JSON.parse(submitted.body).result;
+  assert.equal(invoice.lines[0].unitPriceCents, 0);
+  assert.equal(invoice.lines[0].eachPriceCents, 0);
+  assert.equal(invoice.lines[0].eachQuantity, 12);
+  assert.equal(invoice.totalCents, 0);
+  assert.equal(invoice.amountDueCents, 0);
+  assert.ok(invoice.invoiceNumber);
+  const changed = await request("/api/commands", "owner", {
+    id: "price-unpriced", type: "product.save", payload: { id: "unpriced", expectedVersion: 1, priceCents: 500 },
+  });
+  assert.equal(changed.status, 200, changed.body);
+  const replay = await request("/api/commands", "customer", submit);
+  assert.equal(replay.status, 200, replay.body);
+  assert.deepEqual(JSON.parse(replay.body).result, invoice);
+  const ledger = await repo.list("ledger");
+  assert.equal(ledger.length, 1);assert.equal(ledger[0].deltaCents, 0);
+  const document = await request("/api/documents/zero-order/invoice", "customer");
+  assert.equal(document.status, 200, document.body);
+  assert.match(document.headers.get("content-type"), /application\/pdf/);
+  assert.match(document.body, /^%PDF-/);
+});
+test("requests beyond transport byte capacity explain preservation and never change the saved order", async (t) => {
+  const { repo, request } = await fixture(t);
+  const before = await repo.get("orders", "o1");
+  const response = await request("/api/commands", "customer", { id: "large-request", type: "order.save", payload: { id: "o1", storeId: "one", notes: "x".repeat(9 * 1024 * 1024) } });
+  assert.equal(response.status, 413);
+  const message = JSON.parse(response.body).error.message;
+  assert.match(message, /9 MiB/);
+  assert.match(message, /draft.*preserv|preserv.*draft/i);
+  assert.deepEqual(await repo.get("orders", "o1"), before);
+});
 test("invoice filenames and history titles retain the submitted store name after a rename", async (t) => {
   const { repo, request } = await fixture(t);
   await repo.put("orders", "o1", {

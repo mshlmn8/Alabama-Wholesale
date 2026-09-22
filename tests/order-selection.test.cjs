@@ -298,40 +298,19 @@ test("invalid additions reject atomically before any new ID is requested", async
   assert.deepEqual(lines, [draftLine()]);
 });
 
-test("the 150-line limit applies after merging selections", async () => {
+test("large selections have no arbitrary line count cap and still merge matching rows", async () => {
   const { addSelectedProductLines } = await helpers;
-  const lines = freezeLines(
-    Array.from({ length: 150 }, (_, index) =>
-      draftLine({ id: "line-" + index, variant: "flavor-" + index }),
-    ),
-  );
-  const merged = addSelectedProductLines(
-    lines,
-    [selection({ variant: "flavor-149", quantity: 4 })],
-    () => assert.fail("No new row"),
-  );
-  assert.equal(merged.length, 150);
-  assert.equal(merged[149].quantity, 6);
-  assert.throws(
-    () =>
-      addSelectedProductLines(
-        lines,
-        [selection({ variant: "new-flavor" })],
-        () => assert.fail("Line count validation precedes IDs"),
-      ),
-    /150.*line|line.*150/i,
-  );
-  const filled = addSelectedProductLines(
-    lines.slice(0, 149),
-    [
-      selection({ variant: "new-flavor" }),
-      selection({ variant: "new-flavor", quantity: 3 }),
-    ],
-    () => "last-line",
-  );
-  assert.equal(filled.length, 150);
-  assert.equal(filled[149].quantity, 5);
-  assert.equal(lines[149].quantity, 2);
+  const lines = freezeLines(Array.from({ length: 1100 }, (_, index) =>
+    draftLine({ id: "line-" + index, variant: "flavor-" + index })));
+  const result = addSelectedProductLines(lines, [
+    selection({ variant: "flavor-1099", quantity: 4 }),
+    selection({ variant: "new-flavor", quantity: 3 }),
+  ], () => "line-1100");
+  assert.equal(result.length, 1101);
+  assert.equal(result[1099].quantity, 6);
+  assert.equal(result[1100].quantity, 3);
+  assert.equal(result[1100].id, "line-1100");
+  assert.equal(lines[1099].quantity, 2);
 });
 
 test("ID collisions or invalid generated IDs never change the original draft", async () => {
