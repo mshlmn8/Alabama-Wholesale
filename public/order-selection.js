@@ -1,8 +1,13 @@
+const compareVariants = (left, right) =>
+  String(left ?? "").localeCompare(String(right ?? ""), "en", {
+    numeric: true,
+    sensitivity: "base",
+  });
+
 export function productVariants(product) {
   if (!product.variants?.length) return [""];
-  return product.standardVariantEnabled === true
-    ? ["", ...product.variants]
-    : product.variants;
+  const variants = [...product.variants].sort(compareVariants);
+  return product.standardVariantEnabled === true ? ["", ...variants] : variants;
 }
 
 // Validate every row before the caller changes the draft. Zero/blank rows are omitted.
@@ -24,7 +29,9 @@ export function selectedProductLines(product, quantities, unit, note = "") {
         quantity > 1_000_000
       )
         throw new Error(
-          `${variant || "Standard"}: quantity must be a whole number between 0 and 1,000,000.`,
+          `${
+            variant || "Standard"
+          }: quantity must be a whole number between 0 and 1,000,000.`,
         );
       return {
         productId: product.id,
@@ -48,6 +55,10 @@ export function groupDraftLines(lines) {
       groups.set(line.productId, { productId: line.productId, lines: [] });
     groups.get(line.productId).lines.push(line);
   }
+  for (const group of groups.values())
+    group.lines.sort((left, right) =>
+      compareVariants(left.variant, right.variant),
+    );
   return [...groups.values()];
 }
 

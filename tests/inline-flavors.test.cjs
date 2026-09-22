@@ -186,7 +186,10 @@ async function fixture({
     context,
   );
   vm.runInNewContext(
-    source.slice(source.indexOf("function showAssistant()"), source.indexOf("function showScanner()")),
+    source.slice(
+      source.indexOf("function showAssistant()"),
+      source.indexOf("function showScanner()"),
+    ),
     context,
   );
   const controls = () => walk(dialog.dialog);
@@ -258,6 +261,45 @@ test("adding the first flavor keeps the selected Standard quantity", async () =>
   assert.equal(f.context.draft.lines.at(-1).quantity, 3);
 });
 
+test("a newly inserted first flavor keeps typed quantities attached to their original flavors", async () => {
+  const f = await fixture();
+  f.openAdd();
+  const apple = f.control("Apple quantity"),
+    orange = f.control("Orange quantity");
+  apple.value = "4";
+  orange.value = "7";
+  f.control("Line note").value = "Same selected bags";
+  f.control("New flavor name").value = "Aardvark";
+  await f.button("Save flavor").callback();
+  assert.equal(f.control("Apple quantity"), apple);
+  assert.equal(f.control("Orange quantity"), orange);
+  assert.equal(apple.value, "4");
+  assert.equal(orange.value, "7");
+  assert.deepEqual(
+    f
+      .controls()
+      .filter(
+        (control) =>
+          control.tag === "input" &&
+          / quantity$/.test(control["aria-label"] || ""),
+      )
+      .map((control) => control["aria-label"]),
+    ["Aardvark quantity", "Apple quantity", "Orange quantity"],
+  );
+  f.control("Aardvark quantity").value = "2";
+  await f.button("Add selected flavors").callback();
+  assert.deepEqual(
+    f.context.draft.lines
+      .slice(1)
+      .map((line) => [line.variant, line.quantity, line.note]),
+    [
+      ["Aardvark", 2, "Same selected bags"],
+      ["Apple", 4, "Same selected bags"],
+      ["Orange", 7, "Same selected bags"],
+    ],
+  );
+});
+
 test("builder flavor creation selects the new flavor and retains unsaved item fields", async () => {
   const f = await fixture();
   f.openEdit();
@@ -281,7 +323,11 @@ test("builder flavor creation selects the new flavor and retains unsaved item fi
 
 test("row options remove only the selected line and close after saving", async () => {
   const f = await fixture();
-  f.context.draft.lines.push({ ...f.context.draft.lines[0], id: "other", variant: "Orange" });
+  f.context.draft.lines.push({
+    ...f.context.draft.lines[0],
+    id: "other",
+    variant: "Orange",
+  });
   f.openEdit();
   assert.ok(f.button("Remove item"));
   await f.button("Remove item").callback();
@@ -347,7 +393,10 @@ test("editing a legacy case item preserves its saved unit and explains the quant
   f.openEdit();
   assert.equal(f.control("Order unit"), undefined);
   assert.equal(f.control("Quantity").value, "2");
-  assert.match(f.dialog().dialog.textContent, /existing case quantity.*12 items per case/i);
+  assert.match(
+    f.dialog().dialog.textContent,
+    /existing case quantity.*12 items per case/i,
+  );
   f.control("Quantity").value = "3";
   f.control("Line note").value = "Keep original case count";
   await f.button("Update item").callback();
@@ -369,27 +418,69 @@ test("a legacy case item never converts to individual quantities when its pack s
 test("legacy case hints prefer an issued line's saved pack size over the current catalog", async () => {
   const f = await fixture();
   assert.equal(typeof f.context.savedCaseQuantityHint, "function");
-  assert.equal(f.context.savedCaseQuantityHint({ unit: "each" }, f.product), "");
-  assert.match(f.context.savedCaseQuantityHint({ unit: "case", packSize: 6 }, f.product), /6 items per case/);
-  assert.doesNotMatch(f.context.savedCaseQuantityHint({ unit: "case", packSize: null }, f.product), /12 items/);
+  assert.equal(
+    f.context.savedCaseQuantityHint({ unit: "each" }, f.product),
+    "",
+  );
+  assert.match(
+    f.context.savedCaseQuantityHint({ unit: "case", packSize: 6 }, f.product),
+    /6 items per case/,
+  );
+  assert.doesNotMatch(
+    f.context.savedCaseQuantityHint(
+      { unit: "case", packSize: null },
+      f.product,
+    ),
+    /12 items/,
+  );
 });
 
 test("AI review uses plain quantities and preserves explicit cases with context", async () => {
-  const f = await fixture({ proposal: {
-    lines: [
-      { productId: "juice", variant: "Apple", quantity: 3, unit: "each", note: "" },
-      { productId: "juice", variant: "Orange", quantity: 2, unit: "case", note: "" },
-    ], ambiguities: [], summary: "Review 2 flavors",
-  } });
+  const f = await fixture({
+    proposal: {
+      lines: [
+        {
+          productId: "juice",
+          variant: "Apple",
+          quantity: 3,
+          unit: "each",
+          note: "",
+        },
+        {
+          productId: "juice",
+          variant: "Orange",
+          quantity: 2,
+          unit: "case",
+          note: "",
+        },
+      ],
+      ambiguities: [],
+      summary: "Review 2 flavors",
+    },
+  });
   f.openAssistant();
   const note = f.control("Tell the AI what you need");
   assert.doesNotMatch(note.placeholder, /cases|each/);
   note.value = "3 Apple juice and 2 cases of Orange juice";
   await f.button("Create proposed cart").callback();
   assert.doesNotMatch(f.dialog().dialog.textContent, /Apple · each/);
-  assert.match(f.dialog().dialog.textContent, /Requested case quantity.*12 items per case/);
-  const acknowledgement = f.controls().find((item) => item.tag === "input" && item.type === "checkbox" && !item["aria-label"]);
+  assert.match(
+    f.dialog().dialog.textContent,
+    /Requested case quantity.*12 items per case/,
+  );
+  const acknowledgement = f
+    .controls()
+    .find(
+      (item) =>
+        item.tag === "input" && item.type === "checkbox" && !item["aria-label"],
+    );
   acknowledgement.checked = true;
   await f.button("Add reviewed items to draft").callback();
-  assert.deepEqual(f.context.draft.lines.slice(1).map((line) => [line.quantity, line.unit]), [[3, "each"], [2, "case"]]);
+  assert.deepEqual(
+    f.context.draft.lines.slice(1).map((line) => [line.quantity, line.unit]),
+    [
+      [3, "each"],
+      [2, "case"],
+    ],
+  );
 });

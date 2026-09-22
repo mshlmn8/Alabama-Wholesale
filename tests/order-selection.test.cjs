@@ -15,6 +15,66 @@ const product = {
   packSize: 12,
 };
 
+test("flavor choices sort alphabetically with numeric names and base sensitivity without mutating the catalog", async () => {
+  const { productVariants } = await helpers;
+  const variants = Object.freeze([
+    "Zebra",
+    "Flavor 10",
+    "apple",
+    "Flavor 2",
+    "Ápple",
+  ]);
+  const catalogProduct = Object.freeze({ id: "sorted", variants });
+  const result = productVariants(catalogProduct);
+  assert.deepEqual(result, [
+    "apple",
+    "Ápple",
+    "Flavor 2",
+    "Flavor 10",
+    "Zebra",
+  ]);
+  assert.notEqual(result, variants);
+  assert.deepEqual(variants, [
+    "Zebra",
+    "Flavor 10",
+    "apple",
+    "Flavor 2",
+    "Ápple",
+  ]);
+});
+
+test("quantities follow the displayed alphabetical flavor order with optional Standard first", async () => {
+  const { productVariants, selectedProductLines } = await helpers;
+  const unsorted = Object.freeze({
+    ...product,
+    variants: Object.freeze(["orange", "apple", "cranberry"]),
+  });
+  for (const standardVariantEnabled of [false, true]) {
+    const item = { ...unsorted, standardVariantEnabled };
+    const quantities = Object.freeze(
+      standardVariantEnabled ? ["4", "2", "0", "7"] : ["2", "0", "7"],
+    );
+    assert.deepEqual(productVariants(item), [
+      ...(standardVariantEnabled ? [""] : []),
+      "apple",
+      "cranberry",
+      "orange",
+    ]);
+    assert.deepEqual(
+      selectedProductLines(item, quantities, "each").map((line) => [
+        line.variant,
+        line.quantity,
+      ]),
+      [
+        ...(standardVariantEnabled ? [["", 4]] : []),
+        ["apple", 2],
+        ["orange", 7],
+      ],
+    );
+  }
+  assert.deepEqual(unsorted.variants, ["orange", "apple", "cranberry"]);
+});
+
 test("two flavors become separate lines and unselected flavors are omitted", async () => {
   const { selectedProductLines } = await helpers;
   assert.equal(typeof selectedProductLines, "function");
@@ -128,7 +188,7 @@ function freezeLines(lines) {
   return Object.freeze(lines);
 }
 
-test("draft groups follow first product appearance and retain every original line", async () => {
+test("draft groups follow first product appearance and sort flavors while retaining every original line", async () => {
   const { groupDraftLines } = await helpers;
   assert.equal(typeof groupDraftLines, "function");
   const lines = freezeLines([
@@ -140,13 +200,61 @@ test("draft groups follow first product appearance and retain every original lin
   const before = structuredClone(lines);
   const grouped = groupDraftLines(lines);
   assert.deepEqual(grouped, [
-    { productId: "tropicana", lines: [lines[0], lines[2], lines[3]] },
+    { productId: "tropicana", lines: [lines[0], lines[3], lines[2]] },
     { productId: "__proto__", lines: [lines[1]] },
   ]);
   assert.equal(grouped[0].lines[0], lines[0]);
-  assert.equal(grouped[0].lines[2], lines[3]);
+  assert.equal(grouped[0].lines[1], lines[3]);
   assert.deepEqual(lines, before);
   assert.deepEqual(groupDraftLines([]), []);
+});
+
+test("display grouping keeps legacy duplicates, Standard, quantities and price snapshots unchanged", async () => {
+  const { groupDraftLines } = await helpers;
+  const lines = freezeLines([
+    draftLine({
+      id: "ten",
+      variant: "Flavor 10",
+      unit: "case",
+      quantity: 8,
+      unitPriceCents: 1200,
+    }),
+    draftLine({
+      id: "same-first",
+      variant: "apple",
+      note: "First bag",
+      unit: "case",
+      quantity: 2,
+    }),
+    draftLine({ id: "other", productId: "other", variant: "Orange" }),
+    draftLine({ id: "two", variant: "Flavor 2" }),
+    draftLine({
+      id: "same-last",
+      variant: "Ápple",
+      note: "Second bag",
+      unit: "each",
+      quantity: 3,
+    }),
+    draftLine({
+      id: "standard",
+      variant: "",
+      packSize: 12,
+      unitPriceCents: 500,
+    }),
+    draftLine({ id: "legacy-standard", variant: undefined }),
+  ]);
+  const before = structuredClone(lines);
+  const grouped = groupDraftLines(lines);
+  assert.deepEqual(
+    grouped.map((group) => group.productId),
+    ["tropicana", "other"],
+  );
+  const expected = [lines[5], lines[6], lines[1], lines[4], lines[3], lines[0]];
+  assert.deepEqual(grouped[0].lines, expected);
+  expected.forEach((line, index) =>
+    assert.equal(grouped[0].lines[index], line),
+  );
+  assert.deepEqual(lines, before);
 });
 
 test("adding the same flavor changes quantity while preserving its ID and metadata", async () => {
@@ -300,12 +408,19 @@ test("invalid additions reject atomically before any new ID is requested", async
 
 test("large selections have no arbitrary line count cap and still merge matching rows", async () => {
   const { addSelectedProductLines } = await helpers;
-  const lines = freezeLines(Array.from({ length: 1100 }, (_, index) =>
-    draftLine({ id: "line-" + index, variant: "flavor-" + index })));
-  const result = addSelectedProductLines(lines, [
-    selection({ variant: "flavor-1099", quantity: 4 }),
-    selection({ variant: "new-flavor", quantity: 3 }),
-  ], () => "line-1100");
+  const lines = freezeLines(
+    Array.from({ length: 1100 }, (_, index) =>
+      draftLine({ id: "line-" + index, variant: "flavor-" + index }),
+    ),
+  );
+  const result = addSelectedProductLines(
+    lines,
+    [
+      selection({ variant: "flavor-1099", quantity: 4 }),
+      selection({ variant: "new-flavor", quantity: 3 }),
+    ],
+    () => "line-1100",
+  );
   assert.equal(result.length, 1101);
   assert.equal(result[1099].quantity, 6);
   assert.equal(result[1100].quantity, 3);

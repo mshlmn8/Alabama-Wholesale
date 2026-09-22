@@ -167,7 +167,10 @@ test("scheduling persists across workers and waits until due with a PDF attachme
   assert.equal(calls[0].attachments[0].content.toString(), "%PDF-fixture");
   assert.equal(calls[0].attachments[0].contentType, "application/pdf");
   assert.match(calls[0].attachments[0].filename, /AW-2026-000042/);
-  assert.match(calls[0].attachments[0].filename, /^Original-shop-AW-2026-000042-/);
+  assert.match(
+    calls[0].attachments[0].filename,
+    /^Original-shop-AW-2026-000042-/,
+  );
   assert.equal(calls[0].disableFileAccess, true);
   assert.equal(
     (await mail.getOrderMail(repo, customer, order.id)).status,
@@ -179,6 +182,158 @@ test("scheduling persists across workers and waits until due with a PDF attachme
     0,
   );
   assert.equal(calls.length, 1);
+});
+test("invoice emails include grouped frozen lines with escaped HTML and every saved quantity", async () => {
+  const repo = fixture(),
+    calls = [];
+  const invoice = {
+    ...order,
+    storeSnapshot: { id: "one", name: "Original <shop> & store\nSecond line" },
+    notes: "Leave <cartons> & call",
+    lines: [
+      {
+        ...order.lines[0],
+        name: "Orange <beverage>",
+        variant: "Mint & ice",
+        categoryNames: ["Frozen <category>"],
+        quantity: 2,
+      },
+      {
+        ...order.lines[0],
+        id: "second",
+        name: "Orange <beverage>",
+        variant: "Berry",
+        categoryNames: ["Frozen <category>"],
+        quantity: 3,
+        unit: "case",
+        packSize: 6,
+        eachQuantity: 18,
+      },
+      {
+        ...order.lines[0],
+        id: "plain",
+        productId: "plain",
+        name: "Plain item",
+        categoryNames: [],
+        quantity: 4,
+      },
+    ],
+  };
+  await repo.put("orders", order.id, invoice);
+  await action(repo);
+  const get = repo.get.bind(repo);
+  repo.get = async (collection, id) => {
+    if (["products", "categories"].includes(collection))
+      throw Error("Frozen lines must not read the current catalog.");
+    return get(collection, id);
+  };
+  assert.equal((await mail.deliverOrderMail(repo, options(calls))).sent, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(typeof calls[0].html, "string");
+  assert.match(calls[0].html, /Original &lt;shop&gt; &amp; store/);
+  assert.doesNotMatch(
+    calls[0].html,
+    /Frozen &lt;category&gt;/,
+    "Categories group the lists without adding headings.",
+  );
+  assert.equal((calls[0].html.match(/<ul>/g) || []).length, 2);
+  assert.match(calls[0].html, /Orange &lt;beverage&gt;/);
+  assert.doesNotMatch(calls[0].html, /<shop>|<category>|<beverage>|<cartons>/);
+  assert.doesNotMatch(calls[0].subject, /[\r\n]/);
+  const { formatOrder } = await import("../public/order-format.mjs");
+  const expected = formatOrder(invoice, { store: await get("stores", "one") });
+  assert.equal(calls[0].subject, expected.subject);
+  assert.equal(calls[0].text, expected.text);
+  assert.equal(calls[0].html, expected.html);
+  assert.match(calls[0].text, /Mint & ice.*2/);
+  assert.match(calls[0].text, /Berry.*3/);
+  assert.match(calls[0].text, /Plain item.*4/);
+  assert.equal(calls[0].attachments[0].content.toString(), "%PDF-fixture");
+  assert.equal(calls[0].disableFileAccess, true);
+  assert.equal(calls[0].disableUrlAccess, true);
+});
+test("older invoices load only needed current product and ancestor categories for formatted email", async () => {
+  const repo = fixture(),
+    calls = [],
+    reads = [];
+  const invoice = {
+    ...order,
+    lines: [
+      {
+        ...order.lines[0],
+        id: "modern",
+        productId: "modern",
+        name: "Modern candy",
+        categoryNames: ["Candy"],
+        quantity: 7,
+      },
+      ...order.lines,
+    ],
+  };
+  await repo.put("orders", order.id, invoice);
+  await repo.put("products", "p", {
+    id: "p",
+    name: "Changed product",
+    categoryIds: ["child"],
+  });
+  await repo.put("products", "unrelated", {
+    id: "unrelated",
+    categoryIds: ["private"],
+  });
+  await repo.put("categories", "child", {
+    id: "child",
+    name: "Child",
+    parentId: "parent",
+  });
+  await repo.put("categories", "parent", {
+    id: "parent",
+    name: "Tobacco",
+    parentId: "child",
+  });
+  await action(repo);
+  const get = repo.get.bind(repo);
+  repo.get = async (collection, id) => {
+    if (["products", "categories"].includes(collection))
+      reads.push([collection, id]);
+    return get(collection, id);
+  };
+  assert.equal((await mail.deliverOrderMail(repo, options(calls))).sent, 1);
+  assert.deepEqual(reads, [
+    ["products", "p"],
+    ["categories", "child"],
+    ["categories", "parent"],
+  ]);
+  assert.match(calls[0].text, /Orange beverage/);
+  assert.doesNotMatch(calls[0].text, /Changed product|unrelated|private/);
+  assert.ok(
+    calls[0].text.indexOf("Orange beverage") <
+      calls[0].text.indexOf("Modern candy"),
+    "The old line inherits the preferred Tobacco ancestor before Candy.",
+  );
+  assert.equal((calls[0].html.match(/<ul>/g) || []).length, 2);
+  assert.equal(
+    (await get("orders", order.id)).lines[1].categoryNames,
+    undefined,
+    "Formatting cannot rewrite an issued invoice.",
+  );
+});
+test("catalog preparation failures are retryable and never start SMTP delivery", async () => {
+  const repo = fixture(),
+    calls = [];
+  await action(repo);
+  const get = repo.get.bind(repo);
+  repo.get = async (collection, id) => {
+    if (collection === "products")
+      throw Error("Catalog temporarily unavailable");
+    return get(collection, id);
+  };
+  const result = await mail.deliverOrderMail(repo, options(calls));
+  assert.equal(result.failed, 1);
+  assert.equal(calls.length, 0);
+  const saved = await mail.getOrderMail(repo, customer, order.id);
+  assert.equal(saved.status, "failed");
+  assert.equal(saved.retryable, true);
+  assert.equal(saved.attempts, 0);
 });
 test("settings are master-only and automatic queuing shares the transaction, with no historic backfill", async () => {
   const repo = fixture();
