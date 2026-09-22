@@ -23,6 +23,8 @@ import {
   serializeCatalogVariants,
   prepareCatalogVariant,
 } from "./catalog-variants.js";
+import { formatOrder } from "./order-format.mjs";
+import { bindOrderCollapse } from "./order-collapse.js";
 import { bindCatalogSearch } from "./catalog-search.js";
 import {
   orderName,
@@ -89,6 +91,7 @@ const iconPaths = {
   refresh:
     "M20 7v5h-5M4 17v-5h5M5.5 7a7.5 7.5 0 0 1 12-2l2.5 7M4 12l2.5 7a7.5 7.5 0 0 0 12-2",
   download: "M12 3v12M7 10l5 5 5-5M4 17v4h16v-4",
+  share: "M12 16V3M7 8l5-5 5 5M5 12H3v9h18v-9h-2",
   user: "M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0M4 21v-2a8 8 0 0 1 16 0v2",
   edit: "m4 16 12-12 4 4L8 20H4zm10-10 4 4",
   return: "M9 4 3 10l6 6M3 10h11a6 6 0 0 1 0 12",
@@ -426,6 +429,7 @@ let config,
   orderStoreScope = "selected",
   queueBusy = false,
   loading = false;
+const orderCollapseStates = new Map();
 let storePicker = null;
 let draftSync = null;
 let orderDownloads = null;
@@ -2587,7 +2591,10 @@ function showAddProduct(product, initialVariant) {
         );
       const lines = selectedProductLines(
         product,
-        rows.map((row) => row.quantity.value),
+        variants.map(
+          (variant) =>
+            rows.find((row) => row.variant === variant)?.quantity.value ?? "0",
+        ),
         "each",
         note.value,
       );
@@ -2730,6 +2737,11 @@ function showAddProduct(product, initialVariant) {
         for (const variant of variants)
           if (!rows.some((row) => row.variant === variant))
             addFlavorRow(variant, "0");
+        // Reorder the existing controls, preserving each flavor's typed quantity.
+        rows.sort(
+          (a, b) => variants.indexOf(a.variant) - variants.indexOf(b.variant),
+        );
+        list.replaceChildren(...rows.map((row) => row.row));
         add.textContent = multiple ? "Add selected flavors" : "Add to draft";
         search.hidden = variants.length <= 6;
         search.value = "";
@@ -3142,7 +3154,7 @@ function renderBuilder() {
         "builder-product-title",
       );
       options.setAttribute("aria-label", `Options for ${name}`);
-      return el(
+      const section = el(
         "section",
         {
           class: "builder-product-group",
@@ -3247,6 +3259,16 @@ function renderBuilder() {
           }),
         ),
       );
+      const flavors = section.querySelector(".builder-flavors");
+      append(
+        section.querySelector(".builder-product-actions"),
+        orderCollapseButton(
+          `flavors for ${name}`,
+          flavors,
+          `${draft.id}/product/${group.productId}`,
+        ),
+      );
+      return section;
     }),
   );
   const note = el("textarea", {
@@ -3324,18 +3346,22 @@ function renderBuilder() {
     root,
     draftStatus,
     draft.lines.length
-      ? el(
-          "section",
-          { class: "builder-sheet", "aria-label": "Order items" },
+      ? collapsibleOrderItems(
           el(
-            "div",
-            { class: "builder-columns small", "aria-hidden": "true" },
-            el("span", {}, "Product / flavor"),
-            el("span", {}, "Qty"),
-            el("span", {}, "Amount"),
-            el("span"),
+            "section",
+            { class: "builder-sheet", "aria-label": "Order items" },
+            el(
+              "div",
+              { class: "builder-columns small", "aria-hidden": "true" },
+              el("span", {}, "Product / flavor"),
+              el("span", {}, "Qty"),
+              el("span", {}, "Amount"),
+              el("span"),
+            ),
+            lines,
           ),
-          lines,
+          `${draft.id}/builder`,
+          draft.lines.length,
         )
       : empty(
           "Add your first product",
@@ -3461,7 +3487,11 @@ async function showSubmit() {
     notice(
       "Submitting charges this account once and reserves available inventory. Items without a price submit at $0.",
     ),
-    lineTable(draft.lines, true),
+    collapsibleOrderItems(
+      lineTable(draft.lines, true),
+      `${draft.id}/review`,
+      draft.lines.length,
+    ),
     totalRows(totals),
     draft.notes ? el("p", {}, draft.notes) : null,
     deviceCopy.element,
@@ -3845,6 +3875,147 @@ function renderOrders() {
   );
   return root;
 }
+function orderCollapseButton(label, content, key) {
+  content.id ||= `order-content-${uuid()}`;
+  const identityKey = JSON.stringify([state?.me?.uid, key]);
+  const toggle = el("button", {
+    type: "button",
+    class: "order-collapse-button",
+  });
+  bindOrderCollapse(toggle, content, {
+    label,
+    collapsed: orderCollapseStates.get(identityKey) === true,
+    onChange: (collapsed) => {
+      // Display state is session-only and bounded; it never writes order data.
+      if (orderCollapseStates.size >= 500) orderCollapseStates.clear();
+      orderCollapseStates.set(identityKey, collapsed);
+    },
+  });
+  return toggle;
+}
+function collapsibleOrderItems(content, key, count) {
+  return el(
+    "section",
+    { class: "order-items-section" },
+    el(
+      "div",
+      { class: "order-items-heading" },
+      el(
+        "strong",
+        {},
+        `Order items · ${count} ${count === 1 ? "line" : "lines"}`,
+      ),
+      orderCollapseButton("order items", content, key),
+    ),
+    content,
+  );
+}
+function formattedOrder(order) {
+  return formatOrder(order, {
+    store: storeById(order.storeId),
+    products: state?.products || [],
+    categories: state?.categories || [],
+  });
+}
+function showFormattedOrder(order, withEmail = true) {
+  const scope = operationScope();
+  const formatted = formattedOrder(order);
+  const m = modal("Formatted order", "Ready to copy or share.", true);
+  const sheet = el(
+    "article",
+    { class: "formatted-order", "aria-label": "Formatted order preview" },
+    el("h2", {}, formatted.storeName),
+    el("p", { class: "formatted-order-reference" }, formatted.reference),
+    formatted.groups.map((group) =>
+      el(
+        "ul",
+        {},
+        group.items.map((item) => el("li", {}, item.text)),
+      ),
+    ),
+    order.notes
+      ? el(
+          "p",
+          { class: "formatted-order-notes" },
+          `Order notes: ${order.notes}`,
+        )
+      : null,
+  );
+  append(m.content, sheet);
+  append(
+    m.footer,
+    button("Close", m.close),
+    button(
+      "Copy formatted order",
+      async () => {
+        if (!scopeCurrent(scope)) throw new SessionChanged();
+        if (
+          typeof ClipboardItem !== "undefined" &&
+          navigator.clipboard?.write
+        ) {
+          try {
+            await navigator.clipboard.write([
+              new ClipboardItem({
+                "text/html": new Blob([formatted.html], { type: "text/html" }),
+                "text/plain": new Blob([formatted.text], {
+                  type: "text/plain",
+                }),
+              }),
+            ]);
+            if (scopeCurrent(scope)) toast("Formatted order copied.");
+            return;
+          } catch {
+            /* Fall back to selectable plain text when rich copying is unavailable. */
+          }
+        }
+        if (!scopeCurrent(scope)) throw new SessionChanged();
+        await copyText(formatted.text);
+      },
+      "primary",
+    ),
+  );
+  if (navigator.share)
+    append(
+      m.footer,
+      button(
+        "Share order",
+        async () => {
+          if (!scopeCurrent(scope)) throw new SessionChanged();
+          try {
+            await navigator.share({
+              title: formatted.subject,
+              text: formatted.text,
+            });
+          } catch (error) {
+            if (error.name === "AbortError") return;
+            if (!scopeCurrent(scope)) throw new SessionChanged();
+            await copyText(formatted.text);
+          }
+        },
+        "",
+        "share",
+      ),
+    );
+  if (
+    withEmail &&
+    !isHistoricalOrder(order) &&
+    orderDocumentOptions(order).some(([kind]) => kind === "invoice")
+  )
+    append(
+      m.footer,
+      button(
+        "Send / schedule email",
+        () => {
+          if (!scopeCurrent(scope)) throw new SessionChanged();
+          m.close();
+          return showOrderEmail(order);
+        },
+        "",
+        "bell",
+      ),
+    );
+}
+
 async function showOrder(order) {
   if (order.summary) {
     const loading = modal(
@@ -3910,6 +4081,16 @@ async function showOrder(order) {
       ),
     ),
   );
+  if (order.lines?.length)
+    append(
+      m.content,
+      button(
+        "Formatted order",
+        () => showFormattedOrder(order),
+        "primary",
+        "share",
+      ),
+    );
   if (
     !legacy &&
     orderDocumentOptions(order).some(([kind]) => kind === "invoice")
@@ -3948,7 +4129,11 @@ async function showOrder(order) {
   if (order.lines?.length)
     append(
       m.content,
-      lineTable(order.lines, order.status === "draft", store || null),
+      collapsibleOrderItems(
+        lineTable(order.lines, order.status === "draft", store || null),
+        `${order.id}/saved`,
+        order.lines.length,
+      ),
     );
   if (order.totalCents != null)
     append(
@@ -4485,16 +4670,18 @@ function showPricing(store) {
       { min: 0, step: ".01", placeholder: "Catalog price" },
     );
     variants = new Map(
-      (p.variants || []).map((v) => [
-        v,
-        input(
-          "number",
-          current?.variantPricesCents?.[v] == null
-            ? ""
-            : current.variantPricesCents[v] / 100,
-          { min: 0, step: ".01", placeholder: "Standard price" },
-        ),
-      ]),
+      productVariants(p)
+        .filter(Boolean)
+        .map((v) => [
+          v,
+          input(
+            "number",
+            current?.variantPricesCents?.[v] == null
+              ? ""
+              : current.variantPricesCents[v] / 100,
+            { min: 0, step: ".01", placeholder: "Standard price" },
+          ),
+        ]),
     );
     append(
       content,
@@ -4743,7 +4930,8 @@ function showProductEditor(product = {}, { photoFile = null } = {}) {
     updateVariantRows();
     if (focus) variantName.focus();
   }
-  for (const variant of product.variants || []) addVariantRow(variant, false);
+  for (const variant of productVariants(product).filter(Boolean))
+    addVariantRow(variant, false);
   updateVariantRows();
   append(
     m.content,
@@ -7013,6 +7201,8 @@ function showScanner() {
         matches.push({ product, variant: "" });
       for (const [variant, barcode] of Object.entries(
         product.variantBarcodes || {},
+      ).sort(([a], [b]) =>
+        a.localeCompare(b, "en", { numeric: true, sensitivity: "base" }),
       ))
         if (barcode === exact) matches.push({ product, variant });
     }
@@ -8766,8 +8956,12 @@ async function showOrderEmail(order) {
       el(
         "p",
         { class: "small" },
-        "The invoice PDF is attached. The order remains saved online regardless of email delivery.",
+        "The email includes your store name and product bullets grouped by category, with flavors and quantities. The invoice PDF is attached.",
       ),
+    );
+    append(
+      m.content,
+      button("Preview formatted order", () => showFormattedOrder(order, false)),
     );
     if (job?.scheduledAt && ["queued", "preparing"].includes(job.status))
       append(

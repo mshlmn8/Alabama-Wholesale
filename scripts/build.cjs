@@ -24,6 +24,8 @@ for (const file of [
   "public/category-navigation.js",
   "public/catalog-search.js",
   "public/order-names.mjs",
+  "public/order-format.mjs",
+  "public/order-collapse.js",
   "public/catalog-photo.js",
   "public/catalog-variants.js",
   "public/catalog-photo-edit.js",

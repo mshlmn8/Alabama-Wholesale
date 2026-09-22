@@ -309,3 +309,84 @@
     font-size: 1rem;
   }
 }
+
+/* Collapse controls keep totals and order actions within reach. */
+.order-items-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 0;
+  font-size: 0.8rem;
+}
+.order-collapse-button {
+  min-height: 44px;
+  padding: 6px 10px;
+  font-size: 0.73rem;
+  color: var(--muted);
+  background: transparent;
+  border-color: transparent;
+  flex-shrink: 0;
+}
+.order-collapse-button:hover {
+  color: var(--text);
+  border-color: var(--line);
+}
+.order-items-section [hidden],
+.builder-page .builder-flavors[hidden] {
+  display: none !important;
+}
+.formatted-order {
+  padding: clamp(16px, 4vw, 32px);
+  background: #fff;
+  color: #161616;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+  font-size: 1rem;
+  line-height: 1.65;
+}
+.formatted-order h2 {
+  color: #111;
+  font-size: clamp(1.4rem, 4vw, 2rem);
+  line-height: 1.2;
+}
+.formatted-order-reference {
+  margin-top: 6px;
+  color: #666;
+  font-size: 0.8rem;
+}
+.formatted-order ul {
+  list-style: disc;
+  padding-left: 24px;
+  margin: 26px 0 0;
+}
+.formatted-order li {
+  white-space: pre-wrap;
+  padding-left: 2px;
+  margin: 3px 0;
+}
+.formatted-order-notes {
+  margin-top: 26px;
+  white-space: pre-wrap;
+}
+@media (max-width: 480px) {
+  .builder-page .builder-product-actions .order-collapse-button {
+    width: 44px;
+    padding: 10px;
+    font-size: 0;
+  }
+  .builder-product-actions .order-collapse-button::after {
+    content: "";
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-right: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+    transform: rotate(-135deg) translate(-1px, -1px);
+  }
+  .builder-product-actions
+    .order-collapse-button[aria-expanded="false"]::after {
+    transform: rotate(45deg) translate(-1px, -1px);
+  }
+}

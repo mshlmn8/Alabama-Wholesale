@@ -90,6 +90,32 @@ test('submitted prices and dates remain frozen after product pricing changes',as
   await f.run('product.save',{...f.get('products','p1'),priceCents:9999,variantPricesCents:{Orange:7777},expectedVersion:1});
   const saved=f.get('orders',o.id);assert.equal(saved.totalCents,2400);assert.equal(saved.lines[0].unitPriceCents,1200);assert.equal(saved.submittedAt,1789372800000);
 });
+test('submission snapshots category ancestors from server catalog and ignores client category labels',async()=>{
+  const f=fixture({categories:[{id:'c1',name:'Orange drinks',parentId:'beverages',version:1},{id:'beverages',name:'Beverages',version:1}]});
+  const d=await f.run('order.save',{id:'categorized',storeId:'s1',lines:[{...lines()[0],categoryNames:['Fake client category'],categoryIds:['fake']}]},customer);
+  assert.equal(d.lines[0].categoryNames,undefined);
+  const o=await f.run('order.submit',{id:d.id,expectedVersion:d.version,categoryNames:['Also fake']},customer,'submit-categories');
+  assert.deepEqual(o.lines[0].categoryNames,['Beverages','Orange drinks']);
+  await f.run('category.save',{id:'beverages',name:'Renamed root',expectedVersion:1});
+  await f.run('product.save',{id:'p1',categoryIds:[],expectedVersion:1});
+  assert.deepEqual(f.get('orders',o.id).lines[0].categoryNames,['Beverages','Orange drinks']);
+  const replay=await f.run('order.submit',{id:d.id,expectedVersion:d.version,categoryNames:['Also fake']},customer,'submit-categories');
+  assert.deepEqual(replay,o);
+});
+test('category snapshots retain each ancestry path once and stop on missing parents and cycles',()=>{
+  const f=fixture(),product={...f.get('products','p1'),categoryIds:['leaf','sibling','cycle-a','missing']};
+  const categories=[{id:'root',name:'Root'},{id:'leaf',name:'Leaf',parentId:'root'},{id:'sibling',name:'Sibling',parentId:'root'},{id:'cycle-a',name:'Cycle A',parentId:'cycle-b'},{id:'cycle-b',name:'Cycle B',parentId:'cycle-a'}];
+  const o=calculateOrder([{...lines()[0],categoryNames:['Forged']}],[product],f.get('stores','s1'),categories);
+  assert.deepEqual(o.lines[0].categoryNames,['Root','Leaf','Sibling','Cycle B','Cycle A']);
+  assert.equal(new Set(o.lines[0].categoryNames).size,o.lines[0].categoryNames.length);
+});
+test('new uncategorized order lines freeze an empty category snapshot',async()=>{
+  const f=fixture();await f.run('product.save',{id:'p1',categoryIds:[],expectedVersion:1});
+  const o=await submitted(f);
+  assert.deepEqual(o.lines[0].categoryNames,[]);
+  await f.run('product.save',{id:'p1',categoryIds:['c1'],expectedVersion:2});
+  assert.deepEqual(f.get('orders',o.id).lines[0].categoryNames,[]);
+});
 test('quantities reject malformed, negative, fractional, nonfinite and unsafe numeric input',()=>{
   const f=fixture();for(const quantity of ['2abc','2',0,-1,1.5,NaN,Infinity,Number.MAX_SAFE_INTEGER]){
     assert.throws(()=>calculateOrder(lines(quantity),f.list('products'),f.get('stores','s1')));
