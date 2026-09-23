@@ -162,7 +162,8 @@ test("scheduling persists across workers and waits until due with a PDF attachme
     1,
   );
   assert.equal(calls[0].to, "alwholesaleorders@gmail.com");
-  assert.match(calls[0].subject, /AW-2026-000042/);
+  assert.equal(calls[0].subject, "Original shop");
+  assert.doesNotMatch(calls[0].text, /AW-2026-000042/);
   assert.match(calls[0].text, /Original shop/);
   assert.equal(calls[0].attachments[0].content.toString(), "%PDF-fixture");
   assert.equal(calls[0].attachments[0].contentType, "application/pdf");
@@ -236,7 +237,7 @@ test("invoice emails include grouped frozen lines with escaped HTML and every sa
     /Frozen &lt;category&gt;/,
     "Categories group the lists without adding headings.",
   );
-  assert.equal((calls[0].html.match(/<ul>/g) || []).length, 2);
+  assert.equal((calls[0].html.match(/<ul(?:\s|>)/g) || []).length, 2);
   assert.match(calls[0].html, /Orange &lt;beverage&gt;/);
   assert.doesNotMatch(calls[0].html, /<shop>|<category>|<beverage>|<cartons>/);
   assert.doesNotMatch(calls[0].subject, /[\r\n]/);
@@ -310,7 +311,7 @@ test("older invoices load only needed current product and ancestor categories fo
       calls[0].text.indexOf("Modern candy"),
     "The old line inherits the preferred Tobacco ancestor before Candy.",
   );
-  assert.equal((calls[0].html.match(/<ul>/g) || []).length, 2);
+  assert.equal((calls[0].html.match(/<ul(?:\s|>)/g) || []).length, 2);
   assert.equal(
     (await get("orders", order.id)).lines[1].categoryNames,
     undefined,

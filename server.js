@@ -25,6 +25,7 @@ const ORDER_SUMMARY_FIELDS = [
   "updatedAt",
   "submittedAt",
   "date",
+  "orderNumber",
   "invoiceNumber",
   "total",
   "totalCents",

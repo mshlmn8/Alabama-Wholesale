@@ -23,7 +23,7 @@ import {
   serializeCatalogVariants,
   prepareCatalogVariant,
 } from "./catalog-variants.js";
-import { formatOrder } from "./order-format.mjs";
+import { formatOrder, FORMAT_STYLES } from "./order-format.mjs";
 import { bindOrderCollapse } from "./order-collapse.js";
 import { bindCatalogSearch } from "./catalog-search.js";
 import {
@@ -703,6 +703,11 @@ function updateDraftMetadata(id) {
       lastSyncedAt: saved.lastSyncedAt,
     };
   }
+  if (draft?.id === id && saved) {
+    if (Number.isSafeInteger(saved.orderNumber) && saved.orderNumber > 0)
+      draft.orderNumber = saved.orderNumber;
+    else delete draft.orderNumber;
+  }
   return saved;
 }
 function updateDraftProtection(id, { aggregate = true } = {}) {
@@ -726,6 +731,11 @@ function updateDraftProtection(id, { aggregate = true } = {}) {
     if (node.dataset.draftProtection === id)
       node.textContent = protection.label;
   });
+  if (saved)
+    document.querySelectorAll("[data-order-name]").forEach((node) => {
+      if (node.dataset.orderName === id)
+        node.textContent = orderName(saved, storeById(saved.storeId));
+    });
   if (aggregate) updateWorkspaceProtection();
 }
 function scheduleDraftProtectionUpdate(id, scope) {
@@ -3015,7 +3025,11 @@ function renderBuilder() {
     heading(
       "Current order",
       draft
-        ? orderName(draft, currentStore())
+        ? el(
+            "span",
+            { "data-order-name": draft.id },
+            orderName(draft, currentStore()),
+          )
         : currentStore()?.name || "Select a store to begin.",
       [
         button(
@@ -3416,7 +3430,11 @@ function renderDraftList(drafts) {
           el(
             "div",
             {},
-            el("strong", {}, orderName(item, storeById(item.storeId))),
+            el(
+              "strong",
+              { "data-order-name": item.id },
+              orderName(item, storeById(item.storeId)),
+            ),
             el(
               "p",
               {},
@@ -3733,7 +3751,7 @@ function renderOrders() {
   const searchControl = input("search", orderHistorySearch.value, {
     id: "order-history-search",
     class: "search",
-    placeholder: "Find store or invoice…",
+    placeholder: "Find store, order number or invoice…",
     "aria-label": "Search loaded orders",
     "aria-controls": "order-history-results",
     onInput: (event) => {
@@ -3746,6 +3764,8 @@ function renderOrders() {
     order,
     text: [
       orderName(order, storeById(order.storeId)),
+      orderStoreName(order, storeById(order.storeId)),
+      order.invoiceNumber,
       storeById(order.storeId)?.name,
       order.id,
     ]
@@ -3796,8 +3816,8 @@ function renderOrders() {
               ? "Retry loading your saved orders below."
               : terms.length
               ? orderCursor === null
-                ? "Try another store name or invoice."
-                : "Try another store name or invoice, or load older orders below."
+                ? "Try another store name, order number or invoice."
+                : "Try another store name, order number or invoice, or load older orders below."
               : "Try another status or start your next order.",
             orderHistoryLoading || orderHistoryError || terms.length
               ? []
@@ -3917,68 +3937,171 @@ function formattedOrder(order) {
     categories: state?.categories || [],
   });
 }
-function showFormattedOrder(order, withEmail = true) {
-  const scope = operationScope();
-  const formatted = formattedOrder(order);
-  const m = modal("Formatted order", "Ready to copy or share.", true);
-  const sheet = el(
+function formattedOrderSheet(formatted) {
+  return el(
     "article",
-    { class: "formatted-order", "aria-label": "Formatted order preview" },
-    el("h2", {}, formatted.storeName),
-    el("p", { class: "formatted-order-reference" }, formatted.reference),
-    formatted.groups.map((group) =>
+    {
+      class: "formatted-order",
+      style: FORMAT_STYLES.sheet,
+      "aria-label": "Formatted order preview",
+    },
+    el("h2", { style: FORMAT_STYLES.heading }, formatted.storeName),
+    formatted.groups.flatMap((group, index) => [
+      index
+        ? el(
+            "p",
+            {
+              class: "formatted-order-separator",
+              style: FORMAT_STYLES.separator,
+            },
+            "...",
+          )
+        : null,
       el(
         "ul",
-        {},
-        group.items.map((item) => el("li", {}, item.text)),
+        { style: FORMAT_STYLES.list },
+        group.items.map((item) =>
+          el("li", { style: FORMAT_STYLES.item }, item.text),
+        ),
       ),
-    ),
-    order.notes
+    ]),
+    formatted.notes
       ? el(
           "p",
-          { class: "formatted-order-notes" },
-          `Order notes: ${order.notes}`,
+          { class: "formatted-order-notes", style: FORMAT_STYLES.notes },
+          el("strong", {}, "Order notes: "),
+          formatted.notes,
         )
       : null,
   );
-  append(m.content, sheet);
+}
+async function writeFormattedClipboard(formatted, scope) {
+  if (!scopeCurrent(scope)) throw new SessionChanged();
+  if (typeof ClipboardItem === "undefined" || !navigator.clipboard?.write)
+    return false;
+  try {
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        "text/html": new Blob([formatted.html], { type: "text/html" }),
+        "text/plain": new Blob([formatted.text], { type: "text/plain" }),
+      }),
+    ]);
+  } catch {
+    if (!scopeCurrent(scope)) throw new SessionChanged();
+    return false;
+  }
+  if (!scopeCurrent(scope)) throw new SessionChanged();
+  return true;
+}
+function showFormattedCopyHelp(
+  formatted,
+  scope,
+  { email = false, copied = false } = {},
+) {
+  if (!scopeCurrent(scope)) throw new SessionChanged();
+  const m = modal(
+    email ? "Email formatted text" : "Copy formatted order",
+    email
+      ? "Paste the formatted order into the message body."
+      : "Select and copy the formatted list below.",
+    true,
+  );
+  append(
+    m.content,
+    el(
+      "p",
+      { class: "formatted-copy-instructions" },
+      copied
+        ? "Your formatted order is copied. Open email, tap the message body, then choose Paste. You can edit the order text before sending."
+        : "Your browser could not copy rich text automatically. Select the formatted list below and copy it, then paste it into your email or notes.",
+    ),
+  );
+  let sheet;
+  if (!copied) {
+    sheet = formattedOrderSheet(formatted);
+    append(m.content, sheet);
+  }
+  append(m.footer, button("Close", m.close));
+  if (sheet)
+    append(
+      m.footer,
+      button(
+        "Select formatted text",
+        () => {
+          if (!scopeCurrent(scope)) throw new SessionChanged();
+          const range = document.createRange();
+          range.selectNodeContents(sheet);
+          const selection = document.getSelection();
+          selection.removeAllRanges();
+          selection.addRange(range);
+        },
+        "primary",
+      ),
+    );
+  if (email)
+    append(
+      m.footer,
+      button(
+        "Open email",
+        () => {
+          if (!scopeCurrent(scope)) throw new SessionChanged();
+          // A mailto body is plain text. Leave it empty so the rich clipboard can be pasted intact.
+          location.href = `mailto:alwholesaleorders@gmail.com?subject=${encodeURIComponent(
+            formatted.storeName,
+          )}`;
+        },
+        copied ? "primary" : "",
+      ),
+    );
+  else
+    append(
+      m.footer,
+      button("Copy plain text", () => {
+        if (!scopeCurrent(scope)) throw new SessionChanged();
+        return copyText(formatted.text);
+      }),
+    );
+}
+function showFormattedOrder(order, withEmail = true) {
+  const scope = operationScope();
+  const formatted = formattedOrder(order);
+  const m = modal("Formatted order", "Ready to copy or email.", true);
+  append(
+    m.content,
+    formattedOrderSheet(formatted),
+    el(
+      "p",
+      { class: "small formatted-copy-instructions" },
+      "For email, use Email formatted text and paste into the message body. Plain-text sharing uses the receiving app’s styling.",
+    ),
+  );
   append(
     m.footer,
     button("Close", m.close),
     button(
       "Copy formatted order",
       async () => {
-        if (!scopeCurrent(scope)) throw new SessionChanged();
-        if (
-          typeof ClipboardItem !== "undefined" &&
-          navigator.clipboard?.write
-        ) {
-          try {
-            await navigator.clipboard.write([
-              new ClipboardItem({
-                "text/html": new Blob([formatted.html], { type: "text/html" }),
-                "text/plain": new Blob([formatted.text], {
-                  type: "text/plain",
-                }),
-              }),
-            ]);
-            if (scopeCurrent(scope)) toast("Formatted order copied.");
-            return;
-          } catch {
-            /* Fall back to selectable plain text when rich copying is unavailable. */
-          }
-        }
-        if (!scopeCurrent(scope)) throw new SessionChanged();
-        await copyText(formatted.text);
+        if (await writeFormattedClipboard(formatted, scope))
+          toast("Formatted order copied.");
+        else showFormattedCopyHelp(formatted, scope);
       },
       "primary",
+    ),
+    button(
+      "Email formatted text",
+      async () => {
+        const copied = await writeFormattedClipboard(formatted, scope);
+        showFormattedCopyHelp(formatted, scope, { email: true, copied });
+      },
+      "",
+      "share",
     ),
   );
   if (navigator.share)
     append(
-      m.footer,
+      m.content,
       button(
-        "Share order",
+        "Share plain text",
         async () => {
           if (!scopeCurrent(scope)) throw new SessionChanged();
           try {
@@ -3992,7 +4115,7 @@ function showFormattedOrder(order, withEmail = true) {
             await copyText(formatted.text);
           }
         },
-        "",
+        "text-button",
         "share",
       ),
     );

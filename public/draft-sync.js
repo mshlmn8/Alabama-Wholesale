@@ -1,6 +1,11 @@
 // Draft autosave is deliberately separate from the queue for financial actions.
 // An uncertain request keeps its exact ID and payload until its receipt resolves.
 const clone = (value) => JSON.parse(JSON.stringify(value));
+function copyOrderNumber(target, remote) {
+  if (Number.isSafeInteger(remote?.orderNumber) && remote.orderNumber > 0)
+    target.orderNumber = remote.orderNumber;
+  else delete target.orderNumber;
+}
 const validId = (value) =>
   typeof value === "string" &&
   value.length > 0 &&
@@ -10,7 +15,7 @@ const validId = (value) =>
 const version = (value) => Number.isSafeInteger(value) && value >= 0;
 const problem = (code, message) => Object.assign(new Error(message), { code });
 const clean = (value) =>
-  typeof value === "string" ? value.trim() : (value ?? "");
+  typeof value === "string" ? value.trim() : value ?? "";
 function body(draft) {
   return {
     id: draft.id,
@@ -258,6 +263,8 @@ export function createDraftSync({
     const key = intentKey(draft),
       different = key !== entry.key;
     entry.latest = clone(draft);
+    if (entry.confirmedRemote && (draft.version ?? 0) <= entry.serverVersion)
+      copyOrderNumber(entry.latest, entry.confirmedRemote);
     if (different) {
       entry.key = key;
       entry.generation++;
@@ -305,7 +312,7 @@ export function createDraftSync({
       (latest.version ?? 0) >= (entry.latest.version ?? 0) &&
       intentKey(latest) === entry.key
     )
-      entry.latest = clone(latest);
+      markDirty(entry, latest);
     if (!entry.pending && (latest.version ?? 0) > entry.serverVersion) {
       stop(
         entry,
@@ -419,6 +426,7 @@ export function createDraftSync({
       return;
     }
     entry.latest.version = remote.version;
+    copyOrderNumber(entry.latest, remote);
     entry.latest.syncState = entry.key === key ? "synced" : "local";
     if (entry.key === key) {
       if (Object.hasOwn(remote, "legacy"))
@@ -773,8 +781,8 @@ export function createDraftSync({
       phase: local.conflicted
         ? "conflict"
         : !same && entry.phase === "saved"
-          ? "dirty"
-          : entry.phase,
+        ? "dirty"
+        : entry.phase,
       localPersisted: local.localPersisted,
       cloudConfirmed: !local.conflicted && same && isSaved(entry),
       error: entry.error?.message || entry.storageError?.message || null,

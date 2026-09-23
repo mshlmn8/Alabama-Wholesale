@@ -68,6 +68,10 @@ test("100 concurrent customers save unfinished drafts without leaking edits or p
     customers.map((actor, index) => run(actor, initialCommands[index])),
   );
   assert.equal(initial.length, 100);
+  assert.deepEqual(
+    initial.map((order) => order.orderNumber).sort((a, b) => a - b),
+    Array.from({ length: 100 }, (_, i) => i + 1),
+  );
   const edits = customers.map((actor, index) =>
     command(index, `Edited ${actor.uid}`, 1),
   );
@@ -127,14 +131,17 @@ test("100 concurrent customers save unfinished drafts without leaking edits or p
     assert.equal(order.status, "draft");
     assert.deepEqual(order.lines, edits[index].payload.lines);
     assert.equal(order.invoiceNumber, undefined);
+    assert.equal(order.orderNumber, initial[index].orderNumber);
   }
   assert.equal((await repo.list("commandReceipts")).length, 200);
   assert.equal((await repo.list("audit")).length, 200);
+  assert.deepEqual(await repo.list("counters"), [
+    { id: "order-numbers", value: 100, version: 100 },
+  ]);
   for (const collection of [
     "ledger",
     "payments",
     "returns",
-    "counters",
     "notifications",
   ])
     assert.deepEqual(await repo.list(collection), [], collection);

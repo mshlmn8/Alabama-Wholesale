@@ -1,4 +1,14 @@
 const clone = (value) => JSON.parse(JSON.stringify(value));
+const orderNumber = (draft) =>
+  Number.isSafeInteger(draft?.orderNumber) && draft.orderNumber > 0
+    ? draft.orderNumber
+    : undefined;
+function copyOrderNumber(target, source) {
+  const number = orderNumber(source);
+  if (number === undefined) delete target.orderNumber;
+  else target.orderNumber = number;
+  return target;
+}
 const validId = (value) =>
   typeof value === "string" &&
   value.length > 0 &&
@@ -255,12 +265,17 @@ export class Workspace {
           (draft.version || 0) !== (current.version || 0)))
     )
       throw new DraftConflict();
-    return {
-      ...clone(draft),
-      localRevision: (current?.localRevision || 0) + 1,
-      syncState: "local",
-      updatedAt: Date.now(),
-    };
+    // Local edits retain the acknowledged identity; only a cloud record can
+    // introduce or replace a number.
+    return copyOrderNumber(
+      {
+        ...clone(draft),
+        localRevision: (current?.localRevision || 0) + 1,
+        syncState: "local",
+        updatedAt: Date.now(),
+      },
+      current,
+    );
   }
   saveDraft(draft) {
     const saved = this.mutate((data) => {
@@ -313,6 +328,7 @@ export class Workspace {
       same &&
       current.version === remote.version &&
       current.syncState === "synced" &&
+      current.orderNumber === orderNumber(remote) &&
       ["legacy", "migrationBlocked"].every(
         (key) =>
           !Object.hasOwn(remote, key) ||
@@ -320,12 +336,15 @@ export class Workspace {
       )
     )
       return { draft: clone(current), ...this.localDraftStatus(sent.id) };
-    const updated = {
-      ...clone(current),
-      version: remote.version,
-      syncState: same ? "synced" : "local",
-      lastSyncedAt: Date.now(),
-    };
+    const updated = copyOrderNumber(
+      {
+        ...clone(current),
+        version: remote.version,
+        syncState: same ? "synced" : "local",
+        lastSyncedAt: Date.now(),
+      },
+      remote,
+    );
     if (same) {
       if (Object.hasOwn(remote, "legacy"))
         updated.legacy = clone(remote.legacy);
@@ -378,12 +397,15 @@ export class Workspace {
       throw new Error(
         "Resolve this draft’s pending action in Sync center first.",
       );
-    const updated = {
-      ...clone(remote),
-      localRevision: (current?.localRevision || 0) + 1,
-      syncState: "synced",
-      lastSyncedAt: Date.now(),
-    };
+    const updated = copyOrderNumber(
+      {
+        ...clone(remote),
+        localRevision: (current?.localRevision || 0) + 1,
+        syncState: "synced",
+        lastSyncedAt: Date.now(),
+      },
+      remote,
+    );
     const base = this.durableBase(data, remote.id);
     data.drafts[remote.id] = updated;
     data.revision++;
@@ -505,6 +527,8 @@ export class Workspace {
     this.mutate((data) => {
       const current = data.drafts[id];
       if (!current) return;
+      if ((current.version || 0) > (remote.version || 0)) return;
+      copyOrderNumber(current, remote);
       current.version = remote.version ?? current.version;
       current.syncState =
         current.localRevision === localRevision ? "synced" : "local";
@@ -514,22 +538,22 @@ export class Workspace {
   mergeRemoteDrafts(drafts) {
     const data = this.read();
     const current = this.draftView(data);
-    const changes = new Map();
+    const changes = new Map(),
+      metadataChanges = new Map();
     for (const remote of drafts) {
       if (
         remote.status !== "draft" ||
         !validId(remote.id) ||
         (this.confirmedOrderVersions.has(remote.id) &&
-          (remote.version || 0) <=
-            this.confirmedOrderVersions.get(remote.id)) ||
-        this.workingDrafts.has(remote.id)
+          (remote.version || 0) <= this.confirmedOrderVersions.get(remote.id))
       )
         continue;
       const local = current[remote.id];
       if (
-        !local ||
-        (local.syncState === "synced" &&
-          (remote.version || 0) > (local.version || 0))
+        !this.workingDrafts.has(remote.id) &&
+        (!local ||
+          (local.syncState === "synced" &&
+            (remote.version || 0) > (local.version || 0)))
       ) {
         const durable = Object.hasOwn(data.drafts, remote.id)
           ? data.drafts[remote.id]
@@ -537,26 +561,48 @@ export class Workspace {
         // A temporary cache keeps the durable base revision so another tab's
         // successful edit cannot share its revision and be overwritten.
         const localRevision = durable?.localRevision || 0;
-        const draft = { ...clone(remote), localRevision, syncState: "synced" };
+        const draft = copyOrderNumber(
+          { ...clone(remote), localRevision, syncState: "synced" },
+          remote,
+        );
         changes.set(remote.id, { draft, localRevision, hadLocal: !!durable });
         current[remote.id] = draft;
+      } else if (
+        local &&
+        (remote.version || 0) >= (local.version || 0) &&
+        local.orderNumber !== orderNumber(remote)
+      ) {
+        // The number identifies the order independently of its editable body.
+        // A cloud refresh may confirm it while newer local edits remain dirty.
+        const draft = copyOrderNumber(clone(local), remote);
+        const working = this.workingDrafts.get(remote.id);
+        if (working) working.draft = draft;
+        else
+          metadataChanges.set(remote.id, {
+            draft,
+            base: this.durableBase(data, remote.id),
+          });
       }
     }
-    if (!changes.size) return;
+    if (!changes.size && !metadataChanges.size) return;
     for (const [id, entry] of changes)
       data.drafts[id] = {
         ...entry.draft,
         localRevision: entry.localRevision + 1,
       };
+    for (const [id, entry] of metadataChanges) data.drafts[id] = entry.draft;
     data.revision++;
     try {
       this.write(data);
     } catch (error) {
       if (!(error instanceof StorageFailure)) throw error;
       for (const [id, entry] of changes) this.remoteDrafts.set(id, entry);
+      for (const [id, entry] of metadataChanges)
+        this.workingDrafts.set(id, entry);
       return;
     }
     for (const id of changes.keys()) this.remoteDrafts.delete(id);
+    for (const id of metadataChanges.keys()) this.remoteDrafts.delete(id);
   }
   enqueue(command, metadata = {}) {
     if (!command?.id || !command.type) throw new Error("Invalid command.");
@@ -708,11 +754,7 @@ export class Workspace {
     )
       throw new Error("Invalid workspace backup.");
     const checked = backup.drafts.map((draft) => {
-      if (
-        !draft ||
-        !validId(draft.id) ||
-        !Array.isArray(draft.lines)
-      )
+      if (!draft || !validId(draft.id) || !Array.isArray(draft.lines))
         throw new Error("Invalid draft in backup.");
       for (const line of draft.lines) {
         if (
@@ -724,7 +766,9 @@ export class Workspace {
         )
           throw new Error("Invalid order line in backup.");
       }
-      return clone(draft);
+      // Backups restore editable contents. The next cloud confirmation restores
+      // the trusted number, including when this ID belongs to a legacy order.
+      return copyOrderNumber(clone(draft), null);
     });
     return this.mutate((data) => {
       let imported = 0;
