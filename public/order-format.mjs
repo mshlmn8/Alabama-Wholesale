@@ -1,5 +1,21 @@
 import { orderReference, orderStoreName } from "./order-names.mjs";
 
+// Three newline characters leave two empty lines on each side of the marker.
+export const ORDER_CATEGORY_SEPARATOR = "\n\n\n...\n\n\n";
+// Shared by the standalone email/clipboard fragment and the browser preview.
+// Explicit padding avoids collapsed margins around category separators.
+export const FORMAT_STYLES = Object.freeze({
+  sheet:
+    "font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:24px;color:#000000;background-color:#ffffff;overflow-wrap:anywhere;",
+  heading:
+    "font-family:Arial,Helvetica,sans-serif;font-size:24px;line-height:30px;font-weight:700;letter-spacing:normal;text-wrap:wrap;color:#000000;margin:0 0 24px;",
+  list: "margin:0;padding:0 0 0 24px;list-style-type:disc;list-style-position:outside;",
+  item: "margin:0;padding:0;font-size:16px;line-height:24px;white-space:pre-wrap;",
+  separator: "margin:0;padding:48px 0;font-size:16px;line-height:24px;color:#000000;",
+  notes:
+    "margin:24px 0 0;font-size:16px;line-height:24px;color:#000000;white-space:pre-wrap;",
+});
+
 const CATEGORY_ORDER = [
   "Tobacco",
   "Novelties",
@@ -143,28 +159,47 @@ export function formatOrder(
   const storeName = orderStoreName(order, store);
   const reference = orderReference(order);
   const notes = noteText(order?.notes);
-  const textParts = [storeName + "\n" + reference];
+  const textParts = [storeName];
+  if (groups.length) {
+    textParts.push(
+      groups
+        .map((group) => group.items.map((item) => "• " + item.text).join("\n"))
+        .join(ORDER_CATEGORY_SEPARATOR),
+    );
+  }
   const htmlParts = [
-    `<h1>${escapeHtml(storeName)}</h1>`,
-    `<p>${escapeHtml(reference)}</p>`,
+    `<div style="${FORMAT_STYLES.sheet}">`,
+    `<h1 style="${FORMAT_STYLES.heading}">${escapeHtml(storeName)}</h1>`,
   ];
-  for (const group of groups) {
-    textParts.push(group.items.map((item) => "• " + item.text).join("\n"));
+  for (const [index, group] of groups.entries()) {
+    if (index) {
+      htmlParts.push(
+        `<p style="${FORMAT_STYLES.separator}">${ORDER_CATEGORY_SEPARATOR.trim()}</p>`,
+      );
+    }
     htmlParts.push(
-      "<ul>" +
-        group.items.map((item) => `<li>${htmlText(item.text)}</li>`).join("") +
+      `<ul style="${FORMAT_STYLES.list}">` +
+        group.items
+          .map(
+            (item) => `<li style="${FORMAT_STYLES.item}">${htmlText(item.text)}</li>`,
+          )
+          .join("") +
         "</ul>",
     );
   }
   if (notes) {
     textParts.push("Order notes: " + notes);
-    htmlParts.push(`<p><strong>Order notes:</strong> ${htmlText(notes)}</p>`);
+    htmlParts.push(
+      `<p style="${FORMAT_STYLES.notes}"><strong>Order notes:</strong> ${htmlText(notes)}</p>`,
+    );
   }
+  htmlParts.push("</div>");
   return {
     storeName,
     reference,
-    subject: storeName + " — " + reference,
+    subject: storeName,
     groups,
+    notes,
     text: textParts.join("\n\n"),
     html: htmlParts.join("\n"),
   };

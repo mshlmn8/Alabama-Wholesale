@@ -992,7 +992,14 @@ test("empty and unfinished drafts save automatically and restore in a fresh devi
 
 test("large drafts sync every line without truncating the device or server copy", async () => {
   const f = await fixture();
-  const lines = Array.from({ length: 1200 }, (_, i) => ({ id: "line-" + i, productId: "p1", variant: "Lime", quantity: 1, unit: "each", note: String(i) }));
+  const lines = Array.from({ length: 1200 }, (_, i) => ({
+    id: "line-" + i,
+    productId: "p1",
+    variant: "Lime",
+    quantity: 1,
+    unit: "each",
+    note: String(i),
+  }));
   f.edit({ lines });
   await f.sync.flush("d1");
   assert.equal(f.sync.status("d1").cloudConfirmed, true);
@@ -1006,12 +1013,120 @@ test("byte-capacity rejection preserves the complete working draft and previous 
   f.edit();
   await f.sync.flush("d1");
   const before = await f.repo.get("orders", "d1");
-  const lines = Array.from({ length: 1200 }, (_, i) => ({ id: "line-" + i, productId: "p1", variant: "Lime", quantity: 1, unit: "each", note: "n".repeat(1500) }));
+  const lines = Array.from({ length: 1200 }, (_, i) => ({
+    id: "line-" + i,
+    productId: "p1",
+    variant: "Lime",
+    quantity: 1,
+    unit: "each",
+    note: "n".repeat(1500),
+  }));
   f.edit({ lines });
-  await assert.rejects(() => f.sync.flush("d1"), (error) => error.code === "document_too_large" && error.status === 413);
+  await assert.rejects(
+    () => f.sync.flush("d1"),
+    (error) => error.code === "document_too_large" && error.status === 413,
+  );
   assert.equal(f.sync.status("d1").cloudConfirmed, false);
   assert.deepEqual(f.ws.getDraft("d1").lines, lines);
   assert.deepEqual(f.ws.exportBackup().drafts[0].lines, lines);
   assert.deepEqual(await f.repo.get("orders", "d1"), before);
+  f.sync.dispose();
+});
+
+test("server order numbers reach normal and newer in-flight drafts without entering commands", async () => {
+  for (const newer of [false, true])
+    for (const cacheFails of [false, true]) {
+      const gate = deferred();
+      let sends = 0;
+      const f = await fixture({
+        send: async (command, actual) => {
+          const result = await actual(command);
+          if (++sends === 1) await gate.promise;
+          return { ...result, orderNumber: 7 };
+        },
+      });
+      f.edit({ notes: "first", orderNumber: 999 });
+      const flushed = f.sync.flush("d1");
+      await tick();
+      const latest = newer ? f.edit({ notes: "newer" }) : f.sync.get("d1");
+      if (cacheFails)
+        f.ws.ackCloudDraft = () => {
+          throw new Error("cache unavailable");
+        };
+      gate.resolve();
+      const confirmed = await flushed;
+      assert.equal(confirmed.orderNumber, 7);
+      assert.equal(f.sync.get("d1").orderNumber, 7);
+      assert.equal(f.sync.get("d1").notes, latest.notes);
+      assert.equal(f.sync.get("d1").localRevision, latest.localRevision);
+      assert.equal(f.sync.status("d1").cloudConfirmed, !newer);
+      assert.equal(Object.hasOwn(f.calls[0].payload, "orderNumber"), false);
+      if (newer) {
+        await f.timers.advance(600);
+        assert.equal(f.calls[1].payload.notes, "newer");
+        assert.equal(Object.hasOwn(f.calls[1].payload, "orderNumber"), false);
+        assert.equal(f.sync.get("d1").orderNumber, 7);
+        assert.equal(f.sync.status("d1").cloudConfirmed, true);
+      }
+      f.sync.dispose();
+    }
+});
+
+test("reseed restores trusted order number metadata and clears legacy claims without another save", async () => {
+  const f = await fixture();
+  f.edit();
+  await f.sync.flush("d1");
+  const remote = { ...(await f.repo.get("orders", "d1")), orderNumber: 7 };
+  const before = f.sync.get("d1");
+  f.sync.seed([remote]);
+  assert.equal(f.sync.get("d1").orderNumber, 7);
+  assert.equal(f.ws.getDraft("d1").orderNumber, 7);
+  assert.equal(f.sync.get("d1").localRevision, before.localRevision);
+  assert.equal(f.sync.status("d1").cloudConfirmed, true);
+  assert.equal(f.calls.length, 1);
+  const { orderNumber, ...legacy } = remote;
+  f.sync.seed([legacy]);
+  assert.equal(Object.hasOwn(f.sync.get("d1"), "orderNumber"), false);
+  assert.equal(Object.hasOwn(f.ws.getDraft("d1"), "orderNumber"), false);
+  assert.equal(f.calls.length, 1);
+  f.sync.dispose();
+});
+
+test("lost-save recovery adopts its server number before sending newer queued edits", async () => {
+  let first = true;
+  const next = deferred();
+  const f = await fixture({
+    send: async (command, actual) => {
+      const remote = { ...(await actual(command)), orderNumber: 7 };
+      if (first) {
+        first = false;
+        throw Error("response lost");
+      }
+      await next.promise;
+      return remote;
+    },
+  });
+  f.edit({ notes: "sent" });
+  await f.timers.advance(600);
+  const original = copy(f.calls[0]);
+  f.edit({ notes: "newer queued edit" });
+  f.sync.dispose();
+  f.sync = f.setup();
+  const remote = { ...(await f.repo.get("orders", "d1")), orderNumber: 7 };
+  f.ws.mergeRemoteDrafts([remote]);
+  f.sync.seed([remote]);
+  assert.equal(f.sync.get("d1").orderNumber, 7);
+  assert.equal(f.sync.get("d1").notes, "newer queued edit");
+  assert.equal(f.sync.get("d1").syncState, "local");
+  assert.equal(f.sync.status("d1").cloudConfirmed, false);
+  await f.timers.advance(600);
+  assert.deepEqual(f.calls[0], original);
+  assert.equal(f.calls[1].payload.expectedVersion, 1);
+  assert.equal(f.calls[1].payload.notes, "newer queued edit");
+  assert.equal(Object.hasOwn(f.calls[1].payload, "orderNumber"), false);
+  next.resolve();
+  await tick();
+  assert.equal(f.sync.status("d1").cloudConfirmed, true);
+  assert.equal(f.ws.exportBackup().drafts[0].orderNumber, 7);
   f.sync.dispose();
 });

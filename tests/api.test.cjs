@@ -434,10 +434,12 @@ test("customers can submit ordinary unpriced items at zero and retrieve the froz
     payload: { id: "zero-order", storeId: "one", lines: [{ id: "zero-line", productId: "unpriced", variant: "", quantity: 2, unit: "case" }] },
   });
   assert.equal(saved.status, 200, saved.body);
+  assert.equal(JSON.parse(saved.body).result.orderNumber, 1);
   const submit = { id: "submit-unpriced", type: "order.submit", payload: { id: "zero-order", expectedVersion: JSON.parse(saved.body).result.version, expectedTotalCents: 0 } };
   const submitted = await request("/api/commands", "customer", submit);
   assert.equal(submitted.status, 200, submitted.body);
   const invoice = JSON.parse(submitted.body).result;
+  assert.equal(invoice.orderNumber, 1);
   assert.equal(invoice.lines[0].unitPriceCents, 0);
   assert.equal(invoice.lines[0].eachPriceCents, 0);
   assert.equal(invoice.lines[0].eachQuantity, 12);
@@ -456,6 +458,9 @@ test("customers can submit ordinary unpriced items at zero and retrieve the froz
   const document = await request("/api/documents/zero-order/invoice", "customer");
   assert.equal(document.status, 200, document.body);
   assert.match(document.headers.get("content-type"), /application\/pdf/);
+  assert.equal(document.headers.get("content-disposition"), 'inline; filename="1-invoice.pdf"');
+  const history = JSON.parse((await request("/api/orders?storeId=one", "customer")).body);
+  assert.equal(history.orders.find((order) => order.id === invoice.id).orderNumber, 1);
   assert.match(document.body, /^%PDF-/);
 });
 test("requests beyond transport byte capacity explain preservation and never change the saved order", async (t) => {
@@ -689,6 +694,7 @@ test("history summaries avoid loading original line and bill data while authoriz
     status: "legacy",
     createdAt: 2,
     version: 7,
+    orderNumber: 42,
     lines: [
       {
         id: "line",
@@ -737,6 +743,7 @@ test("history summaries avoid loading original line and bill data while authoriz
   assert.equal(summary.migration, undefined);
   assert.equal(summary.legacy.rawLines, undefined);
   for (const field of [
+    "orderNumber",
     "totalCents",
     "paidCents",
     "creditedCents",

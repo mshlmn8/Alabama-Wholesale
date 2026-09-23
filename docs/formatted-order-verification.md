@@ -1,22 +1,22 @@
-# Formatted order release verification
+# Formatted order verification
 
 ## Behavior
 
-Open any saved order with items and choose **Formatted order**. The preview uses the saved store name and order/invoice reference, then product bullets with flavor quantities in parentheses. **Copy formatted order** copies both rich HTML and plain text where supported; browsers without rich copying use plain text or a selectable-text fallback. **Share order** opens the device share sheet where supported. Closing that share sheet does not send or copy anything.
+Open an order and choose **Formatted order**. The copy keeps the store heading and omits the order/invoice number. Product bullets contain alphabetical flavors with quantities in parentheses. Categories follow Tobacco, Novelties, Merchandise, Candy, Groceries, Motor oil, Drinks; unknown categories follow, then uncategorized products. A literal `...` separates category groups, with two empty lines above and below.
 
-The category sequence is Tobacco, Novelties, Merchandise, Candy, Groceries, Motor oil, Drinks. Unknown categories follow and uncategorized products are last. Blank space separates groups, matching the supplied example. Subcategories inherit the matching ancestor. Flavors sort alphabetically, with numeric names in natural order. Every original quantity and instruction remains, including duplicate lines and historical case quantities. Prices are omitted from this view; the invoice remains available separately.
+**Copy formatted order** writes both styled HTML and plain text to the clipboard. The preview and HTML share inline styles for fonts, bullets, and spacing. **Email formatted text** copies the rich version and explains the paste step before **Open email** opens the user's composer. The recipient and store-name subject are populated; the user pastes into the message body to keep it editable and retain rich formatting. A blocked rich clipboard offers a selectable formatted preview, with plain text available only as an explicit alternative.
 
-New submissions freeze category names from the server catalog alongside product and price snapshots. Older orders use current category assignments when a snapshot is absent, while retaining saved product/store names. Formatting never edits an issued order.
+**Share plain text** remains available for other apps and clearly identifies its format. The Web Share API accepts text, links, or files, not a rich email-body field; it cannot require receiving apps to preserve typography. The user chose editable text over a PDF attachment. The app's direct/scheduled email workflow sends the same styled HTML and keeps the existing invoice PDF attachment. Dedicated-sender configuration remains separate; this development task sends no real email.
 
-Builder products each have a collapse control; complete item lists can be collapsed in the builder, review dialog, and saved order. Controls toggle existing DOM visibility, so quantities and unsaved notes survive. Display state is remembered for the current browser session, independently by user and order. Totals and review actions stay accessible. Narrow screens use a 44-pixel arrow control with an accessible label.
+New orders receive a unique numeric display name, starting at 1, at their first server save. Allocation uses a global transactional counter and command receipts. Retries and concurrent saves cannot duplicate a number. Unsaved/offline orders show New order until allocation. Existing orders retain their names and fiscal invoice identifiers remain unchanged. Assigned numbers propagate into edited local drafts without overwriting newer notes or quantities.
 
-Existing direct/scheduled email delivery now uses the same formatted HTML and text with the invoice PDF attached. Its fixed recipient, authentication, ownership checks, scheduling, retry protection, and sender-configuration requirements are unchanged. This release does not enable automatic sending, configure a sender, or send any existing orders.
+Submitted category/product/price snapshots remain authoritative. Older orders use current category assignments only when their snapshot is absent. Formatting preserves every original quantity and instruction, including duplicate rows and historical cases. No display formatting changes an issued order. Whole-order and product-flavor collapse controls remain available.
 
 ## Verification
 
-- 555 Node 22 tests pass, including snapshot integrity, category ancestry/cycles, duplicate quantities, legacy naming, HTML escaping, stale identity controls, share cancellation, rich/plain copy fallbacks, and retained notes.
-- Build and diff checks pass. Production dependency audit: zero vulnerabilities.
-- Chromium and WebKit synthetic authenticated workflows cover alphabetical inline flavor creation, preserved typed quantities, collapse/expand and rerender, unpriced submission at $0, seven category groups, safe preview rendering, rich/plain clipboard/native share, and all 1,201 lines of a large order.
-- Layout checks at 320, 390, and 1,440 pixels; mobile touch controls remain at least 44 pixels.
-- Test deliveries use mocked SMTP only. Browser tests use an in-memory repository; no customer orders or email recipients are changed.
-- Deployment is verified separately against the merged commit, Firebase traffic state, public asset hashes and unauthenticated endpoint protections. Authenticated production actions are not exercised by the anonymous live smoke.
+- 580 Node 22 tests pass; build and diff checks pass; production dependency audit reports zero vulnerabilities.
+- Six Firestore emulator integration tests pass, including eight concurrent new orders across stores with duplicate save retries yielding exactly 1–8.
+- Clipboard/email tests verify rich HTML, store-only subject, absent plain-text mailto body, manual-copy recovery and stale-identity guards.
+- Numbering tests cover failed-save rollback, forged metadata, corrupted/exhausted counters, retained fiscal references, equal-version refresh, quota overlays, backup handling and newer local edits.
+- Synthetic Chromium/WebKit browser checks cover mobile/desktop preview, category spacing, copying, composer preparation (intercepted), large orders, collapse, and numbering. No customer data or real mail applications are used.
+- Live deployment verification checks the merged commit, Firebase traffic, asset hashes, protected endpoints and anonymous browser rendering. It does not submit production orders or authenticate as a customer.

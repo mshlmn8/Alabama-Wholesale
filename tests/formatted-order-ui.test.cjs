@@ -6,8 +6,10 @@ const source = fs.readFileSync(
   require("node:path").join(__dirname, "../public/app.js"),
   "utf8",
 );
-async function fixture({ share, rich = true } = {}) {
-  const { formatOrder } = await import("../public/order-format.mjs");
+async function fixture({ share, rich = true, copyError = false } = {}) {
+  const { formatOrder, FORMAT_STYLES } = await import(
+    "../public/order-format.mjs"
+  );
   const copies = [],
     richCopies = [],
     shares = [],
@@ -21,6 +23,12 @@ async function fixture({ share, rich = true } = {}) {
   const context = vm.createContext({
     Blob,
     formatOrder,
+    FORMAT_STYLES,
+    location: { href: "" },
+    document: {
+      createRange: () => ({ selectNodeContents() {} }),
+      getSelection: () => ({ removeAllRanges() {}, addRange() {} }),
+    },
     state: { products: [], categories: [] },
     storeById: () => ({ name: "Current name" }),
     operationScope: () => "identity",
@@ -50,7 +58,12 @@ async function fixture({ share, rich = true } = {}) {
         }
       : undefined,
     navigator: {
-      clipboard: { write: async (items) => richCopies.push(items) },
+      clipboard: {
+        write: async (items) => {
+          if (copyError) throw Error("Clipboard blocked");
+          richCopies.push(items);
+        },
+      },
       share: share
         ? async (payload) => {
             shares.push(payload);
@@ -98,6 +111,8 @@ async function fixture({ share, rich = true } = {}) {
   };
   context.showFormattedOrder(order);
   return {
+    context,
+    dialogs,
     copies,
     richCopies,
     shares,
@@ -110,7 +125,8 @@ async function fixture({ share, rich = true } = {}) {
     click: (label) =>
       dialogs
         .at(-1)
-        .footer.children.find((button) => button.label === label)
+        .footer.children.concat(dialogs.at(-1).content.children)
+        .find((button) => button.label === label)
         .click(),
   };
 }
@@ -124,6 +140,18 @@ test("formatted order copies escaped HTML and complete text from the same ordere
   assert.equal(f.copies.length, 0);
   const sheet = f.dialog.content.children[0];
   assert.equal(sheet.children[0].children[0], "Frozen <store>");
+  assert.equal(
+    sheet.children.some(
+      (node) => node.attrs?.class === "formatted-order-reference",
+    ),
+    false,
+  );
+  assert.equal(
+    sheet.children.filter(
+      (node) => node.attrs?.class === "formatted-order-separator",
+    ).length,
+    1,
+  );
   assert.deepEqual(
     Array.from(
       sheet.children.filter((node) => node.tag === "ul"),
@@ -132,10 +160,49 @@ test("formatted order copies escaped HTML and complete text from the same ordere
     ["Sweet <script> (3)", "Juice: Apple (2), Pear (4)"],
   );
 });
-test("plain copying remains available without rich clipboard support", async () => {
-  const f = await fixture({ rich: false });
+test("blocked rich copying offers a selectable formatted preview instead of silently dropping formatting", async () => {
+  const f = await fixture({ copyError: true });
   await f.click("Copy formatted order");
+  assert.equal(f.copies.length, 0);
+  assert.equal(f.dialogs.length, 2);
+  await f.click("Select formatted text");
+  await f.click("Copy plain text");
   assert.deepEqual(f.copies, [f.expected.text]);
+});
+test("email action copies rich HTML and opens an editable composer without degrading to a plain-text body", async () => {
+  const f = await fixture();
+  await f.click("Email formatted text");
+  assert.equal(
+    await f.richCopies[0][0].data["text/html"].text(),
+    f.expected.html,
+  );
+  assert.equal(
+    f.context.location.href,
+    "",
+    "Explain paste before leaving the app.",
+  );
+  await f.click("Open email");
+  const url = new URL(f.context.location.href);
+  assert.equal(url.protocol, "mailto:");
+  assert.equal(url.pathname, "alwholesaleorders@gmail.com");
+  assert.equal(url.searchParams.get("subject"), "Frozen <store>");
+  assert.equal(url.searchParams.has("body"), false);
+  assert.equal(f.shares.length, 0);
+});
+test("manual email copy keeps the entire styled preview and guards a later identity change", async () => {
+  const f = await fixture({ rich: false });
+  await f.click("Email formatted text");
+  assert.equal(f.copies.length, 0);
+  assert.equal(
+    f.dialogs.at(-1).content.children.some((node) => node.tag === "article"),
+    true,
+  );
+  await f.click("Select formatted text");
+  f.stale();
+  await assert.rejects(() =>
+    Promise.resolve().then(() => f.click("Open email")),
+  );
+  assert.equal(f.context.location.href, "");
 });
 test("native sharing uses the full order and cancelling does not copy or send", async () => {
   const f = await fixture({
@@ -143,7 +210,7 @@ test("native sharing uses the full order and cancelling does not copy or send", 
       throw Object.assign(Error("cancelled"), { name: "AbortError" });
     },
   });
-  await f.click("Share order");
+  await f.click("Share plain text");
   assert.equal(f.shares[0].text, f.expected.text);
   assert.equal(f.shares[0].title, f.expected.subject);
   assert.equal(f.copies.length, 0);
@@ -154,7 +221,7 @@ test("a rejected native share falls back to the full copyable text", async () =>
       throw Error("unsupported");
     },
   });
-  await f.click("Share order");
+  await f.click("Share plain text");
   assert.deepEqual(f.copies, [f.expected.text]);
 });
 test("stale identity cannot copy, share, or enter the email flow", async () => {
@@ -162,7 +229,8 @@ test("stale identity cannot copy, share, or enter the email flow", async () => {
   f.stale();
   for (const label of [
     "Copy formatted order",
-    "Share order",
+    "Email formatted text",
+    "Share plain text",
     "Send / schedule email",
   ])
     await assert.rejects(() => Promise.resolve().then(() => f.click(label)));

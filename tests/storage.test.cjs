@@ -1500,10 +1500,266 @@ test("device drafts and imported backups preserve every line above previous orde
   const { Workspace, createDraft } = await load();
   const ws = new Workspace(memory(), "large-original");
   const draft = createDraft("s1");
-  draft.lines = Array.from({ length: 1200 }, (_, i) => ({ id: "line-" + i, productId: "p1", variant: "", quantity: 1, unit: "each", note: "line " + i }));
+  draft.lines = Array.from({ length: 1200 }, (_, i) => ({
+    id: "line-" + i,
+    productId: "p1",
+    variant: "",
+    quantity: 1,
+    unit: "each",
+    note: "line " + i,
+  }));
   ws.saveDraft(draft);
   assert.deepEqual(ws.getDraft(draft.id).lines, draft.lines);
   const restored = new Workspace(memory(), "large-restored");
   assert.equal(restored.importBackup(ws.exportBackup()).imported, 1);
   assert.deepEqual(restored.getDraft(draft.id).lines, draft.lines);
+});
+
+test("cloud order numbers survive acknowledgements, newer edits, and local backup", async () => {
+  const { Workspace } = await load();
+  for (const newer of [false, true]) {
+    const store = memory(),
+      ws = new Workspace(store, `number-${newer}`);
+    const sent = ws.saveDraftForCloud({
+      id: "d",
+      storeId: "s",
+      status: "draft",
+      version: 0,
+      lines: [],
+      notes: "sent",
+      orderNumber: 99,
+    }).draft;
+    assert.equal(
+      Object.hasOwn(sent, "orderNumber"),
+      false,
+      "A local draft cannot allocate a number.",
+    );
+    const latest = newer
+      ? ws.saveDraftForCloud({
+          ...sent,
+          notes: "newer",
+          lines: [{ productId: "p", quantity: 9, unit: "each" }],
+        }).draft
+      : sent;
+    const ack = ws.ackCloudDraft(sent, { ...sent, version: 1, orderNumber: 7 });
+    assert.equal(ack.draft.orderNumber, 7);
+    assert.equal(ack.draft.notes, latest.notes);
+    assert.deepEqual(ack.draft.lines, latest.lines);
+    assert.equal(ack.draft.localRevision, latest.localRevision);
+    assert.equal(ack.draft.syncState, newer ? "local" : "synced");
+    assert.equal(ack.localPersisted, true);
+    const edited = ws.saveDraftForCloud({
+      ...ack.draft,
+      orderNumber: 999,
+      notes: "later",
+    }).draft;
+    assert.equal(
+      edited.orderNumber,
+      7,
+      "An edit cannot replace the server number.",
+    );
+    const { orderNumber, ...withoutNumber } = edited;
+    const saved = ws.saveDraft({ ...withoutNumber, notes: "latest" });
+    assert.equal(
+      saved.orderNumber,
+      7,
+      "Saving a partial local record retains assigned metadata.",
+    );
+    assert.equal(
+      new Workspace(store, `number-${newer}`).getDraft("d").orderNumber,
+      7,
+    );
+    assert.equal(ws.exportBackup().drafts[0].orderNumber, 7);
+  }
+});
+
+test("cloud number acknowledgement remains available under quota without losing newer fields", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    set = store.setItem,
+    ws = new Workspace(store, "number-quota");
+  const sent = ws.saveDraftForCloud({
+    id: "d",
+    storeId: "s",
+    status: "draft",
+    version: 0,
+    lines: [],
+    notes: "sent",
+  }).draft;
+  const latest = ws.saveDraftForCloud({ ...sent, notes: "newer" }).draft;
+  const before = store.getItem(ws.key);
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  const ack = ws.ackCloudDraft(sent, { ...sent, version: 1, orderNumber: 7 });
+  assert.equal(ack.draft.orderNumber, 7);
+  assert.equal(ack.draft.notes, "newer");
+  assert.equal(ack.draft.localRevision, latest.localRevision);
+  assert.equal(ack.localPersisted, false);
+  assert.equal(ws.exportBackup().drafts[0].orderNumber, 7);
+  assert.equal(ws.storageStatus().unprotectedDraftCount, 1);
+  assert.equal(store.getItem(ws.key), before);
+  store.setItem = set;
+  ws.retryStorage();
+  assert.equal(
+    new Workspace(store, "number-quota").getDraft("d").orderNumber,
+    7,
+  );
+  assert.equal(ws.localDraftStatus("d").localPersisted, true);
+});
+
+test("equal-version cloud metadata converges without overwriting local edits or sync state", async () => {
+  const { Workspace } = await load();
+  for (const full of [false, true])
+    for (const dirty of [false, true]) {
+      const store = memory(),
+        set = store.setItem,
+        ws = new Workspace(store, `number-merge-${full}-${dirty}`);
+      const remote = {
+        id: "d",
+        storeId: "s",
+        status: "draft",
+        version: 1,
+        lines: [],
+        notes: "online",
+      };
+      ws.mergeRemoteDrafts([remote]);
+      if (dirty)
+        ws.saveDraftForCloud({ ...ws.getDraft("d"), notes: "local edit" });
+      const before = ws.getDraft("d");
+      if (full)
+        store.setItem = () => {
+          throw Error("quota");
+        };
+      ws.mergeRemoteDrafts([{ ...remote, orderNumber: 7 }]);
+      assert.equal(ws.getDraft("d").orderNumber, 7);
+      assert.equal(ws.getDraft("d").notes, before.notes);
+      assert.equal(ws.getDraft("d").syncState, before.syncState);
+      assert.equal(ws.getDraft("d").localRevision, before.localRevision);
+      assert.equal(ws.getDraft("d").version, before.version);
+      assert.equal(ws.localDraftStatus("d").localPersisted, !full);
+      ws.mergeRemoteDrafts([remote]);
+      assert.equal(
+        Object.hasOwn(ws.getDraft("d"), "orderNumber"),
+        false,
+        "Legacy server metadata clears a local number.",
+      );
+      assert.equal(ws.getDraft("d").notes, before.notes);
+      store.setItem = set;
+      if (full) ws.retryStorage();
+    }
+});
+
+test("legacy and stale confirmations never claim or replace an order number", async () => {
+  const { Workspace } = await load();
+  const store = memory(),
+    ws = new Workspace(store, "number-legacy");
+  const remote = {
+    id: "d",
+    storeId: "s",
+    status: "draft",
+    version: 2,
+    lines: [],
+    notes: "online",
+    orderNumber: 7,
+  };
+  ws.mergeRemoteDrafts([remote]);
+  ws.ackCloudDraft(ws.getDraft("d"), { ...remote, version: 1, orderNumber: 8 });
+  assert.equal(ws.getDraft("d").orderNumber, 7);
+  ws.mergeRemoteDrafts([{ ...remote, version: 1, orderNumber: 8 }]);
+  assert.equal(ws.getDraft("d").orderNumber, 7);
+  const { orderNumber, ...legacy } = remote;
+  const cleared = ws.ackCloudDraft(ws.getDraft("d"), legacy);
+  assert.equal(Object.hasOwn(cleared.draft, "orderNumber"), false);
+  const before = store.getItem(ws.key);
+  ws.ackCloudDraft(cleared.draft, legacy);
+  assert.equal(
+    store.getItem(ws.key),
+    before,
+    "Identical metadata remains a no-op.",
+  );
+  for (const invalid of [0, -1, "7", 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    ws.mergeRemoteDrafts([{ ...legacy, version: 3, orderNumber: invalid }]);
+    assert.equal(Object.hasOwn(ws.getDraft("d"), "orderNumber"), false);
+  }
+  const restored = new Workspace(memory(), "number-import");
+  restored.importBackup({
+    format: "aw-workspace",
+    version: 1,
+    drafts: [{ ...remote, id: "restored" }],
+  });
+  assert.equal(
+    Object.hasOwn(restored.getDraft("restored"), "orderNumber"),
+    false,
+    "Imported metadata needs cloud confirmation.",
+  );
+});
+
+test("queued-save acknowledgements retain trusted numbers and newer local notes", async () => {
+  const { Workspace } = await load();
+  const ws = new Workspace(memory(), "number-queue");
+  const sent = ws.saveDraft({
+    id: "d",
+    status: "draft",
+    version: 0,
+    lines: [],
+    notes: "sent",
+  });
+  ws.enqueue({
+    id: "command",
+    type: "order.save",
+    payload: { id: "d", lines: [], notes: "sent" },
+  });
+  ws.saveDraft({ ...sent, notes: "newer" });
+  ws.markDraftSynced("d", sent.localRevision, {
+    id: "d",
+    version: 1,
+    orderNumber: 7,
+  });
+  ws.acknowledge("command");
+  assert.equal(ws.getDraft("d").orderNumber, 7);
+  assert.equal(ws.getDraft("d").notes, "newer");
+  assert.equal(ws.getDraft("d").syncState, "local");
+  assert.equal(ws.pending().length, 0);
+});
+
+test("trusted number refresh reaches existing session overlays and keeps their durable conflict base", async () => {
+  const { Workspace, DraftConflict } = await load();
+  const store = memory(),
+    set = store.setItem,
+    ws = new Workspace(store, "number-overlay");
+  const remote = {
+    id: "d",
+    storeId: "s",
+    status: "draft",
+    version: 1,
+    lines: [],
+    notes: "online",
+  };
+  ws.mergeRemoteDrafts([remote]);
+  const saved = ws.getDraft("d");
+  store.setItem = () => {
+    throw Error("quota");
+  };
+  const latest = ws.saveDraftForCloud({
+    ...saved,
+    notes: "session edit",
+  }).draft;
+  ws.mergeRemoteDrafts([{ ...remote, orderNumber: 7 }]);
+  assert.equal(ws.getDraft("d").orderNumber, 7);
+  assert.equal(ws.getDraft("d").notes, "session edit");
+  assert.equal(ws.getDraft("d").localRevision, latest.localRevision);
+  assert.equal(ws.getDraft("d").syncState, "local");
+  assert.equal(ws.localDraftStatus("d").localPersisted, false);
+  store.setItem = set;
+  new Workspace(store, "number-overlay").saveDraft({
+    ...saved,
+    notes: "another tab",
+  });
+  ws.mergeRemoteDrafts([remote]);
+  assert.equal(Object.hasOwn(ws.getDraft("d"), "orderNumber"), false);
+  assert.equal(ws.getDraft("d").notes, "session edit");
+  assert.equal(ws.localDraftStatus("d").conflicted, true);
+  assert.throws(() => ws.retryStorage(), DraftConflict);
+  assert.equal(JSON.parse(store.getItem(ws.key)).drafts.d.notes, "another tab");
 });

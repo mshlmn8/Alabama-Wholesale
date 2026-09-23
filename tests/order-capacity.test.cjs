@@ -140,7 +140,9 @@ test("a snapshot that exceeds document byte capacity leaves the entire draft and
   );
   assert.deepEqual(await f.repo.get("orders", draft.id), draft);
   assert.equal((await f.repo.list("ledger")).length, 0);
-  assert.equal((await f.repo.list("counters")).length, 0);
+  assert.deepEqual(await f.repo.list("counters"), [
+    { id: "order-numbers", value: 1, version: 1 },
+  ]);
   assert.equal((await f.repo.list("inventory"))[0].reserved, 0);
 });
 

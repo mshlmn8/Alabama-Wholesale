@@ -207,7 +207,7 @@ test('a formerly unpriced draft requires review when its price changes before su
   const d=await draft(f);assert.equal(calculateOrder(d.lines,f.list('products'),f.get('stores','s1')).totalCents,0);
   await f.run('product.save',{...f.get('products','p1'),priceCents:500,expectedVersion:2});
   await rejectsCode(()=>f.run('order.submit',{id:d.id,expectedVersion:d.version,expectedTotalCents:0},customer),'PRICE_CHANGED');
-  assert.equal(f.get('orders',d.id).status,'draft');assert.equal(f.list('ledger').length,0);assert.equal(f.list('counters').length,0);
+  assert.equal(f.get('orders',d.id).status,'draft');assert.equal(f.list('ledger').length,0);assert.deepEqual(f.list('counters'),[{id:'order-numbers',value:1,version:1}]);
   assert.equal(f.get('inventory',inventoryId('p1','Orange')).reserved,0);
   const o=await f.run('order.submit',{id:d.id,expectedVersion:d.version,expectedTotalCents:500},customer);assert.equal(o.totalCents,500);
 });
@@ -442,7 +442,7 @@ test('notification email consent time is server-owned and survives edits only wh
 test('submission rejects a stale reviewed price before stock, invoice or ledger writes',async()=>{
   const f=fixture();const d=await draft(f);await f.run('product.save',{...f.get('products','p1'),variantPricesCents:{Orange:1300},expectedVersion:1});
   await rejectsCode(()=>f.run('order.submit',{id:d.id,expectedVersion:d.version,expectedTotalCents:1200},customer),'PRICE_CHANGED');
-  assert.equal(f.get('orders',d.id).status,'draft');assert.equal(f.get('inventory',inventoryId('p1','Orange')).reserved,0);assert.equal(f.list('ledger').length,0);assert.equal(f.list('counters').length,0);
+  assert.equal(f.get('orders',d.id).status,'draft');assert.equal(f.get('inventory',inventoryId('p1','Orange')).reserved,0);assert.equal(f.list('ledger').length,0);assert.deepEqual(f.list('counters'),[{id:'order-numbers',value:1,version:1}]);
   const order=await f.run('order.submit',{id:d.id,expectedVersion:d.version,expectedTotalCents:1300},customer);assert.equal(order.totalCents,1300);
 });
 test('simultaneous allocation transactions cannot overspend invoice capacity or duplicate ledger payments',async()=>{

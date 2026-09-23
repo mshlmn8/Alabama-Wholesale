@@ -130,6 +130,39 @@ test("Firestore retries serialize concurrent submission and prevent overselling"
   assert.deepEqual(same[0], same[1]);
   assert.equal((await repo.list("ledger")).length, 1);
 });
+
+test("Firestore transactions assign consecutive global order numbers across stores and duplicate saves", async () => {
+  await environment.clearFirestore();
+  for (const id of ["one", "two"])
+    await repo.put("stores", id, { id, name: id });
+  await repo.put("counters", "invoices-2026", {
+    id: "invoices-2026", value: 77, version: 77,
+  });
+  const actor = { uid: "numbering", role: "master", storeIds: [] };
+  const commands = Array.from({ length: 8 }, (_, i) => ({
+    id: `save-${i}`,
+    type: "order.save",
+    payload: {
+      id: `order-${i}`, storeId: i % 2 ? "two" : "one",
+      lines: [], orderNumber: 999,
+    },
+  }));
+  const run = (command) =>
+    repo.transaction((tx) => executeCommand(tx, actor, command));
+  const saved = await Promise.all(
+    [...commands, commands[0], commands[1]].map(run),
+  );
+  assert.deepEqual(
+    saved.slice(0, 8).map((order) => order.orderNumber).sort((a, b) => a - b),
+    [1, 2, 3, 4, 5, 6, 7, 8],
+  );
+  assert.deepEqual(saved[0], saved[8]);
+  assert.deepEqual(saved[1], saved[9]);
+  assert.equal((await repo.get("counters", "order-numbers")).value, 8);
+  assert.equal((await repo.get("counters", "invoices-2026")).value, 77);
+  assert.equal((await repo.list("orders")).length, 8);
+  assert.equal((await repo.list("commandReceipts")).length, 8);
+});
 test("private archive retains all state fields, verifies bytes and stays under document size limits", async () => {
   const snapshot = {
     state: {
@@ -194,6 +227,6 @@ test("Firestore preserves large drafts when the frozen invoice exceeds record by
   await assert.rejects(() => run("order.submit", { id: draft.id, expectedVersion: draft.version }), (error) => error.code === "document_too_large" && error.status === 413);
   assert.deepEqual(await repo.get("orders", draft.id), draft);
   assert.equal((await repo.list("ledger")).length, 0);
-  assert.equal((await repo.list("counters")).length, 0);
+  assert.deepEqual(await repo.list("counters"), [{ id: "order-numbers", value: 1, version: 1 }]);
   assert.equal((await repo.get("inventory", inventoryId("oversized-product", ""))).reserved, 0);
 });

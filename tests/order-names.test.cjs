@@ -9,6 +9,53 @@ async function names() {
   return import(pathToFileURL(file).href);
 }
 
+test("new order names and references use only the assigned number without changing fiscal IDs", async () => {
+  const { orderName, orderReference, orderFilename } = await names();
+  const order = {
+    id: "new-order",
+    orderNumber: 1,
+    storeName: "Shop",
+    invoiceNumber: "AW-2026-000042",
+  };
+  assert.equal(orderName(order, { name: "Renamed" }), "1");
+  assert.equal(orderReference(order), "1");
+  assert.equal(orderFilename(order), "1-invoice.pdf");
+  assert.equal(orderFilename({ ...order, orderNumber: 2 }), "2-invoice.pdf");
+  assert.equal(
+    orderFilename(order, { kind: "draft", format: "json" }),
+    "1-draft.json",
+  );
+  assert.equal(order.invoiceNumber, "AW-2026-000042");
+  for (const number of [
+    0,
+    -1,
+    "1",
+    1.5,
+    Infinity,
+    Number.MAX_SAFE_INTEGER + 1,
+  ]) {
+    assert.equal(
+      orderName({ ...order, orderNumber: number }),
+      "Shop — AW-2026-000042",
+    );
+  }
+});
+
+test("unsaved drafts display New order while recovery filenames retain their unique IDs", async () => {
+  const { orderName, orderReference, orderFilename } = await names();
+  const draft = { id: "draft-one", storeId: "s1", status: "draft", version: 0 };
+  assert.equal(orderName(draft, { name: "Shop" }), "New order");
+  assert.equal(orderReference(draft), "New order");
+  assert.notEqual(
+    orderFilename(draft, { kind: "draft", format: "json" }),
+    orderFilename(
+      { ...draft, id: "draft-two" },
+      { kind: "draft", format: "json" },
+    ),
+  );
+  assert.equal(orderName({ ...draft, orderNumber: 3 }), "3");
+});
+
 test("order names use the original store and unchanged issued invoice number", async () => {
   const { orderName } = await names();
   const order = {

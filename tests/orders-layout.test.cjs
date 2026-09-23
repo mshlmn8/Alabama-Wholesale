@@ -242,3 +242,25 @@ test("loading and failed history stay actionable alongside search", async () => 
   assert.equal(f.node("load-older-orders").disabled, true);
   assert.equal(f.node("order-history-search").value, "not loaded yet");
 });
+
+test("numbered orders remain searchable by number, original store and fiscal invoice", async () => {
+  const f = await fixture();
+  f.state.orders[0].orderNumber = 7;
+  f.redraw();
+  for (const query of [
+    "7",
+    "AW-101",
+    "Original store",
+    "7 Current name",
+    "7 original AW-101",
+  ]) {
+    search(f, query);
+    assert.equal(f.rows().length, 1, `Missing order for ${query}`);
+    const open = controls(f.rows()[0]).find((node) =>
+      node["aria-label"]?.startsWith("Open"),
+    );
+    assert.ok(open);
+    await open.callback();
+    assert.equal(f.opened.at(-1).id, "first");
+  }
+});
