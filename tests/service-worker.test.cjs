@@ -178,7 +178,7 @@ test("activation removes old app caches without deleting unrelated caches", asyn
       keys: async () => [
         "aw-v2-20260914-2",
         "alabama-legacy",
-        "aw-v2-20260922-3",
+        "aw-v2-20260922-4",
         "other-app",
       ],
     },
