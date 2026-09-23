@@ -3993,74 +3993,43 @@ async function writeFormattedClipboard(formatted, scope) {
   if (!scopeCurrent(scope)) throw new SessionChanged();
   return true;
 }
-function showFormattedCopyHelp(
-  formatted,
-  scope,
-  { email = false, copied = false } = {},
-) {
+function showFormattedCopyHelp(formatted, scope) {
   if (!scopeCurrent(scope)) throw new SessionChanged();
   const m = modal(
-    email ? "Email formatted text" : "Copy formatted order",
-    email
-      ? "Paste the formatted order into the message body."
-      : "Select and copy the formatted list below.",
+    "Copy formatted order",
+    "Select and copy the formatted list below.",
     true,
   );
+  const sheet = formattedOrderSheet(formatted);
   append(
     m.content,
     el(
       "p",
       { class: "formatted-copy-instructions" },
-      copied
-        ? "Your formatted order is copied. Open email, tap the message body, then choose Paste. You can edit the order text before sending."
-        : "Your browser could not copy rich text automatically. Select the formatted list below and copy it, then paste it into your email or notes.",
+      "Your browser could not copy rich text automatically. Select the formatted list below and copy it into your email or notes.",
     ),
+    sheet,
   );
-  let sheet;
-  if (!copied) {
-    sheet = formattedOrderSheet(formatted);
-    append(m.content, sheet);
-  }
-  append(m.footer, button("Close", m.close));
-  if (sheet)
-    append(
-      m.footer,
-      button(
-        "Select formatted text",
-        () => {
-          if (!scopeCurrent(scope)) throw new SessionChanged();
-          const range = document.createRange();
-          range.selectNodeContents(sheet);
-          const selection = document.getSelection();
-          selection.removeAllRanges();
-          selection.addRange(range);
-        },
-        "primary",
-      ),
-    );
-  if (email)
-    append(
-      m.footer,
-      button(
-        "Open email",
-        () => {
-          if (!scopeCurrent(scope)) throw new SessionChanged();
-          // A mailto body is plain text. Leave it empty so the rich clipboard can be pasted intact.
-          location.href = `mailto:alwholesaleorders@gmail.com?subject=${encodeURIComponent(
-            formatted.storeName,
-          )}`;
-        },
-        copied ? "primary" : "",
-      ),
-    );
-  else
-    append(
-      m.footer,
-      button("Copy plain text", () => {
+  append(
+    m.footer,
+    button("Close", m.close),
+    button(
+      "Select formatted text",
+      () => {
         if (!scopeCurrent(scope)) throw new SessionChanged();
-        return copyText(formatted.text);
-      }),
-    );
+        const range = document.createRange();
+        range.selectNodeContents(sheet);
+        const selection = document.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+      },
+      "primary",
+    ),
+    button("Copy plain text", () => {
+      if (!scopeCurrent(scope)) throw new SessionChanged();
+      return copyText(formatted.text);
+    }),
+  );
 }
 function showFormattedOrder(order, withEmail = true) {
   const scope = operationScope();
@@ -4072,7 +4041,7 @@ function showFormattedOrder(order, withEmail = true) {
     el(
       "p",
       { class: "small formatted-copy-instructions" },
-      "For email, use Email formatted text and paste into the message body. Plain-text sharing uses the receiving app’s styling.",
+      "Email order opens a filled-in draft. Review it in your mail app before sending.",
     ),
   );
   append(
@@ -4085,15 +4054,20 @@ function showFormattedOrder(order, withEmail = true) {
           toast("Formatted order copied.");
         else showFormattedCopyHelp(formatted, scope);
       },
-      "primary",
+      "",
     ),
     button(
-      "Email formatted text",
-      async () => {
-        const copied = await writeFormattedClipboard(formatted, scope);
-        showFormattedCopyHelp(formatted, scope, { email: true, copied });
+      "Email order",
+      () => {
+        if (!scopeCurrent(scope)) throw new SessionChanged();
+        // Restore the original app's filled-in Mail flow. Literal bullets and
+        // blank lines survive as text; the mail app supplies its own typography.
+        const body = formatted.text.replace(/\n/g, "\r\n");
+        location.href = `mailto:alwholesaleorders@gmail.com?subject=${encodeURIComponent(
+          formatted.subject,
+        )}&body=${encodeURIComponent(body)}`;
       },
-      "",
+      "primary",
       "share",
     ),
   );

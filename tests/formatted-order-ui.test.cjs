@@ -6,7 +6,12 @@ const source = fs.readFileSync(
   require("node:path").join(__dirname, "../public/app.js"),
   "utf8",
 );
-async function fixture({ share, rich = true, copyError = false } = {}) {
+async function fixture({
+  share,
+  rich = true,
+  copyError = false,
+  orderOverride = {},
+} = {}) {
   const { formatOrder, FORMAT_STYLES } = await import(
     "../public/order-format.mjs"
   );
@@ -108,6 +113,7 @@ async function fixture({ share, rich = true, copyError = false } = {}) {
         categoryNames: ["Drinks"],
       },
     ],
+    ...orderOverride,
   };
   context.showFormattedOrder(order);
   return {
@@ -169,40 +175,66 @@ test("blocked rich copying offers a selectable formatted preview instead of sile
   await f.click("Copy plain text");
   assert.deepEqual(f.copies, [f.expected.text]);
 });
-test("email action copies rich HTML and opens an editable composer without degrading to a plain-text body", async () => {
-  const f = await fixture();
-  await f.click("Email formatted text");
+test("email opens immediately with the complete formatted order and no clipboard or paste step", async () => {
+  const f = await fixture({ rich: false, copyError: true });
+  await f.click("Email order");
   assert.equal(
-    await f.richCopies[0][0].data["text/html"].text(),
-    f.expected.html,
+    f.context.location.href.startsWith("mailto:"),
+    true,
+    "Open the filled-in email from the first click.",
   );
-  assert.equal(
-    f.context.location.href,
-    "",
-    "Explain paste before leaving the app.",
-  );
-  await f.click("Open email");
   const url = new URL(f.context.location.href);
-  assert.equal(url.protocol, "mailto:");
   assert.equal(url.pathname, "alwholesaleorders@gmail.com");
   assert.equal(url.searchParams.get("subject"), "Frozen <store>");
-  assert.equal(url.searchParams.has("body"), false);
-  assert.equal(f.shares.length, 0);
-});
-test("manual email copy keeps the entire styled preview and guards a later identity change", async () => {
-  const f = await fixture({ rich: false });
-  await f.click("Email formatted text");
-  assert.equal(f.copies.length, 0);
   assert.equal(
-    f.dialogs.at(-1).content.children.some((node) => node.tag === "article"),
-    true,
+    url.searchParams.get("body"),
+    f.expected.text.replace(/\n/g, "\r\n"),
   );
-  await f.click("Select formatted text");
-  f.stale();
-  await assert.rejects(() =>
-    Promise.resolve().then(() => f.click("Open email")),
+  assert.match(url.searchParams.get("body"), /\r\n\r\n\r\n\.\.\.\r\n\r\n\r\n/);
+  assert.equal(url.searchParams.get("body").includes("AW-1"), false);
+  assert.equal(f.dialogs.length, 1);
+  assert.equal(f.copies.length + f.richCopies.length + f.shares.length, 0);
+});
+test("prefilled email encodes Unicode and reserved characters without creating extra recipients or fields", async () => {
+  const f = await fixture({
+    orderOverride: {
+      storeSnapshot: {
+        name: "Café & Sons + #1?\r\nBcc: nobody@example.invalid",
+      },
+      notes: "Check 50% + A&B? #fresh 🥭\r\nDeliver carefully",
+    },
+  });
+  await f.click("Email order");
+  assert.equal(f.context.location.href.startsWith("mailto:"), true);
+  const url = new URL(f.context.location.href);
+  assert.deepEqual([...url.searchParams.keys()], ["subject", "body"]);
+  assert.equal(url.pathname, "alwholesaleorders@gmail.com");
+  assert.equal(url.searchParams.get("subject"), f.expected.storeName);
+  assert.doesNotMatch(url.searchParams.get("subject"), /[\r\n]/);
+  assert.equal(
+    url.searchParams.get("body"),
+    f.expected.text.replace(/\n/g, "\r\n"),
   );
-  assert.equal(f.context.location.href, "");
+});
+test("prefilled email preserves every line of a large order", async () => {
+  const f = await fixture({
+    orderOverride: {
+      lines: Array.from({ length: 1201 }, (_, i) => ({
+        productId: "p" + i,
+        name: "Product " + i,
+        quantity: i + 1,
+        categoryNames: [i % 2 ? "Drinks" : "Tobacco"],
+        variant: "Flavor 🥭",
+        note: i === 1200 ? "Keep the final line" : "",
+      })),
+    },
+  });
+  await f.click("Email order");
+  assert.equal(f.context.location.href.startsWith("mailto:"), true);
+  const body = new URL(f.context.location.href).searchParams.get("body");
+  assert.equal(body, f.expected.text.replace(/\n/g, "\r\n"));
+  assert.equal(body.split("• ").length - 1, 1201);
+  assert.match(body, /Product 1200: Flavor 🥭 \(1201\) — Keep the final line/);
 });
 test("native sharing uses the full order and cancelling does not copy or send", async () => {
   const f = await fixture({
@@ -229,10 +261,11 @@ test("stale identity cannot copy, share, or enter the email flow", async () => {
   f.stale();
   for (const label of [
     "Copy formatted order",
-    "Email formatted text",
+    "Email order",
     "Share plain text",
     "Send / schedule email",
   ])
     await assert.rejects(() => Promise.resolve().then(() => f.click(label)));
   assert.equal(f.copies.length + f.richCopies.length + f.shares.length, 0);
+  assert.equal(f.context.location.href, "");
 });
