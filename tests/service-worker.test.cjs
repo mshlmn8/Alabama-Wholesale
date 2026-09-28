@@ -179,12 +179,14 @@ test("activation removes old app caches without deleting unrelated caches", asyn
         "aw-v2-20260914-2",
         "alabama-legacy",
         "aw-v2-20260922-4",
+        "aw-v2-20260928-1",
+        "aw-warehouse-v1",
         "other-app",
       ],
     },
   });
   await sw.lifecycle("activate");
-  assert.deepEqual(sw.calls.deleted, ["aw-v2-20260914-2", "alabama-legacy"]);
+  assert.deepEqual(sw.calls.deleted, ["aw-v2-20260914-2", "alabama-legacy", "aw-v2-20260922-4"]);
   assert.equal(sw.calls.claimed, 1);
 });
 

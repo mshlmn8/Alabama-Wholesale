@@ -89,6 +89,7 @@ function fixture({ saveError = null } = {}) {
     return node;
   };
   const context = vm.createContext({
+    orderCredits:{renderBuilderSection:()=>create("section",{})},
     draft: structuredClone(saved),
     storeId: "store-1",
     undo: [],

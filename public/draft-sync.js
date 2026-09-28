@@ -27,13 +27,17 @@ function body(draft) {
       quantity: line.quantity,
       unit: line.unit ?? "each",
       note: clean(line.note),
+      ...(line.selectionMode === "mix" ? {selectionMode:"mix",allowedVariants:clone(line.allowedVariants),excludedVariants:clone(line.excludedVariants || [])} : {}),
     })),
     notes: clean(draft.notes),
+    ...(draft.creditRequestIds ? {creditRequestIds:clone(draft.creditRequestIds)} : {}),
+    ...(draft.replenishmentFeedback ? {replenishmentFeedback:clone(draft.replenishmentFeedback)} : {}),
   };
 }
-const bodyKey = (draft) => JSON.stringify(body(draft));
+const canonicalBody = (draft) => ({...body(draft),creditRequestIds:draft.creditRequestIds||[],replenishmentFeedback:draft.replenishmentFeedback||[]});
+const bodyKey = (draft) => JSON.stringify(canonicalBody(draft));
 const intentKey = (draft) =>
-  JSON.stringify([body(draft), draft.acknowledgeLegacyReview === true]);
+  JSON.stringify([canonicalBody(draft), draft.acknowledgeLegacyReview === true]);
 function matches(draft, remote) {
   return (
     Array.isArray(remote?.lines) &&
@@ -73,6 +77,8 @@ function validRecovery(id, record) {
           "notes",
           "expectedVersion",
           "acknowledgeLegacyReview",
+          "creditRequestIds",
+          "replenishmentFeedback",
         ].includes(key),
       )
     );

@@ -41,6 +41,7 @@ test("browser users including forged admin claims cannot read or write legacy, r
       "state/users",
       "v2_users/owner",
       "v2_orders/order",
+      "v2_storeInventory/stock", "v2_orderPlacements/placed", "v2_orderHandoffs/mail", "v2_storeInventoryCounts/count", "v2_storeInventoryMovements/movement", "v2_storeInventoryReceipts/receipt", "v2_suppliers/vendor", "v2_supplierProducts/mapping", "v2_purchaseOrders/po", "v2_purchaseReceipts/received", "v2_warehouseMovements/change", "v2_returnEvents/pickup",
       "privateArchives/one",
     ]) {
       const ref = doc(client.firestore(), `apps/alabama-wholesale/${resource}`);
@@ -229,4 +230,26 @@ test("Firestore preserves large drafts when the frozen invoice exceeds record by
   assert.equal((await repo.list("ledger")).length, 0);
   assert.deepEqual(await repo.list("counters"), [{ id: "order-numbers", value: 1, version: 1 }]);
   assert.equal((await repo.get("inventory", inventoryId("oversized-product", ""))).reserved, 0);
+});
+
+test('Firestore receiving serializes competing receipts and exact retries across shared warehouse stock',async()=>{
+  await environment.clearFirestore();
+  const actor={uid:'warehouse-owner',role:'master',storeIds:[]};
+  const run=(type,payload,id=randomUUID())=>repo.transaction(tx=>executeCommand(tx,actor,{id,type,payload}));
+  await repo.put('products','purchase-product',{id:'purchase-product',name:'Synthetic cases',variants:[],active:true});
+  await run('inventory.adjust',{productId:'purchase-product',variant:'',onHand:5,reason:'Physical opening count'});
+  const supplier=await run('supplier.save',{name:'Synthetic vendor'});
+  const mapping=await run('supplierProduct.save',{supplierId:supplier.id,productId:'purchase-product',variant:'',unit:'case',packSize:12,orderMultiple:1,unitCostCents:2400});
+  let po=await run('purchase.save',{id:'receiving-po',supplierId:supplier.id,lines:[{id:'case-line',supplierProductId:mapping.id,quantity:10}]});
+  po=await run('purchase.order',{id:po.id,expectedVersion:po.version});
+  const payload={id:po.id,expectedVersion:po.version,lines:[{lineId:'case-line',acceptedQuantity:4,rejectedQuantity:0}]};
+  const ids=[randomUUID(),randomUUID()];
+  const results=await Promise.allSettled(ids.map(id=>run('purchase.receive',payload,id)));
+  assert.equal(results.filter(r=>r.status==='fulfilled').length,1);
+  assert.equal(results.find(r=>r.status==='rejected').reason.code,'VERSION_CONFLICT');
+  const winner=results.findIndex(r=>r.status==='fulfilled');
+  await run('purchase.receive',payload,ids[winner]);
+  assert.equal((await repo.get('inventory',inventoryId('purchase-product',''))).onHand,53);
+  assert.equal((await repo.list('purchaseReceipts')).length,1);
+  assert.equal((await repo.get('purchaseOrders',po.id)).lines[0].outstandingQuantity,6);
 });

@@ -188,6 +188,7 @@ const assets = require("../lib/assets.cjs").createAssetService({
     appOrigin: "http://localhost:8780",
     legacyWritesFrozen: false,
   };
+  await require("./seed-expansion-demo.cjs")(repo,profiles[0]);
   createApp({
     repo,
     auth,

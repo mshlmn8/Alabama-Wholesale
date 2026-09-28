@@ -1,3 +1,7 @@
+import { createOrderCredits } from "./order-credits.js";
+import { createOrderWorkflow } from "./order-workflow.js";
+import { createStoreOperations } from "./store-operations.js";
+import { createAssortmentPanel, assortmentLabel, showPicking } from "./order-assortments.js";
 import { Workspace, StorageFailure, createDraft } from "./storage.js";
 import { openDeviceStorage, createDeviceStorage } from "./device-storage.js";
 import { createStorageRecovery } from "./storage-recovery.js";
@@ -411,6 +415,7 @@ let config,
     "orders",
     "stores",
     "more",
+    "store-inventory",
     "inventory",
     "payments",
     "returns",
@@ -1263,6 +1268,10 @@ async function sendEntry(entry) {
           draftProtectionCache.delete(entry.command.payload.id);
           if (draft?.id === entry.command.payload.id) draft = null;
         }
+        if(entry.command.type === "storeInventory.count" && entry.metadata?.storeCountDraftId) {
+          const counts=scope.workspace.preferences().storeCountDrafts||[];
+          scope.workspace.setPreferences({storeCountDrafts:counts.filter(row=>!(row.id===entry.metadata.storeCountDraftId&&row.storeId===entry.command.payload.storeId&&row.actorId===state?.me?.uid))});
+        }
         scope.workspace.acknowledge(entry.command.id);
         return result;
       },
@@ -1415,6 +1424,7 @@ function newDraftFromOrder(order) {
       quantity: line.quantity || Number(line.qty) || 1,
       unit: line.unit || "each",
       note: line.note || "",
+      ...(line.selectionMode === "mix" ? {selectionMode:"mix",allowedVariants:line.allowedVariants,excludedVariants:line.excludedVariants||[]} : {}),
     }));
   editDraft((d) => {
     d.lines = lines;
@@ -1474,6 +1484,11 @@ async function syncDraft(target = draft) {
 function linePrice(line, store = currentStore()) {
   const p = productById(line.productId);
   if (!p) return null;
+  if (line.selectionMode === "mix") {
+    if (!line.allowedVariants?.length || line.allowedVariants.some(v=>!productVariants(p).includes(v))) return null;
+    const prices=line.allowedVariants.map(variant=>linePrice({...line,selectionMode:"manual",variant},store));
+    return prices.some(price=>price==null)||new Set(prices).size!==1?null:prices[0];
+  }
   const override = store?.priceOverrides?.[p.id];
   const cents =
     typeof override === "number"
@@ -1560,6 +1575,7 @@ function render() {
     ["catalog", "Catalog", "catalog"],
     ["build", "Build order", "cart"],
     ["orders", "Orders", "orders"],
+    ["store-inventory", "Store inventory", "box"],
     ["stores", "Stores", "stores"],
     ["more", "Workspace", "more"],
   ];
@@ -1697,6 +1713,7 @@ function render() {
     stores: renderStores,
     more: renderMore,
     inventory: renderInventory,
+    "store-inventory": () => storeOperations.renderInventory(),
     payments: renderPayments,
     returns: renderReturns,
     notifications: renderNotifications,
@@ -2775,7 +2792,40 @@ function showAddProduct(product, initialVariant) {
     summary,
     el("div", { class: "flavor-actions" }, button("Cancel", m.close), add),
   );
+  const assortmentPanel = createAssortmentPanel({product,el,input,button,field,getNote:()=>note.value,priceFor:linePrice,onAdd:lines=>{
+    if(!scopeCurrent(scope)||storeId!==selectedStoreId||draft?.id!==selectedDraftId)throw new SessionChanged();
+    if(hasUnsavedDraftNotes())throw new Error("Save your latest order notes first.");
+    const current=productById(product.id);
+    if(!current||current.active===false||current.deleted||lines.some(line=>(line.allowedVariants||[line.variant]).some(v=>!productVariants(current).includes(v))))throw new Error("The available flavors changed. Reopen the product.");
+    const nextLines=addSelectedProductLines(draft?.lines||[],lines,uuid);
+    editDraft(d=>{d.lines=nextLines;});m.close();toast("Assortment added to your order.");
+  }});
+  const manualTab=button("Choose flavors",()=>switchTab(false),"primary");
+  const assortmentTab=button("Mix / Each",()=>switchTab(true));
+  function switchTab(mixed){
+    assortmentPanel.hidden=!mixed;list.hidden=mixed;search.hidden=mixed||variants.length<=6;noResults.hidden=true;
+    add.hidden=mixed;summary.hidden=mixed;manualTab.classList.toggle("primary",!mixed);assortmentTab.classList.toggle("primary",mixed);
+    manualTab.setAttribute("aria-pressed",String(!mixed));assortmentTab.setAttribute("aria-pressed",String(mixed));
+  }
+  m.content.prepend(el("div",{class:"actions order-mode-tabs","aria-label":"Flavor selection method"},manualTab,assortmentTab));
+  m.content.append(assortmentPanel);
   updateSelection();
+}
+function showEditMix(original,product,scope,draftId,selectedStoreId){
+  const m=modal("Edit mix",product?.name||original.productId);
+  const quantity=input("number",original.quantity,{min:1,max:1000000,step:1});
+  const note=el("textarea",{rows:2,maxlength:2000});note.value=original.note||"";
+  const variants=product?productVariants(product):[];
+  const selected=new Set(original.allowedVariants);
+  const choices=variants.map(variant=>{const check=input("checkbox","");check.checked=selected.has(variant);check.addEventListener("change",()=>check.checked?selected.add(variant):selected.delete(variant));return el("label",{class:"check-field"},check,variant||"Standard");});
+  append(m.content,field("Total mix quantity",quantity),el("p",{class:"small"},`Unit: ${original.unit}. Checked flavors are allowed.`),...choices,field("Line note",note));
+  const check=()=>{assertBuilderDraft(scope,draftId,selectedStoreId);if(JSON.stringify(findBuilderLine(draft,original.id))!==JSON.stringify(original))throw new Error("This item changed. Reopen it before editing.");};
+  append(m.footer,button("Cancel",m.close),button("Remove item",()=>{check();editDraft(d=>{d.lines=d.lines.filter(l=>l.id!==original.id);});m.close();}),button("Update mix",()=>{
+    check();const count=Number(quantity.value);if(!Number.isSafeInteger(count)||count<1||count>1000000||!selected.size)throw new Error("Enter a whole quantity and keep at least one allowed flavor.");
+    const changed={...original,quantity:count,note:note.value,allowedVariants:variants.filter(v=>selected.has(v)),excludedVariants:variants.filter(v=>!selected.has(v))};
+    if(linePrice(changed)==null)throw new Error("Allowed flavors need one common price. Choose exact flavors when prices differ.");
+    editDraft(d=>{Object.assign(findBuilderLine(d,original.id),changed);});m.close();
+  },"primary"));
 }
 function assertBuilderIdentity(scope, id, selectedStoreId) {
   if (!scopeCurrent(scope) || storeId !== selectedStoreId)
@@ -2818,6 +2868,7 @@ function showEditDraftLine(id) {
   assertBuilderDraft(scope, selectedDraftId, selectedStoreId);
   const original = clone(findBuilderLine(draft, id));
   let product = productById(original.productId);
+  if(original.selectionMode === "mix") return showEditMix(original, product, scope, selectedDraftId, selectedStoreId);
   const variants = product ? productVariants(product) : [];
   const options = variants.map((variant) => [variant, variant || "Standard"]);
   if (!variants.includes(original.variant || ""))
@@ -3255,7 +3306,7 @@ function renderBuilder() {
               el(
                 "div",
                 { class: "builder-flavor-name" },
-                el("span", {}, line.variant || "Standard"),
+                el("span", {}, assortmentLabel(line)),
                 line.note
                   ? el("small", { class: "builder-note-marker" }, "Note added")
                   : null,
@@ -3359,6 +3410,8 @@ function renderBuilder() {
   append(
     root,
     draftStatus,
+    el("div",{class:"actions builder-operations"},button("Check missing items",()=>storeOperations.showMissingItems(),"","spark"),button("Store inventory",()=>setView("store-inventory")),button("Placed orders & additions",()=>storeOperations.showPlacementHistory()),button("Email order",()=>showFormattedOrder(draft),"","share")),
+    draft.parentReference?notice(`Addition to ${draft.parentReference} · New items only. The original order stays unchanged.`):null,
     draft.lines.length
       ? collapsibleOrderItems(
           el(
@@ -3387,6 +3440,7 @@ function renderBuilder() {
           "cart",
         ),
     itemIssue,
+    orderCredits.renderBuilderSection(),
     el(
       "details",
       { class: "builder-notes" },
@@ -3574,7 +3628,7 @@ function lineTable(lines, isDraft = false, store = currentStore()) {
             {},
             line.name || line.productName || p?.name || line.productId,
           ),
-          el("p", { class: "small" }, line.variant || "Standard"),
+          el("p", { class: "small" }, assortmentLabel(line)),
           line.note ? el("p", { class: "small" }, line.note) : null,
         ),
         td(`${line.quantity}${line.unit === "case" ? " cases" : ""}`),
@@ -3591,7 +3645,7 @@ function draftText(order) {
       (line) =>
         `${line.quantity}${line.unit === "case" ? " cases" : ""} · ${
           productById(line.productId)?.name || line.productId
-        }${line.variant ? ` / ${line.variant}` : ""}${
+        }${line.selectionMode === "mix" ? ` / ${assortmentLabel(line)}` : line.variant ? ` / ${line.variant}` : ""}${
           line.note ? ` (${line.note})` : ""
         }`,
     ),
@@ -3931,7 +3985,7 @@ function collapsibleOrderItems(content, key, count) {
   );
 }
 function formattedOrder(order) {
-  return formatOrder(order, {
+  return formatOrder({...order,creditRequests:order.creditRequests||(order.creditRequestIds||[]).map(id=>state?.returns?.find(r=>r.id===id&&r.storeId===order.storeId)).filter(Boolean)}, {
     store: storeById(order.storeId),
     products: state?.products || [],
     categories: state?.categories || [],
@@ -3946,6 +4000,7 @@ function formattedOrderSheet(formatted) {
       "aria-label": "Formatted order preview",
     },
     el("h2", { style: FORMAT_STYLES.heading }, formatted.storeName),
+    formatted.addition ? el("p",{class:"notice"},formatted.addition) : null,
     formatted.groups.flatMap((group, index) => [
       index
         ? el(
@@ -4031,8 +4086,11 @@ function showFormattedCopyHelp(formatted, scope) {
     }),
   );
 }
-function showFormattedOrder(order, withEmail = true) {
+async function showFormattedOrder(order, withEmail = true) {
   const scope = operationScope();
+  const prepared=withEmail?await orderWorkflow.prepareHandoff(order):{order,handoff:null};
+  if(!scopeCurrent(scope))throw new SessionChanged();
+  order=prepared.order;
   const formatted = formattedOrder(order);
   const m = modal("Formatted order", "Ready to copy or email.", true);
   append(
@@ -4044,6 +4102,8 @@ function showFormattedOrder(order, withEmail = true) {
       "Email order opens a filled-in draft. Review it in your mail app before sending.",
     ),
   );
+  if(prepared.warning)append(m.content,notice(prepared.warning));
+  if(prepared.handoff)append(m.content,button("I placed this order",async()=>{await orderWorkflow.markPlaced(prepared);m.close();toast("This exact order is recorded as placed. Confirm its receipt after delivery.");},""));
   append(
     m.footer,
     button("Close", m.close),
@@ -4188,6 +4248,8 @@ async function showOrder(order) {
         "share",
       ),
     );
+  if(!legacy && (order.placementId || ["submitted","approved","picking","delivered"].includes(order.status)))append(m.content,button("Add to this order",()=>orderWorkflow.startAddition(order)));
+  if(!legacy && order.status!=="cancelled")append(m.content,button("Picker list",async()=>{const saved=order.status==="draft"?await syncDraft(order):order;const blob=await orderPdfBlob(saved,"pick-list");download(orderFilename(saved,{store:storeById(saved.storeId),kind:"pick-list"}),blob,"application/pdf");},"","box"));
   if (
     !legacy &&
     orderDocumentOptions(order).some(([kind]) => kind === "invoice")
@@ -4300,6 +4362,9 @@ async function showOrder(order) {
         ),
       ),
     );
+  const pickScope=operationScope();
+  if(staff() && ["approved","picking"].includes(order.status) && order.lines.some(line=>line.selectionMode==="mix"))
+    append(m.content,button("Confirm picked flavors",()=>showPicking({order,el,input,button,modal,command,isCurrent:()=>scopeCurrent(pickScope)&&storeId===order.storeId,onSaved:(updated)=>{m.close();showOrder(updated);}}),"primary"));
   const history = order.statusHistory || order.history || [];
   if (history.length)
     append(
@@ -5703,14 +5768,16 @@ function renderReturns() {
   );
   return root;
 }
-function showReturn(order) {
+function showReturn(order, onCreated) {
+  const returnScope=operationScope(),returnStoreId=storeId;
+  const returnLines=order.lines.flatMap(line=>line.selectionMode==='mix'?(line.allocations||[]).map(allocation=>({...line,...allocation,selectionMode:'manual'})):[line]);
   const m = modal(
     "Request a return",
     `${order.invoiceNumber} · Return quantities use the same units as the delivered order.`,
     true,
   );
   const rows = [];
-  for (const line of order.lines) {
+  for (const line of returnLines) {
     const returned = state.returns
       .filter(
         (r) =>
@@ -5720,7 +5787,7 @@ function showReturn(order) {
         (sum, r) =>
           sum +
           (r.lines || [])
-            .filter((l) => l.lineId === line.id)
+            .filter((l) => l.lineId === line.id && l.variant === line.variant)
             .reduce((s, l) => s + l.quantity, 0),
         0,
       );
@@ -5734,6 +5801,7 @@ function showReturn(order) {
     });
     rows.push({ line, quantity, remaining });
   }
+  const pickup=input("checkbox","",{checked:true});
   const reason = el("textarea", {
     required: true,
     maxlength: 2000,
@@ -5749,7 +5817,7 @@ function showReturn(order) {
           {},
           td(
             el("strong", {}, line.name),
-            el("p", { class: "small" }, line.variant || "Standard"),
+            el("p", { class: "small" }, assortmentLabel(line)),
           ),
           td(`${remaining}${line.unit === "case" ? " cases" : ""}`),
           td(quantity),
@@ -5757,6 +5825,7 @@ function showReturn(order) {
       ),
     ),
     el("div", { class: "mt" }, field("Reason for return", reason)),
+    el("label",{class:"check-field"},pickup,"Request pickup of returned items"),
   );
   append(
     m.footer,
@@ -5775,19 +5844,21 @@ function showReturn(order) {
             throw new Error(
               `Return quantity for ${row.line.name} must be between 0 and ${row.remaining}.`,
             );
-          if (count) lines.push({ lineId: row.line.id, quantity: count });
+          if (count) lines.push({ lineId: row.line.id, variant:row.line.variant, quantity: count });
         }
         if (!lines.length)
           throw new Error("Select at least one item to return.");
         if (!reason.value.trim())
           throw new Error("Describe the reason for the return.");
-        await command("return.create", {
+        if(!scopeCurrent(returnScope)||returnStoreId!==storeId)throw new SessionChanged();
+        const created=await command("return.create", {
           orderId: order.id,
           lines,
+          pickupRequested:pickup.checked,
           reason: reason.value.trim(),
         });
         m.close();
-        setView("returns");
+        if(onCreated)onCreated(created);else setView("returns");
         toast("Return requested. A staff member will review it.");
       },
       "primary",
@@ -5795,82 +5866,7 @@ function showReturn(order) {
   );
 }
 function showReturnDetails(item) {
-  const m = modal(
-    item.creditMemoNumber || "Review return",
-    `${item.invoiceNumber} · ${currentStore()?.name}`,
-    true,
-  );
-  append(
-    m.content,
-    status(item.status),
-    el("p", { class: "mt mb" }, item.reason),
-    table(
-      ["Product", "Quantity", "Credit"],
-      item.lines.map((line) =>
-        el(
-          "tr",
-          {},
-          td(
-            el("strong", {}, line.name),
-            el("p", { class: "small" }, line.variant),
-          ),
-          td(`${line.quantity}${line.unit === "case" ? " cases" : ""}`),
-          td(cash(line.totalCents)),
-        ),
-      ),
-    ),
-    totalRows({
-      subtotal: item.subtotalCents,
-      tax: item.taxCents,
-      total: item.totalCents,
-    }),
-  );
-  if (item.restockWarnings?.length)
-    append(
-      m.content,
-      notice(
-        "Some returned products have unknown stock counts. Staff must perform a stock count before their quantities can be updated.",
-      ),
-    );
-  if (staff() && item.status === "pending") {
-    const restock = input("checkbox", "", { checked: false });
-    append(
-      m.content,
-      el(
-        "label",
-        { class: "check-field mt" },
-        restock,
-        "Returned goods were received and can be restocked",
-      ),
-      el(
-        "p",
-        { class: "small mt" },
-        "Leave unchecked for damaged, missing or nonresalable goods. Approval credits the account once.",
-      ),
-    );
-    append(
-      m.footer,
-      button("Cancel", m.close),
-      button(
-        "Approve & issue credit",
-        async () => {
-          await command("return.approve", {
-            returnId: item.id,
-            restock: restock.checked,
-            expectedVersion: item.version,
-          });
-          m.close();
-          toast("Return approved and account credited.");
-        },
-        "primary",
-      ),
-    );
-  } else
-    append(
-      m.footer,
-      button("Close", m.close),
-      button("Print credit memo", () => window.print(), "", "download"),
-    );
+  return orderCredits.showCreditDetails(item);
 }
 function renderNotifications() {
   const notifications = state.notifications;
@@ -5965,6 +5961,7 @@ function renderMore() {
     ],
     ...(staff()
       ? [
+          ["Wholesale Operations", "Open the separate inventory, purchasing and receiving app.", "box", () => {location.href="/warehouse/";}],
           [
             "Inventory",
             "Count stock, manage reservations and reorder levels.",
@@ -7190,7 +7187,7 @@ function showAssistant() {
                 "div",
                 {},
                 el("strong", {}, product.name),
-                el("p", { class: "small" }, line.variant || "Standard"),
+                el("p", { class: "small" }, assortmentLabel(line)),
                 line.unit === "case"
                   ? el(
                       "p",
@@ -8413,7 +8410,8 @@ window.addEventListener("popstate", () => {
       "orders",
       "stores",
       "more",
-      "inventory",
+      "store-inventory",
+    "inventory",
       "payments",
       "returns",
       "notifications",
@@ -8494,6 +8492,14 @@ window.addEventListener("unhandledrejection", (event) => {
   event.preventDefault();
   toast(friendlyError(event.reason), true);
 });
+function activateAddition(next){
+  if(next.storeId!==storeId||next.status!=="draft")throw new Error("Choose the original store before starting this addition.");
+  ws.mergeRemoteDrafts([next]);draft=ws.getDraft(next.id);draftSync?.seed([next]);
+  ws.rememberPreferences({activeDraftIds:{...preferences().activeDraftIds,[storeId]:next.id}});undo=[];redo=[];setView("build");
+}
+const orderWorkflow=createOrderWorkflow({el,input,button,field,modal,notice,toast,command,getStore:currentStore,getDraft:()=>draft,scope:operationScope,isCurrent:scopeCurrent,syncDraft,activateDraft:activateAddition,refresh});
+const orderCredits=createOrderCredits({el,input,select,button,field,modal,notice,table,td,cash,date,toast,command,api,getStore:currentStore,getDraft:()=>draft,getReturns:()=>state?.returns||[],getActor:()=>state?.me,editDraft,showReturn,downloadCreditMemo:async record=>download(orderFilename(record,{store:currentStore(),kind:"credit-memo"}),await orderPdfBlob(record,"credit-memo"),"application/pdf"),scope:operationScope,isCurrent:scopeCurrent});
+const storeOperations=createStoreOperations({el,input,button,field,modal,notice,table,td,toast,command,api,getStore:currentStore,getProducts:()=>state?.products||[],getCategories:()=>state?.categories||[],getDraft:()=>draft,getWorkspace:()=>ws,getActorId:()=>state?.me?.uid,scope:operationScope,isCurrent:scopeCurrent,editDraft,refresh,addLines:lines=>editDraft(next=>{next.lines=addSelectedProductLines(next.lines,lines);}),confirmPlacementReceipt:placement=>orderWorkflow.showPlacementReceipt(placement),startAddition:placement=>orderWorkflow.startAddition(placement,{placement:true})});
 boot();
 
 async function readImageFile(file) {

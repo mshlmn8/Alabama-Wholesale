@@ -83,10 +83,10 @@ function productCategoryNames(product, byCategory) {
 function productText(product) {
   const hasNamedFlavors = product.lines.some((line) => label(line.variant));
   const rows = product.lines.map((line) => ({
-    flavor: label(line.variant) || (hasNamedFlavors ? "Standard" : ""),
+    flavor: line.selectionMode === "mix" ? "Mix" : label(line.variant) || (hasNamedFlavors ? "Standard" : ""),
     quantity: label(line.quantity),
     unit: line.unit,
-    note: noteText(line.note),
+    note: [noteText(line.note),line.selectionMode === "mix" && line.excludedVariants?.length ? "NO " + line.excludedVariants.map(v=>label(v)||"Standard").join(", ") : ""].filter(Boolean).join("; "),
   }));
   // Stable sorting keeps repeated flavors and their individual notes intact.
   rows.sort((a, b) => compare(a.flavor, b.flavor));
@@ -158,8 +158,10 @@ export function formatOrder(
     .map(({ category, items }) => ({ category, items }));
   const storeName = orderStoreName(order, store);
   const reference = orderReference(order);
-  const notes = noteText(order?.notes);
-  const textParts = [storeName];
+  const creditNotes=(order?.creditRequests || []).map(r=>`${r.status === "approved" ? "Approved" : r.status === "rejected" ? "Rejected" : r.status === "cancelled" ? "Cancelled" : "Requested"} credit / return ${label(r.creditMemoNumber||r.invoiceNumber||r.originalReference||r.id)}: ${noteText(r.reason)}${r.lines?.length ? " — " + r.lines.map(l=>`${label(l.name||l.productId)}${l.variant?" / "+label(l.variant):""}: ${label(l.quantity||"")} ${label(l.unit||"")}`).join(", ") : ""}`).join("\n");
+  const notes = [noteText(order?.notes),creditNotes?"Credits & returns:\n"+creditNotes:""].filter(Boolean).join("\n\n");
+  const addition = order?.additionReference ? "ADDITION TO " + label(order.parentReference || order.additionReference) + " — NEW ITEMS ONLY" : "";
+  const textParts = [storeName, ...(addition ? [addition] : [])];
   if (groups.length) {
     textParts.push(
       groups
@@ -171,6 +173,7 @@ export function formatOrder(
     `<div style="${FORMAT_STYLES.sheet}">`,
     `<h1 style="${FORMAT_STYLES.heading}">${escapeHtml(storeName)}</h1>`,
   ];
+  if(addition) htmlParts.push(`<p style="${FORMAT_STYLES.notes}"><strong>${escapeHtml(addition)}</strong></p>`);
   for (const [index, group] of groups.entries()) {
     if (index) {
       htmlParts.push(
@@ -198,6 +201,7 @@ export function formatOrder(
     storeName,
     reference,
     subject: storeName,
+    ...(addition ? {addition} : {}),
     groups,
     notes,
     text: textParts.join("\n\n"),

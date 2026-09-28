@@ -29,6 +29,7 @@ async function fixture({
     Blob,
     formatOrder,
     FORMAT_STYLES,
+    orderWorkflow:{prepareHandoff:async order=>({order,handoff:null})},
     location: { href: "" },
     document: {
       createRange: () => ({ selectNodeContents() {} }),
@@ -115,7 +116,7 @@ async function fixture({
     ],
     ...orderOverride,
   };
-  context.showFormattedOrder(order);
+  await context.showFormattedOrder(order);
   return {
     context,
     dialogs,

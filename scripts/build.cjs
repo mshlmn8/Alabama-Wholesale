@@ -6,6 +6,8 @@ for (const file of [
   "server.js",
   "lib/auth.cjs",
   "lib/domain.cjs",
+  "lib/purchasing.cjs", "lib/warehouse-routes.cjs", "lib/warehouse-movements.cjs", "lib/purchase-document.cjs", "lib/pick-list.cjs",
+  "lib/order-assortments.cjs", "lib/store-operations.cjs", "lib/replenishment.cjs", "lib/replenishment-ai.cjs", "lib/store-operation-routes.cjs", "lib/order-credits.cjs",
   "lib/repository.cjs",
   "lib/record-capacity.cjs",
   "lib/migration.cjs",
@@ -21,6 +23,8 @@ for (const file of [
   "lib/order-mail.cjs",
   "lib/order-mail-routes.cjs",
   "public/app.js",
+  "public/warehouse/app.js", "public/warehouse/helpers.js", "public/warehouse/screens.js", "public/warehouse/sw.js",
+  "public/store-operations.js", "public/order-assortments.js", "public/order-workflow.js", "public/order-credits.js",
   "public/category-navigation.js",
   "public/catalog-search.js",
   "public/order-names.mjs",
@@ -48,7 +52,9 @@ for (const file of [
   });
 for (const file of [
   "public/index.html",
+  "public/warehouse/index.html", "public/warehouse/styles.css", "public/warehouse/manifest.webmanifest", "public/warehouse/icon.svg",
   "public/styles.css",
+  "public/store-operations.css", "public/order-operations.css",
   "public/builder-layout.css",
   "public/orders-layout.css",
   "public/catalog-photo.css",

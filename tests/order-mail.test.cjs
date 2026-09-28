@@ -828,3 +828,16 @@ test("worker stops claiming new work after its elapsed budget and leaves the res
     8 - result.sent,
   );
 });
+
+test('emailed orders include same-store attached credit requests without deducting them twice',async()=>{
+  const repo=fixture(),calls=[];
+  await repo.put('orders',order.id,{...order,creditRequestIds:['credit','foreign']});
+  await repo.put('returns','credit',{id:'credit',storeId:'one',status:'pending',kind:'adjustment',invoiceNumber:'OLD-22',reason:'Damaged cartons',totalCents:250});
+  await repo.put('returns','foreign',{id:'foreign',storeId:'two',status:'approved',reason:'Private other shop',totalCents:500});
+  await action(repo);
+  assert.equal((await mail.deliverOrderMail(repo,options(calls))).sent,1);
+  assert.match(calls[0].text,/Damaged cartons/);
+  assert.match(calls[0].text,/Requested credit/);
+  assert.doesNotMatch(calls[0].text,/Private other shop/);
+  assert.equal((await repo.get('orders',order.id)).totalCents,2598);
+});
