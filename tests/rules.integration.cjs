@@ -28,6 +28,31 @@ test.after(async () => {
   await db.terminate();
   await environment.cleanup();
 });
+test("Firestore restores a full legacy catalog once under concurrent retries", async () => {
+  await environment.clearFirestore();
+  const { buildSubcategoryRestoration, restoreCatalogSubcategories, RESTORATION_ID } = require('../lib/restore-catalog-subcategories.cjs');
+  const category = { id: 'legacy-drinks', name: 'DRINKS & BAGS', subcategories: [], version: 1, migration: { sourceHash: 'a'.repeat(64) } };
+  const products = Array.from({ length: 619 }, (_, i) => ({ id: `legacy-${i}`, name: `Example water ${i}`, categoryIds: [category.id], subcategory: '', version: 1, priceCents: i + 1, migration: { sourceHash: 'b'.repeat(64) } }));
+  await repo.transaction(async tx => {
+    await tx.set('categories', category.id, category);
+    for (const product of products) await tx.set('products', product.id, product);
+    await tx.set('orders', 'saved-order', { id: 'saved-order', totalCents: 125, lines: [{ productId: products[0].id, quantity: 1 }] });
+  });
+  const orderBefore = await repo.get('orders', 'saved-order');
+  const source = { sourceCategories: [category], sourceProducts: products };
+  const plan = buildSubcategoryRestoration({ categories: [category], products, ...source });
+  const results = await Promise.all([1, 2].map(() => restoreCatalogSubcategories(repo, { ...source, expectedFingerprint: plan.fingerprint })));
+  assert.equal(results.filter(result => result.applied).length, 1);
+  assert.equal(results.filter(result => result.alreadyApplied).length, 1);
+  assert.equal((await repo.list('categories')).length, 7);
+  const saved = await repo.list('products');
+  assert.equal(saved.length, products.length);
+  assert.ok(saved.every(product => product.version === 2 && product.categoryIds.length === 2));
+  assert.deepEqual(await repo.get('orders', 'saved-order'), orderBefore);
+  assert.equal((await repo.get('settings', RESTORATION_ID)).summary.productsUpdated, 619);
+  assert.equal((await repo.list('audit')).length, 1);
+  assert.equal((await repo.list('ledger')).length, 0);
+});
 test("browser users including forged admin claims cannot read or write legacy, roles, orders, archives", async () => {
   for (const client of [
     environment.unauthenticatedContext(),

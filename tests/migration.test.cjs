@@ -43,6 +43,24 @@ function memoryRepository() {
   } };
 }
 
+test('legacy catalog imports create nested categories and retain original product memberships', () => {
+  const source = fixture();
+  source.state.data.value.categories.push({ id: 'tobacco', name: 'TOBACCO' });
+  source.state.data.value.items.push({ id: 'wraps', name: 'Example rolling paper', categoryId: 'tobacco', price: 2 });
+  source.state.data.value.items.push({ id: 'mismatch', name: 'Unclassified item', categoryId: 'tobacco', subcategory: 'Waters', price: 1 });
+  const plan = buildMigration(source, { now });
+  const water = plan.records.find(r => r.collection === 'categories' && r.data.parentId === 'cat' && r.data.name === 'Water');
+  const paper = plan.records.find(r => r.collection === 'categories' && r.data.parentId === 'tobacco' && r.data.name === 'Paper / Wraps');
+  assert.ok(water, 'custom saved subcategory becomes a real child');
+  assert.ok(paper, 'old fallback subcategories become real children');
+  assert.deepEqual(record(plan, 'products', 'water').categoryIds, ['cat', water.id]);
+  assert.deepEqual(record(plan, 'products', 'wraps').categoryIds, ['tobacco', paper.id]);
+  assert.deepEqual(record(plan, 'products', 'mismatch').categoryIds, ['tobacco']);
+  assert.equal(record(plan, 'products', 'water').priceCents, 125);
+  assert.equal(record(plan, 'products', 'water').version, 1);
+  assert.ok(water.data.migration.sourceHash);
+});
+
 test('keeps recognized mixed-sign opening balance and flags negative V7 payment', () => {
   const plan = buildMigration(fixture(), { now });
   const opening = record(plan, 'ledger');

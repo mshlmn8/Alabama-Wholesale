@@ -100,6 +100,17 @@ test("parent filtering includes nested descendants without unrelated products", 
     ["juice", "apple"],
   );
 });
+test("category rows keep the saved legacy and current sort order without mutating state", async () => {
+  const { sortCategories } = await helper;
+  const rows = [
+    { id: "last", sortOrder: 3 },
+    { id: "legacy", order: 1 },
+    { id: "first", sortOrder: 0, order: 5 },
+    { id: "middle", sortOrder: 2 },
+  ];
+  assert.deepEqual(sortCategories(rows).map((row) => row.id), ["first", "legacy", "middle", "last"]);
+  assert.equal(rows[0].id, "last");
+});
 test("malformed legacy category cycles terminate safely", async () => {
   const { categoryFilterIds, categoryTrail } = await helper;
   assert.equal(typeof categoryTrail, "function");
