@@ -1,3 +1,13 @@
+export function sortCategories(categories) {
+  const order = (category) =>
+    Number.isFinite(category.sortOrder)
+      ? category.sortOrder
+      : Number.isFinite(category.order)
+      ? category.order
+      : 0;
+  return [...categories].sort((left, right) => order(left) - order(right));
+}
+
 export function categoryTrail(categories, id) {
   const byId = new Map(categories.map((category) => [category.id, category]));
   const seen = new Set();
