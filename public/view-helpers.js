@@ -121,7 +121,7 @@ export function orderDocumentOptions(order) {
     return [];
   return [
     ["invoice", "Invoice PDF"],
-    ["pick-list", "Pick list"],
+    ...(order.status === "cancelled" ? [] : [["pick-list", "Pick list"]]),
     ["delivery-note", "Delivery note"],
   ];
 }

@@ -1,0 +1,19 @@
+{
+  "id": "/warehouse/",
+  "name": "Alabama Wholesale Operations",
+  "short_name": "AW Operations",
+  "start_url": "/warehouse/",
+  "scope": "/warehouse/",
+  "display": "standalone",
+  "background_color": "#f4f1e8",
+  "theme_color": "#122c3c",
+  "description": "Staff warehouse inventory, purchasing and receiving.",
+  "icons": [
+    {
+      "src": "/warehouse/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -15,6 +15,7 @@ const publicOrder = (order) => {
 };
 const ORDER_SUMMARY_FIELDS = [
   "id",
+  "placementId", "rootPlacementId", "parentOrderId", "parentPlacementId", "rootOrderId", "additionReference", "parentReference", "additionNumber",
   "storeId",
   "storeName",
   "storeSnapshot.name",
@@ -50,6 +51,8 @@ const publicCatalogRecord = (record) => {
 };
 const PUBLIC = path.join(__dirname, "public");
 const BACKUP_COLLECTIONS = [
+  "suppliers", "supplierProducts", "purchaseOrders", "purchaseReceipts",
+  "storeInventory", "storeInventoryCounts", "storeInventoryMovements", "storeInventoryReceipts", "orderPlacements", "orderHandoffs", "warehouseMovements", "returnEvents",
   "categories",
   "products",
   "stores",
@@ -475,7 +478,7 @@ function createApp({
         ]).values(),
       ],
       nextCursor: orderPage.nextCursor,
-      inventory,
+      inventory: actor.role === "customer" ? inventory.map(row => ({id:row.id,productId:row.productId,variant:row.variant,availability:row.onHand-row.reserved>0?"available":"unavailable"})) : inventory,
       ledger: ledger.map((row) => {
         const r = { ...row };
         delete r.legacy;
@@ -595,7 +598,7 @@ function createApp({
     if (req.body.type === "product.save") catalogCache.delete("products");
     if (req.body.type === "category.save") catalogCache.delete("categories");
     res.json({
-      result: ["order.save", "order.submit", "order.transition"].includes(
+      result: /^(purchase\.|supplier\.|supplierProduct\.|inventory\.configure$)/.test(req.body.type) ? require("./lib/warehouse-routes.cjs").projectWarehouseCommand(req.body.type,result,req.actor) : req.body.type === "order.handoff" ? {...result,snapshot:publicOrder(result.snapshot)} : ["order.save", "order.submit", "order.transition", "order.pick", "order.addition"].includes(
         req.body.type,
       )
         ? publicOrder(result)
@@ -895,6 +898,8 @@ function createApp({
       }
     });
   }
+  require("./lib/store-operation-routes.cjs").registerStoreRoutes(app, {repo,now,config,consumeAiBudget,chatAssistant});
+  require("./lib/warehouse-routes.cjs").registerWarehouseRoutes(app, {repo,now});
   app.post("/api/assistant/chat", async (req, res) => {
     const module = require("./lib/assistant-chat.cjs");
     if (
@@ -973,7 +978,7 @@ function createApp({
     );
   });
   app.get("/api/documents/:orderId/:kind", async (req, res) => {
-    const order = await repo.get(
+    let order = await repo.get(
       req.params.kind === "credit-memo" ? "returns" : "orders",
       req.params.orderId,
     );
@@ -981,6 +986,17 @@ function createApp({
       throw error(404, "order_not_found", "This order was not found.");
     access(req.actor, order.storeId);
     const store = await repo.get("stores", order.storeId);
+    if(req.params.kind === 'pick-list' && order.placementId && order.status !== 'cancelled') {
+      const placement=await repo.get('orderPlacements',order.placementId);
+      if(!placement || placement.storeId!==order.storeId || placement.orderId!==order.id)throw error(409,'placement_conflict','The placed order snapshot could not be verified.');
+      order={...order,lines:order.status==='draft'?(placement.receivedLines||placement.lines):order.lines,notes:placement.notes,placedAt:placement.placedAt,provenance:placement.provenance,creditRequestIds:placement.creditRequestIds||order.creditRequestIds||[]};
+    } else if(req.params.kind === 'pick-list' && order.status === 'draft') {
+      const {calculateOrder,loadProductCategories}=require('./lib/domain.cjs');
+      const products=await Promise.all([...new Set(order.lines.map(l=>l.productId))].map(id=>repo.get('products',id)));
+      order={...order,...calculateOrder(order.lines,products,store,await loadProductCategories(repo,products))};
+    }
+    order={...order,creditRequests:(await Promise.all((order.creditRequestIds||[]).map(id=>repo.get('returns',id)))).filter(row=>row?.storeId===order.storeId)};
+    if(req.params.kind==='pick-list')order=await require('./lib/pick-list.cjs').withWarehouseLocations(order,repo);
     const render = documents || require("./lib/documents.cjs").renderDocument;
     const buffer = await render(order, store, req.params.kind);
     const { orderFilename } = await import("./public/order-names.mjs");

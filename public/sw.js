@@ -1,7 +1,8 @@
-const VERSION = "aw-v2-20260922-4";
+const VERSION = "aw-v2-20260928-1";
 const SHELL = [
   "/",
   "/app.js",
+  "/store-operations.js", "/store-operations.css", "/order-operations.css", "/order-assortments.js", "/order-workflow.js", "/order-credits.js",
   "/category-navigation.js",
   "/catalog-search.js",
   "/order-names.mjs",
@@ -65,7 +66,7 @@ self.addEventListener("activate", (event) => {
       try {
         const old = (await caches.keys()).filter(
           (key) =>
-            (key.startsWith("aw-") || key.startsWith("alabama-")) &&
+            (key.startsWith("aw-v2-") || key.startsWith("alabama-")) &&
             key !== VERSION,
         );
         await Promise.allSettled(old.map((key) => caches.delete(key)));

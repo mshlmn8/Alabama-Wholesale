@@ -89,6 +89,9 @@ function selectionKey(line) {
     line.variant ?? "",
     line.unit ?? "each",
     line.note ?? "",
+    line.selectionMode ?? "manual",
+    line.allowedVariants ?? [],
+    line.excludedVariants ?? [],
   ]);
 }
 

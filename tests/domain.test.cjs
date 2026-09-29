@@ -529,3 +529,10 @@ test('Standard compatibility is server-owned, sticky, and never granted to new n
   await rejectsCode(()=>f.run('product.save',{id:standard.id,variants:['Lime'],expectedVersion:standard.version-1}),'VERSION_CONFLICT');
   assert.deepEqual(f.get('products',standard.id).variants,['Grape']);
 });
+
+test('cached order transitions recheck current customer permissions after role downgrade',async()=>{
+ const f=fixture();const o=await submitted(f);const payload={id:o.id,expectedVersion:o.version,status:'approved'};
+ await f.run('order.transition',payload,salesman,'approval-replay');
+ await rejectsCode(()=>f.run('order.transition',payload,{...salesman,role:'customer'},'approval-replay'),'FORBIDDEN');
+ assert.equal(f.get('orders',o.id).status,'approved');
+});

@@ -23,6 +23,9 @@ class Control {
     this.validity = { valid: true };
     if (attrs.type === "file") this.files = [];
   }
+  prepend(...children) {
+    this.children.unshift(...children.filter(item=>item!=null));
+  }
   append(...children) {
     this.children.push(...children.filter((item) => item != null));
   }
@@ -61,6 +64,7 @@ class Control {
   }
 }
 function walk(node) {
+  if(node.hidden)return [];
   return [
     node,
     ...node.children.flatMap((item) =>
@@ -80,6 +84,7 @@ async function fixture({
   const helpers = {
     ...(await load("catalog-variants.js")),
     ...(await load("order-selection.js")),
+    ...(await load("order-assortments.js")),
   };
   let sequence = 0,
     dialog;

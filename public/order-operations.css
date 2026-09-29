@@ -1,0 +1,13 @@
+/* Ordering operations share the existing catalog and builder visual language. */
+.assortment-tabs,.assortment-panel .actions,.builder-operations{display:flex;flex-wrap:wrap;gap:.55rem;margin-block:.8rem}
+.assortment-tabs [aria-pressed="true"]{border-color:var(--accent,#b9d978)}
+.assortment-panel[hidden]{display:none}
+.assortment-panel{padding-block:.8rem}
+.assortment-exceptions{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:.55rem;max-height:260px;overflow:auto;padding:.6rem 0}
+.assortment-exceptions .check-field{display:flex;align-items:center;gap:.5rem;padding:.65rem;border:1px solid var(--line,#4b5247);border-radius:10px}
+.assortment-exceptions [hidden]{display:none}
+.assortment-preview{font-weight:650;padding:.9rem;border:1px solid var(--line,#4b5247);border-radius:12px}
+.builder-credits{margin:1rem 0;padding:1rem;border:1px solid var(--line,#4b5247);border-radius:14px}
+.builder-credits .actions{display:flex;gap:.5rem;flex-wrap:wrap}
+@media(max-width:760px){.mobile-nav{grid-template-columns:repeat(7,minmax(62px,1fr));overflow-x:auto}.mobile-nav a{font-size:.64rem;min-width:62px}.builder-operations .btn{flex:1 1 auto}.assortment-exceptions{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media print{.builder-operations,.mobile-nav{display:none}}
