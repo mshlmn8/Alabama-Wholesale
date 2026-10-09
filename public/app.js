@@ -12,6 +12,7 @@ import { preparePhotoProduct } from "./catalog-photo-edit.js";
 import { createGeminiChat } from "./gemini-chat.js";
 import { createDraftSync } from "./draft-sync.js";
 import { createStorePicker } from "./store-picker.js";
+import { observeWorkspaceChrome } from "./workspace-chrome.js";
 import {
   categoryTrail,
   categoryFilterIds,
@@ -99,6 +100,7 @@ const iconPaths = {
   user: "M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0M4 21v-2a8 8 0 0 1 16 0v2",
   edit: "m4 16 12-12 4 4L8 20H4zm10-10 4 4",
   return: "M9 4 3 10l6 6M3 10h11a6 6 0 0 1 0 12",
+  adjust: "M4 7h16M4 17h16M9 4v6M15 14v6",
 };
 function icon(name) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -436,6 +438,11 @@ let config,
   loading = false;
 const orderCollapseStates = new Map();
 let storePicker = null;
+let workspaceChrome = null;
+function disposeWorkspaceChrome() {
+  workspaceChrome?.();
+  workspaceChrome = null;
+}
 let draftSync = null;
 let orderDownloads = null;
 let deviceStorageRecovery = null;
@@ -1532,13 +1539,13 @@ function balance(id) {
       0,
     );
 }
-function navLink(key, label, symbol) {
+function navLink(key, label, symbol, active = view === key) {
   return el(
     "a",
     {
       href: `#/${key}`,
-      class: view === key ? "active" : "",
-      "aria-current": view === key ? "page" : null,
+      class: active ? "active" : "",
+      "aria-current": active ? (view === key ? "page" : "true") : null,
       onClick: (event) => {
         if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
           return;
@@ -1550,8 +1557,49 @@ function navLink(key, label, symbol) {
     label,
   );
 }
+function toggleWorkspaceTheme() {
+  ws.rememberPreferences({
+    theme:
+      document.documentElement.dataset.theme === "light" ? "dark" : "light",
+  });
+  render();
+}
+function showWorkspaceTools() {
+  const scope = operationScope();
+  const m = modal("Workspace tools", workspaceProtection().label);
+  const action = (label, symbol, fn) =>
+    button(
+      label,
+      () => {
+        if (!scopeCurrent(scope)) throw new SessionChanged();
+        m.close();
+        return fn();
+      },
+      "workspace-tool-action",
+      symbol,
+    );
+  append(
+    m.content,
+    el(
+      "div",
+      { class: "workspace-tool-actions" },
+      action("Open current order", "cart", () => setView("build")),
+      action("Chat with Gemini", "spark", () => geminiChat.open()),
+      action("Refresh workspace", "refresh", () => refresh()),
+      action("Saving details & sync", "check", showSyncCenter),
+      action(
+        document.documentElement.dataset.theme === "light"
+          ? "Switch to dark appearance"
+          : "Switch to light appearance",
+        "sun",
+        toggleWorkspaceTheme,
+      ),
+    ),
+  );
+}
 function render() {
   if (!state) return;
+  disposeWorkspaceChrome();
   const active = document.activeElement,
     activeId = active?.id,
     start = active?.selectionStart,
@@ -1586,7 +1634,18 @@ function render() {
     el(
       "nav",
       { "aria-label": "Main navigation" },
-      nav.map(([key, label, symbol]) => navLink(key, label, symbol)),
+      nav.map(([key, label, symbol]) =>
+        navLink(
+          key,
+          label,
+          symbol,
+          view === key ||
+            (key === "more" &&
+              ["inventory", "payments", "returns", "notifications"].includes(
+                view,
+              )),
+        ),
+      ),
     ),
     el(
       "footer",
@@ -1622,32 +1681,54 @@ function render() {
   if (unread())
     append(notifications, el("span", { class: "badge-count" }, unread()));
   const cart = iconButton("Open current order", "cart", () => setView("build"));
+  cart.classList.add("desktop-action");
   if (draft?.lines.length)
     append(cart, el("span", { class: "badge-count" }, draft.lines.length));
   const protection = workspaceProtection();
   const pending = ws.pending().length;
+  const refreshButton = iconButton("Refresh workspace", "refresh", () =>
+    refresh(),
+  );
+  refreshButton.classList.add("desktop-action");
+  const themeButton = iconButton(
+    "Toggle light or dark theme",
+    "sun",
+    toggleWorkspaceTheme,
+  );
+  themeButton.classList.add("desktop-action");
+  const toolsButton = iconButton(
+    "Workspace tools",
+    "adjust",
+    showWorkspaceTools,
+  );
+  toolsButton.id = "workspace-tools";
+  toolsButton.setAttribute("aria-haspopup", "dialog");
   const bar = el(
     "header",
     { class: "topbar" },
-    brand("mobile-brand"),
+    el("span", { class: "workspace-mark", "aria-hidden": "true" }, "AW"),
     el(
       "div",
       { class: "store-switch" },
       el("label", { for: "store-switch" }, "Ordering for"),
-      switcher,
+      el(
+        "div",
+        { class: "store-context" },
+        switcher,
+        el(
+          "div",
+          { class: "sync-bar" },
+          el("span", {
+            id: "workspace-sync-dot",
+            class: `sync-dot ${protection.tone}`,
+          }),
+          el("span", { id: "workspace-sync-label" }, protection.label),
+        ),
+      ),
     ),
     el(
       "div",
       { class: "sync-and-chat" },
-      el(
-        "div",
-        { class: "sync-bar" },
-        el("span", {
-          id: "workspace-sync-dot",
-          class: `sync-dot ${protection.tone}`,
-        }),
-        el("span", { id: "workspace-sync-label" }, protection.label),
-      ),
       el(
         "button",
         {
@@ -1663,18 +1744,11 @@ function render() {
     el(
       "div",
       { class: "top-actions" },
-      iconButton("Refresh workspace", "refresh", () => refresh()),
+      refreshButton,
       notifications,
       cart,
-      iconButton("Toggle light or dark theme", "sun", () => {
-        ws.rememberPreferences({
-          theme:
-            document.documentElement.dataset.theme === "light"
-              ? "dark"
-              : "light",
-        });
-        render();
-      }),
+      themeButton,
+      toolsButton,
     ),
   );
   const main = el("main", { id: "main", class: "content" });
@@ -1722,19 +1796,29 @@ function render() {
   const mobile = el(
     "nav",
     { class: "mobile-nav", "aria-label": "Mobile navigation" },
-    nav.map(([key, label, symbol]) =>
-      navLink(
-        key,
-        key === "more" ? "More" : key === "build" ? "Build" : label,
-        symbol,
+    nav
+      .filter(([key]) => !["home", "store-inventory"].includes(key))
+      .map(([key, label, symbol]) =>
+        navLink(
+          key,
+          key === "more" ? "More" : key === "build" ? "Build" : label,
+          symbol,
+          view === key ||
+            (key === "more" &&
+              !["catalog", "build", "orders", "stores"].includes(view)),
+        ),
       ),
-    ),
   );
   $("app").replaceChildren(
     aside,
     el("div", { class: "workspace" }, bar, main),
     mobile,
   );
+  workspaceChrome = observeWorkspaceChrome($("app"), {
+    header: bar,
+    navigation: mobile,
+    dock: main.querySelector(".builder-review-bar, .catalog-order-dock"),
+  });
   if (activeId && $(activeId)) {
     const node = $(activeId);
     node.focus({ preventScroll: true });
@@ -1844,7 +1928,7 @@ function renderHome() {
   );
   const root = el(
     "div",
-    { class: "stack" },
+    { class: "stack overview-page" },
     heading(
       "Overview",
       store
@@ -1937,7 +2021,7 @@ function renderHome() {
     root,
     el(
       "section",
-      { class: "grid", "aria-label": "Account overview" },
+      { class: "grid overview-metrics", "aria-label": "Account overview" },
       metrics.map(([label, value, note, target]) =>
         el(
           "div",
@@ -2062,8 +2146,8 @@ function orderList(orders) {
           order.totalCents != null
             ? cash(order.totalCents)
             : order.total != null
-            ? cash(Math.round(order.total * 100))
-            : "Draft",
+              ? cash(Math.round(order.total * 100))
+              : "Draft",
         ),
         button("Open", () => showOrder(order), "subtle"),
       ),
@@ -2185,11 +2269,64 @@ function renderCatalog() {
   const gridButton = button("Grid", () => updateLayout("grid"), "", "catalog");
   const gridOptions = el(
     "div",
-    { class: "catalog-grid-options catalog-layout-controls" },
+    {
+      class:
+        "catalog-grid-options catalog-layout-controls catalog-display-options",
+    },
     el("label", { for: "catalog-columns" }, "Columns"),
     columns,
     el("label", { class: "check-field" }, compact, "Compact"),
   );
+  const displayButton = iconButton("Catalog display settings", "adjust", () => {
+    if (!scopeCurrent(scope)) throw new SessionChanged();
+    const m = modal(
+      "Catalog display",
+      "Choose your grid layout. Column count adapts to fit your screen.",
+    );
+    append(m.content, gridOptions);
+    append(m.footer, button("Done", m.close, "primary"));
+  });
+  displayButton.setAttribute("aria-haspopup", "dialog");
+  const toolsButton = button(
+    "Catalog tools",
+    () => {
+      if (!scopeCurrent(scope)) throw new SessionChanged();
+      const m = modal(
+        "Catalog tools",
+        master()
+          ? "Create products or start an order from a note."
+          : "Start an order from a note.",
+      );
+      const action = (label, fn, symbol) =>
+        button(
+          label,
+          () => {
+            if (!scopeCurrent(scope)) throw new SessionChanged();
+            m.close();
+            return fn();
+          },
+          "workspace-tool-action",
+          symbol,
+        );
+      append(
+        m.content,
+        el(
+          "div",
+          { class: "workspace-tool-actions" },
+          master()
+            ? action("Add product", () => showProductEditor(), "plus")
+            : null,
+          master()
+            ? action("Add from photo", () => catalogPhoto.open(), "spark")
+            : null,
+          action("Draft with AI", showAssistant, "spark"),
+        ),
+      );
+    },
+    "subtle",
+    "more",
+  );
+  toolsButton.setAttribute("aria-haspopup", "dialog");
   const results = el("div", { class: "catalog-results" });
   const root = el(
     "div",
@@ -2197,21 +2334,12 @@ function renderCatalog() {
       class: "catalog-page",
       "data-view": layout.view,
     },
-    heading("Catalog", `${candidates.length} products`, [
-      master()
-        ? button("Add product", () => showProductEditor(), "", "plus")
-        : null,
-      master()
-        ? button("Add from photo", () => catalogPhoto.open(), "", "spark")
-        : null,
-      scanButton,
-      button("Draft with AI", showAssistant, "primary", "spark"),
-    ]),
+    heading("Catalog", `${candidates.length} products`, [toolsButton]),
     el(
       "div",
       { class: "filters catalog-filters" },
       el("div", { class: "search" }, searchField),
-      favoritesButton,
+      scanButton,
     ),
     categoryNavigation,
     el(
@@ -2221,6 +2349,7 @@ function renderCatalog() {
       el(
         "div",
         { class: "catalog-presentation-controls" },
+        favoritesButton,
         el(
           "div",
           {
@@ -2231,13 +2360,8 @@ function renderCatalog() {
           listButton,
           gridButton,
         ),
-        gridOptions,
+        displayButton,
       ),
-    ),
-    el(
-      "p",
-      { class: "catalog-tile-hint small" },
-      "Tap a tile for the full name, options and price.",
     ),
     results,
   );
@@ -2276,6 +2400,7 @@ function renderCatalog() {
     root.dataset.columns = isGrid ? layout.columns : 1;
     root.style.setProperty("--catalog-columns", isGrid ? layout.columns : 1);
     gridOptions.hidden = !isGrid;
+    displayButton.hidden = !isGrid;
     listButton.setAttribute("aria-pressed", String(!isGrid));
     gridButton.setAttribute("aria-pressed", String(isGrid));
   }
@@ -3136,6 +3261,8 @@ function renderBuilder() {
     { "data-builder-total": "true", "aria-live": "polite" },
     cash(totals.total),
   );
+  const subtotalValue = el("span", {}, cash(totals.subtotal));
+  const taxValue = el("span", {}, cash(totals.tax));
   const itemIssue = el(
     "p",
     { class: "builder-issue small", hidden: !totals.missing.length },
@@ -3152,6 +3279,8 @@ function renderBuilder() {
       return;
     const next = draftTotals();
     totalValue.textContent = cash(next.total);
+    subtotalValue.textContent = cash(next.subtotal);
+    taxValue.textContent = cash(next.tax);
     review.disabled = !draft.lines.length || next.missing.length > 0;
     draftStatus.querySelectorAll("[data-draft-history] button")[0].disabled =
       !undo.length;
@@ -3393,6 +3522,13 @@ function renderBuilder() {
   const summary = el(
     "aside",
     { class: "builder-review-bar", "aria-label": "Order total and review" },
+    el("h2", { class: "builder-review-heading" }, "Order summary"),
+    el(
+      "dl",
+      { class: "builder-review-details" },
+      el("div", {}, el("dt", {}, "Subtotal"), el("dd", {}, subtotalValue)),
+      el("div", {}, el("dt", {}, "Estimated tax"), el("dd", {}, taxValue)),
+    ),
     el(
       "div",
       { class: "builder-review-total" },
@@ -3405,66 +3541,93 @@ function renderBuilder() {
       `${groups.length} products · ${draft.lines.length} lines`,
     ),
     review,
+    el(
+      "p",
+      { class: "builder-review-hint small" },
+      "Review quantities and delivery notes before submitting.",
+    ),
   );
   review.disabled = !draft.lines.length || totals.missing.length > 0;
   append(
     root,
-    draftStatus,
-    el("div",{class:"actions builder-operations"},button("Check missing items",()=>storeOperations.showMissingItems(),"","spark"),button("Store inventory",()=>setView("store-inventory")),button("Placed orders & additions",()=>storeOperations.showPlacementHistory()),button("Email order",()=>showFormattedOrder(draft),"","share")),
-    draft.parentReference?notice(`Addition to ${draft.parentReference} · New items only. The original order stays unchanged.`):null,
-    draft.lines.length
-      ? collapsibleOrderItems(
-          el(
-            "section",
-            { class: "builder-sheet", "aria-label": "Order items" },
-            el(
-              "div",
-              { class: "builder-columns small", "aria-hidden": "true" },
-              el("span", {}, "Product / flavor"),
-              el("span", {}, "Qty"),
-              el("span", {}, "Amount"),
-              el("span"),
-            ),
-            lines,
-          ),
-          `${draft.id}/builder`,
-          draft.lines.length,
-        )
-      : empty(
-          "Add your first product",
-          "Changes save online automatically when connected.",
-          [
-            button("Browse catalog", () => setView("catalog"), "primary"),
-            button("Draft with AI", showAssistant),
-          ],
-          "cart",
-        ),
-    itemIssue,
-    orderCredits.renderBuilderSection(),
     el(
-      "details",
-      { class: "builder-notes" },
-      el("summary", {}, "Order notes & delivery instructions"),
-      field("Order notes", note),
-      el(
-        "p",
-        {
-          class: "small",
-          "data-draft-protection": draft.id,
-          "aria-live": "polite",
-        },
-        draftProtection(draft.id).label,
-      ),
+      "div",
+      { class: "actions builder-operations" },
+      button("Check missing items", () => storeOperations.showMissingItems(), "", "spark"),
+      button("Store inventory", () => setView("store-inventory")),
+      button("Placed orders & additions", () => storeOperations.showPlacementHistory()),
+      button("Email order", () => showFormattedOrder(draft), "", "share"),
     ),
-    saved.length > 1
-      ? el(
-          "details",
-          { class: "builder-other-drafts" },
-          el("summary", {}, "Other saved drafts"),
-          renderDraftList(saved.filter((item) => item.id !== draft.id)),
-        )
+    draft.parentReference
+      ? notice(`Addition to ${draft.parentReference} · New items only. The original order stays unchanged.`)
       : null,
-    summary,
+    el(
+      "div",
+      { class: "builder-layout" },
+      el(
+        "div",
+        { class: "builder-body" },
+        draft.lines.length
+          ? collapsibleOrderItems(
+              el(
+                "section",
+                { class: "builder-sheet", "aria-label": "Order items" },
+                el(
+                  "div",
+                  { class: "builder-columns small", "aria-hidden": "true" },
+                  el("span", {}, "Product / flavor"),
+                  el("span", {}, "Qty"),
+                  el("span", {}, "Amount"),
+                  el("span"),
+                ),
+                lines,
+              ),
+              `${draft.id}/builder`,
+              draft.lines.length,
+              draftStatus,
+            )
+          : el(
+              "section",
+              { class: "builder-empty" },
+              draftStatus,
+              empty(
+                "Add your first product",
+                "Changes save online automatically when connected.",
+                [
+                  button("Browse catalog", () => setView("catalog"), "primary"),
+                  button("Draft with AI", showAssistant),
+                ],
+                "cart",
+              ),
+            ),
+        itemIssue,
+        orderCredits.renderBuilderSection(),
+        el(
+          "details",
+          { class: "builder-notes" },
+          el("summary", {}, "Order notes & delivery instructions"),
+          field("Order notes", note),
+          el(
+            "p",
+            {
+              class: "small",
+              "data-draft-protection": draft.id,
+              "aria-live": "polite",
+            },
+            draftProtection(draft.id).label,
+          ),
+        ),
+        saved.length > 1
+          ? el(
+              "details",
+              { class: "builder-other-drafts" },
+              el("summary", {}, "Other saved drafts"),
+              renderDraftList(saved.filter((item) => item.id !== draft.id)),
+            )
+          : null,
+      ),
+      summary,
+    ),
   );
   return root;
 }
@@ -3967,7 +4130,7 @@ function orderCollapseButton(label, content, key) {
   });
   return toggle;
 }
-function collapsibleOrderItems(content, key, count) {
+function collapsibleOrderItems(content, key, count, toolbar = null) {
   return el(
     "section",
     { class: "order-items-section" },
@@ -3979,6 +4142,7 @@ function collapsibleOrderItems(content, key, count) {
         {},
         `Order items · ${count} ${count === 1 ? "line" : "lines"}`,
       ),
+      toolbar,
       orderCollapseButton("order items", content, key),
     ),
     content,
@@ -4517,7 +4681,7 @@ async function showOrder(order) {
 function renderStores() {
   const root = el(
     "div",
-    {},
+    { class: "stores-page" },
     heading(
       "Customer stores",
       "Keep contacts, pricing and account terms connected to the right store.",
@@ -5922,9 +6086,51 @@ function renderNotifications() {
   return root;
 }
 
+function workspaceToolGroup(title, options) {
+  const scope = operationScope();
+  const titleId = `workspace-group-${uuid()}`;
+  return el(
+    "section",
+    { class: "workspace-tool-group", "aria-labelledby": titleId },
+    el("h2", { id: titleId }, title),
+    el(
+      "div",
+      { class: "workspace-tool-list" },
+      options.map(([name, description, symbol, action]) => {
+        const row = button(
+          "",
+          () => {
+            if (!scopeCurrent(scope)) throw new SessionChanged();
+            return action();
+          },
+          "workspace-tool-row",
+        );
+        row.setAttribute("aria-label", name);
+        append(
+          row,
+          el("span", { class: "workspace-tool-icon" }, icon(symbol)),
+          el(
+            "span",
+            { class: "workspace-tool-copy" },
+            el("strong", {}, name),
+            el("small", {}, description),
+          ),
+          icon("arrow"),
+        );
+        return row;
+      }),
+    ),
+  );
+}
 function renderMore() {
   const me = state.me;
   const options = [
+    [
+      "Overview",
+      "Continue your current order and view account activity.",
+      "home",
+      () => setView("home"),
+    ],
     [
       "Chat with Gemini",
       "Ask questions about products or get help using the app.",
@@ -5971,6 +6177,12 @@ function renderMore() {
         ]
       : []),
     [
+      "Store inventory",
+      "Count store stock and prepare replenishment orders.",
+      "box",
+      () => setView("store-inventory"),
+    ],
+    [
       "Order templates",
       "Keep reusable notes and packing instructions.",
       "orders",
@@ -6003,11 +6215,11 @@ function renderMore() {
   ];
   const root = el(
     "div",
-    { class: "stack" },
+    { class: "stack workspace-page" },
     heading("Workspace", "Your account, ordering tools and administration."),
     el(
       "div",
-      { class: "panel split" },
+      { class: "panel split workspace-account" },
       el(
         "div",
         {},
@@ -6018,20 +6230,7 @@ function renderMore() {
       el(
         "div",
         { class: "actions" },
-        button(
-          "Toggle theme",
-          () => {
-            ws.rememberPreferences({
-              theme:
-                document.documentElement.dataset.theme === "light"
-                  ? "dark"
-                  : "light",
-            });
-            render();
-          },
-          "",
-          "sun",
-        ),
+        button("Toggle theme", toggleWorkspaceTheme, "", "sun"),
         button("Sign out", signOut),
       ),
     ),
@@ -6040,39 +6239,90 @@ function renderMore() {
     root,
     el(
       "div",
-      { class: "grid tool-grid" },
-      options.map(([title, description, symbol, action]) =>
-        el(
-          "section",
-          { class: "panel" },
-          el("div", { class: "activity-icon mb" }, icon(symbol)),
-          el("h2", {}, title),
-          el("p", { class: "small" }, description),
-          el("div", { class: "actions" }, button("Open", action, "", "arrow")),
+      { class: "workspace-tools-grid" },
+      [
+        [
+          "Ordering",
+          [
+            "Overview",
+            "Chat with Gemini",
+            "Order templates",
+            "Builder settings",
+            "Store inventory",
+          ],
+        ],
+        [
+          "Account & operations",
+          [
+            "Account & payments",
+            "Returns & credits",
+            "Notifications",
+            "Inventory",
+            "Wholesale Operations",
+          ],
+        ],
+        [
+          "Saving & device",
+          ["Notification preferences", "Sync center", "Workspace backup"],
+        ],
+      ].map(([title, names]) =>
+        workspaceToolGroup(
+          title,
+          options.filter(([name]) => names.includes(name)),
         ),
       ),
+      master()
+        ? workspaceToolGroup("Administration", [
+            ...options.filter(([name]) => name === "Product photos"),
+            [
+              "Invite staff or customer",
+              "Invite an individual account with the right store access.",
+              "user",
+              showInvite,
+            ],
+            [
+              "Manage categories",
+              "Organize categories and their subcategories.",
+              "catalog",
+              showCategories,
+            ],
+            [
+              "Migration & reconciliation",
+              "Review imported records and opening balances.",
+              "stores",
+              showMigration,
+            ],
+            [
+              "Verify business backup",
+              "Check a complete copy of business records.",
+              "download",
+              showBusinessBackup,
+            ],
+            [
+              "Audit activity",
+              "Review recorded changes to the workspace.",
+              "orders",
+              showAudit,
+            ],
+            [
+              "Order email settings",
+              "Manage the existing order email service.",
+              "edit",
+              showOrderEmailSettings,
+            ],
+            [
+              "Email delivery status",
+              "Review delivery attempts and failures.",
+              "bell",
+              showEmailDelivery,
+            ],
+          ])
+        : null,
     ),
   );
   if (master()) {
     append(
       root,
-      el(
-        "section",
-        { class: "panel" },
-        el("div", { class: "eyebrow" }, "Administration"),
-        el("h2", {}, "Manage your wholesale operation"),
-        el(
-          "div",
-          { class: "actions" },
-          button("Invite staff or customer", showInvite, "primary", "user"),
-          button("Manage categories", showCategories),
-          button("Migration & reconciliation", showMigration),
-          button("Verify business backup", showBusinessBackup),
-          button("Audit activity", showAudit),
-          button("Order email settings", showOrderEmailSettings),
-          button("Email delivery status", showEmailDelivery),
-        ),
-      ),
       el(
         "section",
         { class: "panel" },
@@ -7430,6 +7680,7 @@ function showScanner() {
 }
 
 function renderAuth(error = "") {
+  disposeWorkspaceChrome();
   storePicker?.dispose();
   storePicker = null;
   state = null;
@@ -7962,6 +8213,7 @@ const productPhotos = createProductPhotos({
   onApplied: () => refresh({ renderPage: true, passive: true }),
 });
 async function onIdentity(user) {
+  disposeWorkspaceChrome();
   orderStoreScope = "selected";
   orderFilter = "";
   resetOrderHistory();

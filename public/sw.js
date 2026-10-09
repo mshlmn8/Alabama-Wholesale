@@ -1,4 +1,4 @@
-const VERSION = "aw-v2-20260928-1";
+const VERSION = "aw-v2-20261011-1";
 const SHELL = [
   "/",
   "/app.js",
@@ -23,6 +23,8 @@ const SHELL = [
   "/styles.css",
   "/builder-layout.css",
   "/orders-layout.css",
+  "/workspace-layout.css",
+  "/workspace-chrome.js",
   "/storage.js",
   "/device-storage.js",
   "/storage-recovery.js",
