@@ -3772,7 +3772,7 @@ async function showSubmit() {
   );
 }
 function lineTable(lines, isDraft = false, store = currentStore()) {
-  return table(
+  const result = table(
     ["Product / variant", "Quantity", "Price", "Line total"],
     lines.map((line) => {
       const p = productById(line.productId);
@@ -3800,6 +3800,19 @@ function lineTable(lines, isDraft = false, store = currentStore()) {
       );
     }),
   );
+  result.classList.add("order-line-table");
+  result.querySelector("table").setAttribute("role", "table");
+  for (const group of result.querySelectorAll("thead, tbody"))
+    group.setAttribute("role", "rowgroup");
+  for (const row of result.querySelectorAll("tr")) {
+    row.setAttribute("role", "row");
+    [...row.children].forEach((cell, index) => {
+      cell.setAttribute("role", cell.tagName === "TH" ? "columnheader" : "cell");
+      if (cell.tagName === "TD")
+        cell.dataset.label = ["Product / variant", "Quantity", "Price", "Line total"][index];
+    });
+  }
+  return result;
 }
 function draftText(order) {
   return [

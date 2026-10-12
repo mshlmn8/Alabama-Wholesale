@@ -1011,6 +1011,60 @@ main.content {
     flex-direction: column;
   }
 }
+/* Order reviews keep every quantity and amount beside its product on phones. */
+.order-line-table td:first-child {
+  overflow-wrap: anywhere;
+}
+@media screen and (max-width: 900px) {
+  .order-line-table {
+    overflow: visible;
+  }
+  .order-line-table table,
+  .order-line-table tbody {
+    display: block;
+    min-width: 0;
+    width: 100%;
+  }
+  .order-line-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .order-line-table tbody tr {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    padding: 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .order-line-table tbody tr:last-child {
+    border-bottom: 0;
+  }
+  .order-line-table td {
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    overflow-wrap: anywhere;
+  }
+  .order-line-table td:first-child {
+    grid-column: 1 / -1;
+  }
+  .order-line-table td:not(:first-child)::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 4px;
+    color: var(--muted);
+    font-size: 0.7rem;
+    font-weight: 500;
+  }
+  .order-line-table td:last-child {
+    font-weight: 750;
+  }
+}
 @media print {
   .topbar,
   .sidebar,
