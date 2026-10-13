@@ -253,3 +253,36 @@ test('Firestore receiving serializes competing receipts and exact retries across
   assert.equal((await repo.list('purchaseReceipts')).length,1);
   assert.equal((await repo.get('purchaseOrders',po.id)).lines[0].outstandingQuantity,6);
 });
+
+test("Firestore Each snapshots preserve blank and reserved flavor names through reads and exact retries", async () => {
+  await environment.clearFirestore();
+  const storeId = "each-serde-store", productId = "each-serde-product";
+  await repo.put("stores", storeId, { id: storeId, name: "Each serializer test", taxRateBps: 725 });
+  await repo.put("products", productId, {
+    id: productId, name: "Compatibility flavors", variants: ["__proto__", "Lime", "Cherry"],
+    standardVariantEnabled: true, priceCents: 100, taxable: true, version: 1,
+  });
+  const actor = { uid: "each-serde-buyer", role: "customer", storeIds: [storeId] };
+  const run = (type, payload, id = randomUUID()) => repo.transaction((tx) => executeCommand(tx, actor, { id, type, payload }));
+  const allowedVariants = ["", "__proto__", "Lime"];
+  const draft = await run("order.save", { id: "each-serde-order", storeId, lines: [{
+    id: "each-serde-line", productId, variant: "", quantity: 2, unit: "each", note: "Special notes",
+    selectionMode: "each", allowedVariants, excludedVariants: ["Cherry"],
+  }] });
+  const payload = { id: draft.id, expectedVersion: draft.version, expectedTotalCents: 645 };
+  const commandId = randomUUID();
+  const submitted = await run("order.submit", payload, commandId);
+  const frozenPrices = allowedVariants.map((variant) => ({ variant, unitPriceCents: 100 }));
+  assert.deepEqual(submitted.lines[0].assortmentPricesCents, frozenPrices);
+  assert.equal(submitted.lines.length, 1);
+  assert.equal(submitted.lines[0].quantity, 2);
+  assert.equal(submitted.lines[0].eachQuantity, 6);
+  assert.equal(submitted.subtotalCents, 600);
+  assert.equal(submitted.taxCents, 45);
+  assert.deepEqual(await repo.get("orders", draft.id), submitted);
+  // Replay must use the frozen Firestore receipt after later catalog edits.
+  await repo.put("products", productId, { id: productId, name: "Later catalog", variants: ["Lime"], priceCents: 900, taxable: false, version: 2 });
+  assert.deepEqual(await run("order.submit", payload, commandId), submitted);
+  assert.deepEqual((await repo.get("orders", draft.id)).lines[0].assortmentPricesCents, frozenPrices);
+  assert.equal((await repo.list("ledger")).length, 1);
+});

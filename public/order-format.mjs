@@ -83,17 +83,18 @@ function productCategoryNames(product, byCategory) {
 function productText(product) {
   const hasNamedFlavors = product.lines.some((line) => label(line.variant));
   const rows = product.lines.map((line) => ({
-    flavor: line.selectionMode === "mix" ? "Mix" : label(line.variant) || (hasNamedFlavors ? "Standard" : ""),
+    flavor: ["mix","each"].includes(line.selectionMode) ? (line.selectionMode === "each" ? "Each" : "Mix") : label(line.variant) || (hasNamedFlavors ? "Standard" : ""),
     quantity: label(line.quantity),
+    each: line.selectionMode === "each",
     unit: line.unit,
-    note: [noteText(line.note),line.selectionMode === "mix" && line.excludedVariants?.length ? "NO " + line.excludedVariants.map(v=>label(v)||"Standard").join(", ") : ""].filter(Boolean).join("; "),
+    note: [noteText(line.note),["mix","each"].includes(line.selectionMode) && line.excludedVariants?.length ? "NO " + line.excludedVariants.map(v=>label(v)||"Standard").join(", ") : ""].filter(Boolean).join("; "),
   }));
   // Stable sorting keeps repeated flavors and their individual notes intact.
   rows.sort((a, b) => compare(a.flavor, b.flavor));
   const values = rows.map((row) => {
     const cases =
       row.unit === "case" ? (row.quantity === "1" ? " case" : " cases") : "";
-    return `${row.flavor ? row.flavor + " " : ""}(${row.quantity}${cases})${
+    return `${row.flavor && !row.each ? row.flavor + " " : ""}(${row.quantity}${row.each ? " each" : ""}${cases})${
       row.note ? " — " + row.note : ""
     }`;
   });

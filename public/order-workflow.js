@@ -1,3 +1,5 @@
+const isAssortment = line => ["mix","each"].includes(line.selectionMode);
+const requestedQuantity = line => line.quantity * (line.selectionMode === "each" ? line.allowedVariants.length : 1);
 function freeze(value) {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
     Object.values(value).forEach(freeze);
@@ -18,7 +20,7 @@ function contents(order) {
       quantity: line.quantity,
       unit: line.unit || "each",
       note: line.note || "",
-      selectionMode: line.selectionMode === "mix" ? "mix" : "exact",
+      selectionMode: isAssortment(line) ? line.selectionMode : "exact",
       allowedVariants: line.allowedVariants || [],
       excludedVariants: line.excludedVariants || [],
       allocations: line.allocations || [],
@@ -40,7 +42,7 @@ function localDate(value = Date.now()) {
 }
 export function prepareReceiptAllocations(placement, rows) {
   const lines = (placement.lines || []).filter(
-    (line) => line.selectionMode === "mix",
+    (line) => isAssortment(line),
   );
   if (
     !Array.isArray(rows) ||
@@ -57,6 +59,7 @@ export function prepareReceiptAllocations(placement, rows) {
       .map((allocation) => {
         if (
           !line.allowedVariants?.includes(allocation.variant) ||
+          line.excludedVariants?.includes(allocation.variant) ||
           seen.has(allocation.variant)
         )
           throw new Error("Choose a permitted flavor without duplicate rows.");
@@ -79,11 +82,12 @@ export function prepareReceiptAllocations(placement, rows) {
       allocations.reduce(
         (total, allocation) => total + allocation.quantity,
         0,
-      ) !== line.quantity
+      ) !== requestedQuantity(line)
     )
       throw new Error(
-        `Actual flavor quantities must total ${line.quantity} ${line.unit || "each"}.`,
+        `Actual flavor quantities must total ${requestedQuantity(line)} ${line.unit || "each"}.`,
       );
+    if(line.selectionMode === "each" && (allocations.length !== line.allowedVariants.length || allocations.some(row => row.quantity !== line.quantity))) throw new Error("Confirm the requested quantity for each allowed flavor.");
     return { lineId: line.id, allocations };
   });
 }
@@ -252,7 +256,7 @@ export function createOrderWorkflow(context) {
       field("Receipt note (optional)", note),
     );
     const mixed = (placement.lines || []).filter(
-      (line) => line.selectionMode === "mix",
+      (line) => isAssortment(line),
     );
     const entries = mixed.map((line) => {
       const status = el("p", {
@@ -274,7 +278,7 @@ export function createOrderWorkflow(context) {
           (sum, row) => sum + Number(row.control.value || 0),
           0,
         );
-        status.textContent = `${Number.isFinite(total) ? total : "Invalid"} of ${line.quantity} ${line.unit || "each"} allocated`;
+        status.textContent = `${Number.isFinite(total) ? total : "Invalid"} of ${requestedQuantity(line)} ${line.unit || "each"} allocated`;
       };
       rows.forEach(({ control }) => control.addEventListener("input", update));
       const section = el(
@@ -284,7 +288,7 @@ export function createOrderWorkflow(context) {
         el(
           "p",
           {},
-          `Mix: ${line.quantity} ${line.unit || "each"} total. Enter the actual flavor split in the same unit.`,
+          `${line.selectionMode === "each" ? "Each" : "Mix"}: ${requestedQuantity(line)} total`,
         ),
         rows.map(({ variant, control }) =>
           field(variant || "Standard", control),
