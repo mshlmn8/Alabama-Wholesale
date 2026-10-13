@@ -7,7 +7,8 @@ const compareVariants = (left, right) =>
 export function productVariants(product) {
   if (!product.variants?.length) return [""];
   const variants = [...product.variants].sort(compareVariants);
-  return product.standardVariantEnabled === true ? ["", ...variants] : variants;
+  // Standard-enabled is a historical storage flag, not a new flavor choice.
+  return variants;
 }
 
 // Validate every row before the caller changes the draft. Zero/blank rows are omitted.

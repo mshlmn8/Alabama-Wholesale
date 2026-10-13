@@ -82,3 +82,9 @@ test('scoped HTTP history routes page records, deny foreign cursors and flag tru
   assert.equal((await fetch(url+'/api/stores/s1/replenishment',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({draft:{lines:[]},storeId:'s2'})})).status,400);
   const metricsOnly=await fetch(url+'/api/stores/s1/replenishment',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({draft:{lines:[]},explain:false})});assert.equal(metricsOnly.status,200);assert.equal((await metricsOnly.json()).ai.status,'not-requested');
 });
+
+test('Each history and Mix history retain distinct selection types without fabricating flavor receipts',()=>{
+ const each=line(2,'',{eachQuantity:4,selectionMode:'each',allowedVariants:['Orange','Lime'],excludedVariants:[]});const mix={...each,id:'mix',selectionMode:'mix',quantity:4};
+ const result=analyze(input({placements:[placement('old',8*DAY,[each,mix])]}));
+ assert.equal(result.candidates.length,2);assert.deepEqual(result.candidates.map(x=>x.selectionMode).sort(),['each','mix']);assert.ok(result.candidates.every(x=>x.variant===''));assert.equal(result.candidates.find(x=>x.selectionMode==='each').priorEach,4);
+});

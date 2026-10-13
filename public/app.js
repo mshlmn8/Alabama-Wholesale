@@ -16,6 +16,7 @@ import { observeWorkspaceChrome } from "./workspace-chrome.js";
 import {
   categoryTrail,
   categoryFilterIds,
+  catalogCategoryHierarchy,
   categoryLabel,
 } from "./category-navigation.js";
 import {
@@ -1313,7 +1314,16 @@ async function flushQueue(manual = false) {
 }
 async function command(type, payload, metadata = {}) {
   const scope = operationScope();
-  if (scope.workspace.pending().length)
+  // Settings and notification acknowledgements do not change an order, its
+  // prices, or account balance. Retain their exact requests for Sync center
+  // without preventing a reviewed order from being compiled or submitted.
+  const orderAction = ["order.handoff", "order.submit"].includes(type);
+  const blocking = scope.workspace.pending().some(
+    (entry) =>
+      !orderAction ||
+      !["preferences.save", "notification.read"].includes(entry.command?.type),
+  );
+  if (blocking)
     throw new Error(
       "Resolve the pending action in Sync center before starting another server action. Your other drafts can still be edited and saved online.",
     );
@@ -1431,7 +1441,7 @@ function newDraftFromOrder(order) {
       quantity: line.quantity || Number(line.qty) || 1,
       unit: line.unit || "each",
       note: line.note || "",
-      ...(line.selectionMode === "mix" ? {selectionMode:"mix",allowedVariants:line.allowedVariants,excludedVariants:line.excludedVariants||[]} : {}),
+      ...(["mix", "each"].includes(line.selectionMode) ? {selectionMode:line.selectionMode,allowedVariants:line.allowedVariants,excludedVariants:line.excludedVariants||[]} : {}),
     }));
   editDraft((d) => {
     d.lines = lines;
@@ -1491,10 +1501,16 @@ async function syncDraft(target = draft) {
 function linePrice(line, store = currentStore()) {
   const p = productById(line.productId);
   if (!p) return null;
-  if (line.selectionMode === "mix") {
-    if (!line.allowedVariants?.length || line.allowedVariants.some(v=>!productVariants(p).includes(v))) return null;
+  if (["mix", "each"].includes(line.selectionMode)) {
+    const available = [...productVariants(p), ...(p.standardVariantEnabled === true ? [""] : [])];
+    if (!line.allowedVariants?.length || line.allowedVariants.some(v=>!available.includes(v))) return null;
     const prices=line.allowedVariants.map(variant=>linePrice({...line,selectionMode:"manual",variant},store));
-    return prices.some(price=>price==null)||new Set(prices).size!==1?null:prices[0];
+    if (prices.some(price=>price==null)) return null;
+    if (line.selectionMode === "each") {
+      const total = prices.reduce((sum, price) => sum + price, 0);
+      return Number.isSafeInteger(total) ? total : null;
+    }
+    return new Set(prices).size!==1?null:prices[0];
   }
   const override = store?.priceOverrides?.[p.id];
   const cents =
@@ -1526,7 +1542,9 @@ function draftTotals(order = draft) {
     const total = cents * line.quantity;
     subtotal += total;
     if (p?.taxable)
-      tax += Math.round((total * (store?.taxRateBps || 0)) / 10000);
+      tax += line.selectionMode === "each"
+        ? line.allowedVariants.reduce((sum, variant) => sum + Math.round((linePrice({ ...line, selectionMode: "manual", variant }, store) * line.quantity * (store?.taxRateBps || 0)) / 10000), 0)
+        : Math.round((total * (store?.taxRateBps || 0)) / 10000);
   }
   return { subtotal, tax, total: subtotal + tax, missing };
 }
@@ -1706,7 +1724,13 @@ function render() {
   const bar = el(
     "header",
     { class: "topbar" },
-    el("span", { class: "workspace-mark", "aria-hidden": "true" }, "AW"),
+    el("img", {
+      class: "workspace-mark",
+      src: "/assets/logo.png",
+      alt: "Alabama Wholesale",
+      width: 1050,
+      height: 370,
+    }),
     el(
       "div",
       { class: "store-switch" },
@@ -2160,6 +2184,8 @@ function renderCatalog() {
     preferences().favorites?.[storeId] ??
     currentStore()?.favoriteProductIds ??
     [];
+  const hierarchy = catalogCategoryHierarchy(state.categories, state.products);
+  const catalogCategories = hierarchy.categories;
   const cardCache = new Map();
   const candidates = indexCatalogProducts(
     state.products.filter((product) => product.active !== false),
@@ -2182,14 +2208,14 @@ function renderCatalog() {
     search = value;
     drawResults();
   });
-  if (category && !state.categories.some((item) => item.id === category))
+  if (category && !catalogCategories.some((item) => item.id === category))
     category = "";
   const categoryNavigation = el("nav", {
     class: "category-navigation",
     "aria-label": "Catalog categories",
   });
   function drawCategories() {
-    const all = state.categories;
+    const all = catalogCategories;
     const trail = categoryTrail(all, category);
     const row = (items, parent = null) => {
       const choices = [
@@ -2249,7 +2275,6 @@ function renderCatalog() {
     },
     "pill",
   );
-  const count = el("p", { class: "small muted mb", role: "status" });
   const scanButton = button("Scan", showScanner, "", "scan");
   scanButton.setAttribute("aria-label", "Scan barcode");
   const columns = select(
@@ -2281,7 +2306,7 @@ function renderCatalog() {
     if (!scopeCurrent(scope)) throw new SessionChanged();
     const m = modal(
       "Catalog display",
-      "Choose your grid layout. Column count adapts to fit your screen.",
+      "",
     );
     append(m.content, gridOptions);
     append(m.footer, button("Done", m.close, "primary"));
@@ -2345,7 +2370,6 @@ function renderCatalog() {
     el(
       "div",
       { class: "catalog-view-controls" },
-      count,
       el(
         "div",
         { class: "catalog-presentation-controls" },
@@ -2416,20 +2440,17 @@ function renderCatalog() {
   }
   function drawResults() {
     const categoryIds = category
-      ? categoryFilterIds(state.categories, category)
+      ? categoryFilterIds(catalogCategories, category)
       : null;
     const products = rankCatalogProducts(candidates, search).filter(
       (product) =>
         (!categoryIds ||
-          product.categoryIds?.some((id) => categoryIds.has(id))) &&
+          hierarchy.productCategoryIds.get(product.id)?.some((id) => categoryIds.has(id))) &&
         (!favoritesOnly || fav.includes(product.id)),
     );
     favoritesButton.textContent = favoritesOnly ? "★ Favorites" : "☆ Favorites";
     favoritesButton.className = favoritesOnly ? "pill active" : "pill";
     favoritesButton.setAttribute("aria-pressed", favoritesOnly);
-    count.textContent = `${products.length} matching product${
-      products.length === 1 ? "" : "s"
-    }`;
     if (!products.length) {
       results.replaceChildren(
         empty(
@@ -2629,17 +2650,8 @@ function inlineFlavorEditor(m, getProduct, onSaved, assertCurrent) {
     el(
       "div",
       { class: "form-grid" },
-      field(
-        "Flavor price ($)",
-        price,
-        "Optional. Uses the product’s base price when blank.",
-      ),
+      field("Flavor price ($)", price),
       field("Flavor barcode", barcode),
-    ),
-    el(
-      "p",
-      { class: "small" },
-      "Saves this flavor to the catalog for every store. Your item quantities and notes are kept.",
     ),
     save,
   );
@@ -2656,15 +2668,10 @@ function showAddProduct(product, initialVariant) {
     selectedDraftId = draft?.id;
   let variants = productVariants(product);
   let multiple = variants.length > 1;
-  const m = modal(
-    product.name,
-    multiple
-      ? "Choose quantities for any flavors, then add them together. Leave the others at 0."
-      : "Choose a quantity to add to your order.",
-  );
+  const m = modal(product.name);
   m.dialog.classList.add("product-selection-dialog");
   const note = el("textarea", {
-    placeholder: "Instructions for these items (optional)",
+    placeholder: "Note (optional)",
     maxlength: 1000,
     rows: 2,
   });
@@ -2681,7 +2688,7 @@ function showAddProduct(product, initialVariant) {
   });
   const rows = [];
   function addFlavorRow(variant, initialQuantity) {
-    const label = variant || "Standard";
+    const label = variant || product.name;
     const qtyId = `flavor-${uuid()}`;
     const quantity = input("number", initialQuantity, {
       id: qtyId,
@@ -2817,7 +2824,7 @@ function showAddProduct(product, initialVariant) {
     summary.textContent = invalid
       ? "Use whole-number quantities between 0 and 1,000,000."
       : !selected
-      ? "Choose a quantity to get started."
+      ? ""
       : `${selected} ${
           multiple ? (selected === 1 ? "flavor" : "flavors") : "item"
         } selected · ${
@@ -2855,8 +2862,7 @@ function showAddProduct(product, initialVariant) {
   const options = el(
     "details",
     { class: "flavor-options" },
-    el("summary", {}, "Notes & product options"),
-    field("Line note", note, "Applies to all selected flavors."),
+    el("summary", {}, "Product options"),
     el(
       "div",
       { class: "actions" },
@@ -2874,11 +2880,16 @@ function showAddProduct(product, initialVariant) {
         : null,
     ),
   );
+  const selectionBody = el("div", { class: "item-selection" });
   append(
-    m.content,
+    selectionBody,
     search,
     list,
     noResults,
+  );
+  append(
+    m.content,
+    selectionBody,
     inlineFlavorEditor(
       m,
       () => product,
@@ -2886,9 +2897,13 @@ function showAddProduct(product, initialVariant) {
         product = saved;
         variants = productVariants(product);
         multiple = variants.length > 1;
+        const baseRow = rows.find(row => row.variant === "");
+        const baseQuantity = baseRow?.quantity.value;
+        for (let index = rows.length - 1; index >= 0; index--)
+          if (!variants.includes(rows[index].variant)) rows.splice(index, 1);
         for (const variant of variants)
           if (!rows.some((row) => row.variant === variant))
-            addFlavorRow(variant, "0");
+            addFlavorRow(variant, baseRow && variant === flavor ? baseQuantity : "0");
         // Reorder the existing controls, preserving each flavor's typed quantity.
         rows.sort(
           (a, b) => variants.indexOf(a.variant) - variants.indexOf(b.variant),
@@ -2897,6 +2912,13 @@ function showAddProduct(product, initialVariant) {
         add.textContent = multiple ? "Add selected flavors" : "Add to draft";
         search.hidden = variants.length <= 6;
         search.value = "";
+        manualTab.hidden = assortmentTab.hidden = !variants.some(Boolean);
+        const oldPanel = assortmentPanel;
+        assortmentPanel = makeAssortmentPanel(oldPanel.getSelection());
+        assortmentPanel.hidden = oldPanel.hidden;
+        selectionBody.replaceChildren(search, list, noResults, assortmentPanel);
+        flavorActions.replaceChildren(cancel, add, assortmentPanel.addButton);
+        switchTab(!oldPanel.hidden);
         filterFlavors();
         updateSelection();
         rows.find((row) => row.variant === flavor)?.quantity.focus();
@@ -2912,40 +2934,56 @@ function showAddProduct(product, initialVariant) {
     ),
     options,
   );
+  const cancel = button("Cancel", m.close);
+  const flavorActions = el("div", { class: "flavor-actions" }, cancel, add);
   append(
     m.footer,
     summary,
-    el("div", { class: "flavor-actions" }, button("Cancel", m.close), add),
+    flavorActions,
   );
-  const assortmentPanel = createAssortmentPanel({product,el,input,button,field,getNote:()=>note.value,priceFor:linePrice,onAdd:lines=>{
+  function makeAssortmentPanel(selection) { return createAssortmentPanel({product,selection,el,input,button,field,getNote:()=>note.value,priceFor:linePrice,onAdd:lines=>{
     if(!scopeCurrent(scope)||storeId!==selectedStoreId||draft?.id!==selectedDraftId)throw new SessionChanged();
     if(hasUnsavedDraftNotes())throw new Error("Save your latest order notes first.");
     const current=productById(product.id);
     if(!current||current.active===false||current.deleted||lines.some(line=>(line.allowedVariants||[line.variant]).some(v=>!productVariants(current).includes(v))))throw new Error("The available flavors changed. Reopen the product.");
     const nextLines=addSelectedProductLines(draft?.lines||[],lines,uuid);
     editDraft(d=>{d.lines=nextLines;});m.close();toast("Assortment added to your order.");
-  }});
+  }}); }
+  let assortmentPanel = makeAssortmentPanel();
+  flavorActions.append(assortmentPanel.addButton);
+  assortmentPanel.addButton.hidden = true;
   const manualTab=button("Choose flavors",()=>switchTab(false),"primary");
   const assortmentTab=button("Mix / Each",()=>switchTab(true));
+  const notesPanel = el("section", { class: "special-notes-panel", hidden: true }, field("Special notes", note));
+  const notesTab = button("Special notes", () => {
+    notesPanel.hidden = !notesPanel.hidden;
+    notesTab.classList.toggle("primary", !notesPanel.hidden);
+    notesTab.setAttribute("aria-expanded", String(!notesPanel.hidden));
+    if (!notesPanel.hidden) note.focus();
+  });
+  notesTab.setAttribute("aria-expanded", "false");
   function switchTab(mixed){
     assortmentPanel.hidden=!mixed;list.hidden=mixed;search.hidden=mixed||variants.length<=6;noResults.hidden=true;
-    add.hidden=mixed;summary.hidden=mixed;manualTab.classList.toggle("primary",!mixed);assortmentTab.classList.toggle("primary",mixed);
+    add.hidden=mixed;assortmentPanel.addButton.hidden=!mixed;summary.hidden=mixed;manualTab.classList.toggle("primary",!mixed);assortmentTab.classList.toggle("primary",mixed);
     manualTab.setAttribute("aria-pressed",String(!mixed));assortmentTab.setAttribute("aria-pressed",String(mixed));
   }
-  m.content.prepend(el("div",{class:"actions order-mode-tabs","aria-label":"Flavor selection method"},manualTab,assortmentTab));
-  m.content.append(assortmentPanel);
+  manualTab.hidden = assortmentTab.hidden = !variants.some(Boolean);
+  const modeTabs = el("div",{class:"actions order-mode-tabs","aria-label":"Item options"},manualTab,assortmentTab,notesTab);
+  m.content.prepend(modeTabs, notesPanel);
+  selectionBody.append(assortmentPanel);
   updateSelection();
 }
 function showEditMix(original,product,scope,draftId,selectedStoreId){
-  const m=modal("Edit mix",product?.name||original.productId);
+  const m=modal(original.selectionMode === "each" ? "Edit each" : "Edit mix",product?.name||original.productId);
   const quantity=input("number",original.quantity,{min:1,max:1000000,step:1});
   const note=el("textarea",{rows:2,maxlength:2000});note.value=original.note||"";
   const variants=product?productVariants(product):[];
+  if (product?.standardVariantEnabled === true && [...original.allowedVariants, ...(original.excludedVariants || [])].includes("") && !variants.includes("")) variants.unshift("");
   const selected=new Set(original.allowedVariants);
-  const choices=variants.map(variant=>{const check=input("checkbox","");check.checked=selected.has(variant);check.addEventListener("change",()=>check.checked?selected.add(variant):selected.delete(variant));return el("label",{class:"check-field"},check,variant||"Standard");});
-  append(m.content,field("Total mix quantity",quantity),el("p",{class:"small"},`Unit: ${original.unit}. Checked flavors are allowed.`),...choices,field("Line note",note));
+  const choices=variants.map(variant=>{const check=input("checkbox","");check.checked=selected.has(variant);check.addEventListener("change",()=>check.checked?selected.add(variant):selected.delete(variant));return el("label",{class:"check-field"},check,variant||product.name);});
+  append(m.content,field(original.selectionMode === "each" ? "Quantity" : "Total mix quantity",quantity),...choices,field("Special notes",note));
   const check=()=>{assertBuilderDraft(scope,draftId,selectedStoreId);if(JSON.stringify(findBuilderLine(draft,original.id))!==JSON.stringify(original))throw new Error("This item changed. Reopen it before editing.");};
-  append(m.footer,button("Cancel",m.close),button("Remove item",()=>{check();editDraft(d=>{d.lines=d.lines.filter(l=>l.id!==original.id);});m.close();}),button("Update mix",()=>{
+  append(m.footer,button("Cancel",m.close),button("Remove item",()=>{check();editDraft(d=>{d.lines=d.lines.filter(l=>l.id!==original.id);});m.close();}),button("Update item",()=>{
     check();const count=Number(quantity.value);if(!Number.isSafeInteger(count)||count<1||count>1000000||!selected.size)throw new Error("Enter a whole quantity and keep at least one allowed flavor.");
     const changed={...original,quantity:count,note:note.value,allowedVariants:variants.filter(v=>selected.has(v)),excludedVariants:variants.filter(v=>!selected.has(v))};
     if(linePrice(changed)==null)throw new Error("Allowed flavors need one common price. Choose exact flavors when prices differ.");
@@ -2993,7 +3031,7 @@ function showEditDraftLine(id) {
   assertBuilderDraft(scope, selectedDraftId, selectedStoreId);
   const original = clone(findBuilderLine(draft, id));
   let product = productById(original.productId);
-  if(original.selectionMode === "mix") return showEditMix(original, product, scope, selectedDraftId, selectedStoreId);
+  if(["mix", "each"].includes(original.selectionMode)) return showEditMix(original, product, scope, selectedDraftId, selectedStoreId);
   const variants = product ? productVariants(product) : [];
   const options = variants.map((variant) => [variant, variant || "Standard"]);
   if (!variants.includes(original.variant || ""))
@@ -3821,7 +3859,7 @@ function draftText(order) {
       (line) =>
         `${line.quantity}${line.unit === "case" ? " cases" : ""} · ${
           productById(line.productId)?.name || line.productId
-        }${line.selectionMode === "mix" ? ` / ${assortmentLabel(line)}` : line.variant ? ` / ${line.variant}` : ""}${
+        }${["mix", "each"].includes(line.selectionMode) ? ` / ${assortmentLabel(line)}` : line.variant ? ` / ${line.variant}` : ""}${
           line.note ? ` (${line.note})` : ""
         }`,
     ),
@@ -4540,7 +4578,7 @@ async function showOrder(order) {
       ),
     );
   const pickScope=operationScope();
-  if(staff() && ["approved","picking"].includes(order.status) && order.lines.some(line=>line.selectionMode==="mix"))
+  if(staff() && ["approved","picking"].includes(order.status) && order.lines.some(line=>["mix", "each"].includes(line.selectionMode)))
     append(m.content,button("Confirm picked flavors",()=>showPicking({order,el,input,button,modal,command,isCurrent:()=>scopeCurrent(pickScope)&&storeId===order.storeId,onSaved:(updated)=>{m.close();showOrder(updated);}}),"primary"));
   const history = order.statusHistory || order.history || [];
   if (history.length)
@@ -5082,7 +5120,7 @@ function showProductEditor(product = {}, { photoFile = null } = {}) {
   const editorProductId = product.id || uuid();
   const m = modal(
     product.id ? "Edit product" : "Add product",
-    "Prices are per individual unit. Case prices use the configured units per case.",
+    "",
     true,
   );
   const name = input("text", product.name || "", {
@@ -5280,7 +5318,6 @@ function showProductEditor(product = {}, { photoFile = null } = {}) {
       field("Product name", name),
       field("SKU", sku),
       field("Base price ($ / each)", price),
-      field("Units per case", pack),
       field("Barcode", barcode),
       field("Availability label", statusField),
       field(
@@ -5947,7 +5984,7 @@ function renderReturns() {
 }
 function showReturn(order, onCreated) {
   const returnScope=operationScope(),returnStoreId=storeId;
-  const returnLines=order.lines.flatMap(line=>line.selectionMode==='mix'?(line.allocations||[]).map(allocation=>({...line,...allocation,selectionMode:'manual'})):[line]);
+  const returnLines=order.lines.flatMap(line=>["mix", "each"].includes(line.selectionMode)?(line.allocations||[]).map(allocation=>({...line,...allocation,selectionMode:'manual'})):[line]);
   const m = modal(
     "Request a return",
     `${order.invoiceNumber} · Return quantities use the same units as the delivered order.`,
@@ -6408,7 +6445,7 @@ function showSyncCenter() {
             Number.isInteger(entry.status) &&
             entry.status >= 400 &&
             entry.status < 500 &&
-            entry.status !== 408;
+            ![408, 425, 429].includes(entry.status);
           return el(
             "div",
             { class: "panel" },

@@ -165,3 +165,12 @@ test('cached Mail handoff and placement commands deny creator-only actions after
   await assert.rejects(()=>run('order.handoff',{id:'o1',expectedVersion:1},customer,'cached-handoff'),{code:'FORBIDDEN'});await assert.rejects(()=>run('order.place',{handoffId:handoff.id},customer,'cached-placement'),{code:'FORBIDDEN'});
   assert.equal((await run('order.place',{handoffId:handoff.id},staff,'cached-placement')).id,placed.id);assert.equal((await f.repo.list('orderPlacements')).length,1);
 });
+
+test('Mail Each receipt requires confirmed actual quantities per allowed flavor and remains idempotent',async()=>{
+ const f=fixture();await f.repo.put('orders','o1',{...(await f.repo.get('orders','o1')),lines:[{id:'each',productId:'p1',variant:'',selectionMode:'each',allowedVariants:['Orange'],excludedVariants:['Lime'],quantity:2,unit:'case'}]});
+ const handoff=await f.run('order.handoff',{id:'o1',expectedVersion:1}),placement=await f.run('order.place',{handoffId:handoff.id});
+ await assert.rejects(f.run('placement.receive',{id:placement.id}),{code:'MIX_ALLOCATION_REQUIRED'});
+ await assert.rejects(f.run('placement.receive',{id:placement.id,actualMixAllocations:[{lineId:'each',allocations:[{variant:'Lime',quantity:2}]}]}),{code:'INVALID_MIX_ALLOCATION'});
+ const received=await f.run('placement.receive',{id:placement.id,actualMixAllocations:[{lineId:'each',allocations:[{variant:'Orange',quantity:2}]}]});assert.equal(received.receivedLines.length,1);assert.equal(received.receivedLines[0].selectionMode,'each');assert.equal((await f.repo.list('storeInventoryMovements'))[0].quantityEach,24);
+ await f.run('placement.receive',{id:placement.id});assert.equal((await f.repo.list('storeInventoryMovements')).length,1);
+});

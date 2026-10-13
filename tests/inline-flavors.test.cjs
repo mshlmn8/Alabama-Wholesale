@@ -224,7 +224,8 @@ test("saving a flavor in the item picker preserves quantities and note without a
   const apple = f.control("Apple quantity");
   apple.value = "4";
   assert.equal(f.control("Order unit"), undefined);
-  f.control("Line note").value = "Keep cold";
+  f.button("Special notes").callback();
+  f.control("Special notes").value = "Keep cold";
   assert.ok(
     f.control("New flavor name"),
     "The picker includes inline flavor creation",
@@ -234,7 +235,7 @@ test("saving a flavor in the item picker preserves quantities and note without a
   assert.equal(f.control("Apple quantity"), apple);
   assert.equal(apple.value, "4");
   assert.equal(f.control("Order unit"), undefined);
-  assert.equal(f.control("Line note").value, "Keep cold");
+  assert.equal(f.control("Special notes").value, "Keep cold");
   assert.equal(f.control("Grape quantity").value, "0");
   f.control("Grape quantity").value = "2";
   await f.button("Add selected flavors").callback();
@@ -250,19 +251,59 @@ test("saving a flavor in the item picker preserves quantities and note without a
   );
 });
 
-test("adding the first flavor keeps the selected Standard quantity", async () => {
+test("a product without variants uses its own name and has no flavor mode tabs", async () => {
   const f = await fixture({ standard: true });
   f.openAdd();
-  const standard = f.control("Standard quantity");
+  assert.ok(f.control("Juice quantity"));
+  assert.equal(f.control("Standard quantity"), undefined);
+  assert.equal(f.button("Choose flavors"), undefined);
+  assert.equal(f.button("Mix / Each"), undefined);
+  await f.button("Add to draft").callback();
+  assert.equal(f.context.draft.lines.at(-1).variant, "");
+  assert.equal(f.context.draft.lines.at(-1).quantity, 1);
+});
+
+test("Each quantity, exclusions, and special notes survive adding a flavor before compilation", async () => {
+  const f = await fixture();
+  f.openAdd();
+  f.button("Mix / Each").callback();
+  f.button("Each").callback();
+  f.control("Quantity per flavor").value = "2";
+  const excluded = f.control("Exclude Orange");
+  excluded.checked = true;
+  excluded.listeners.change();
+  f.button("Special notes").callback();
+  f.control("Special notes").value = "Top shelf";
+  f.control("New flavor name").value = "Grape";
+  await f.button("Save flavor").callback();
+  assert.equal(f.control("Quantity per flavor").value, "2");
+  assert.equal(f.control("Exclude Orange").checked, true);
+  assert.equal(f.control("Special notes").value, "Top shelf");
+  assert.equal(f.control("Search flavor exceptions"), undefined);
+  assert.equal(f.control("Mix or each order unit"), undefined);
+  await f.button("Add each").callback();
+  assert.equal(f.context.draft.lines.length, 2);
+  const line = f.context.draft.lines.at(-1);
+  assert.equal(line.selectionMode, "each");
+  assert.equal(line.quantity, 2);
+  assert.deepEqual(line.allowedVariants, ["Apple", "Grape"]);
+  assert.deepEqual(line.excludedVariants, ["Orange"]);
+  assert.equal(line.note, "Top shelf");
+});
+
+test("adding the first flavor transfers the unnamed item quantity to that new flavor", async () => {
+  const f = await fixture({ standard: true });
+  f.openAdd();
+  const standard = f.control("Juice quantity");
   standard.value = "3";
   assert.ok(f.control("New flavor name"));
   f.control("New flavor name").value = "Grape";
   await f.button("Save flavor").callback();
-  assert.equal(f.control("Standard quantity"), standard);
-  assert.equal(standard.value, "3");
+  assert.equal(f.control("Standard quantity"), undefined);
+  assert.equal(f.control("Grape quantity").value, "3");
   assert.ok(f.control("Grape quantity"));
-  await f.button("Add selected flavors").callback();
-  assert.equal(f.context.draft.lines.at(-1).variant, "");
+  await f.button("Add to draft").callback();
+  assert.equal(f.context.draft.lines.at(-1).variant, "Grape");
   assert.equal(f.context.draft.lines.at(-1).quantity, 3);
 });
 
@@ -273,7 +314,8 @@ test("a newly inserted first flavor keeps typed quantities attached to their ori
     orange = f.control("Orange quantity");
   apple.value = "4";
   orange.value = "7";
-  f.control("Line note").value = "Same selected bags";
+  f.button("Special notes").callback();
+  f.control("Special notes").value = "Same selected bags";
   f.control("New flavor name").value = "Aardvark";
   await f.button("Save flavor").callback();
   assert.equal(f.control("Apple quantity"), apple);

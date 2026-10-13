@@ -239,6 +239,36 @@ test("an uncertain committed save retries its exact ID and body before newer edi
   assert.notEqual(f.calls[2].id, f.calls[0].id);
   assert.equal((await f.repo.get("orders", "d1")).version, 2);
 });
+test("Each selections survive autosave recovery and exact lost-response retries", async () => {
+  let first = true;
+  const f = await fixture({
+    seed: { products: [{ id: "p1", name: "Drink", variants: ["Lime", "Cherry"], priceCents: 200, version: 1 }] },
+    send: async (command, actual) => {
+      const result = await actual(command);
+      if (first) { first = false; throw new Error("Response lost"); }
+      return result;
+    },
+  });
+  const lines = [{ id: "l1", productId: "p1", variant: "", quantity: 2, unit: "each", note: "", selectionMode: "each", allowedVariants: ["Lime"], excludedVariants: ["Cherry"] }];
+  f.edit({ lines });
+  await f.timers.advance(600);
+  const recovery = f.ws.autosaveRecovery().d1;
+  assert.equal(recovery.command.payload.lines[0].selectionMode, "each");
+  assert.deepEqual(recovery.command.payload.lines, lines);
+  assert.deepEqual(recovery.sentDraft.lines, lines);
+  assert.equal(f.sync.status("d1").cloudConfirmed, false);
+  f.sync.dispose();
+  f.sync = f.setup();
+  f.sync.seed([]);
+  await f.timers.advance(600);
+  assert.deepEqual(f.calls[1], f.calls[0]);
+  assert.equal(f.sync.status("d1").cloudConfirmed, true);
+  assert.deepEqual((await f.repo.get("orders", "d1")).lines, lines);
+  assert.deepEqual(f.ws.getDraft("d1").lines, lines);
+  assert.equal((await f.repo.list("orders")).length, 1);
+  assert.equal((await f.repo.get("orders", "d1")).version, 1);
+  f.sync.dispose();
+});
 test("quota failure can save in the cloud without claiming device persistence", async () => {
   const f = await fixture();
   f.ws.saveDraft({ id: "existing", lines: [], notes: "keep" });

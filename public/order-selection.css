@@ -4,6 +4,92 @@
 .product-selection-dialog .dialog-head {
   margin-bottom: 16px;
 }
+.product-selection-dialog .dialog-head h2 {
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+.product-selection-dialog .order-mode-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 8px;
+  margin: 0 0 16px;
+}
+.product-selection-dialog .order-mode-tabs button {
+  min-width: 0;
+  min-height: 44px;
+  width: 100%;
+  padding: 10px 8px;
+  font-size: .8rem;
+}
+.product-selection-dialog .order-mode-tabs button[hidden] {
+  display: none;
+}
+.product-selection-dialog .order-mode-tabs:has(button[hidden]) {
+  grid-template-columns: minmax(0, 1fr);
+}
+.product-selection-dialog .item-selection,
+.product-selection-dialog .assortment-panel {
+  min-width: 0;
+}
+.product-selection-dialog .assortment-panel {
+  padding: 0;
+}
+.product-selection-dialog .assortment-panel > .actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0 0 16px;
+}
+.product-selection-dialog .assortment-panel .form-grid {
+  grid-template-columns: minmax(0, 1fr);
+  margin-bottom: 16px;
+}
+.product-selection-dialog .assortment-panel h3 {
+  margin: 0 0 8px;
+  font-size: .95rem;
+}
+.product-selection-dialog .assortment-exceptions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  max-height: 240px;
+  padding: 0;
+  margin: 0 0 16px;
+}
+.product-selection-dialog .assortment-exceptions .check-field {
+  margin: 0;
+  min-width: 0;
+  min-height: 48px;
+  padding: 10px;
+  font-size: .85rem;
+  overflow-wrap: anywhere;
+}
+.product-selection-dialog .assortment-exceptions input {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  margin: 0;
+}
+.product-selection-dialog .assortment-panel > button {
+  width: 100%;
+  min-height: 44px;
+}
+.product-selection-dialog .flavor-inline-editor,
+.product-selection-dialog .flavor-options,
+.product-selection-dialog .special-notes-panel {
+  border-top: 1px solid var(--line);
+  margin-top: 16px;
+  padding-top: 12px;
+}
+.product-selection-dialog .special-notes-panel[hidden] {
+  display: none;
+}
+.product-selection-dialog .special-notes-panel textarea {
+  width: 100%;
+}
+.product-selection-dialog .special-notes-panel {
+  margin-bottom: 16px;
+}
 .product-selection-dialog .dialog-footer {
   position: sticky;
   bottom: 0;

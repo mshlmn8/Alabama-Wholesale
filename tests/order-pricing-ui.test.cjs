@@ -13,6 +13,7 @@ function pricing(product, store = {}) {
     currentStore: () => store,
     storeById: () => store,
   });
+  vm.runInContext(fs.readFileSync(require("node:path").join(__dirname, "../public/order-selection.js"), "utf8").replaceAll("export ", ""), context);
   vm.runInContext(
     source.slice(
       source.indexOf("function linePrice("),
@@ -23,6 +24,13 @@ function pricing(product, store = {}) {
   return context;
 }
 const line = { productId: "p", variant: "Mint", unit: "each", quantity: 3 };
+
+test("Each draft totals preserve per-flavor tax rounding without adding flavor lines", () => {
+  const context = pricing({ id: "p", taxable: true, variants: ["Mint", "Berry"], variantPricesCents: { Mint: 5, Berry: 5 } }, { taxRateBps: 1000 });
+  const each = { ...line, variant: "", quantity: 1, selectionMode: "each", allowedVariants: ["Mint", "Berry"], excludedVariants: [] };
+  assert.equal(context.linePrice(each), 10);
+  assert.equal(context.draftTotals({ lines: [each] }).tax, 2);
+});
 
 test("unpriced draft lines review at zero with no missing-price blocker", () => {
   for (const price of [undefined, null]) {

@@ -221,13 +221,20 @@ export function prepareReplenishmentLine(candidate, product, value, unit) {
     candidate.status === "unavailable"
   )
     throw new Error("This product is no longer available. Review the catalog.");
-  if (!availableVariants(product).includes(candidate.variant || ""))
+  const assortment = ["mix", "each"].includes(candidate.selectionMode);
+  const variants = availableVariants(product);
+  if (assortment) {
+    const allowed = candidate.allowedVariants, excluded = candidate.excludedVariants || [];
+    if (!Array.isArray(allowed) || !allowed.length || !Array.isArray(excluded) || new Set([...allowed,...excluded]).size !== allowed.length + excluded.length || [...allowed,...excluded].some(value => !variants.includes(value)))
+      throw new Error("These flavors are no longer available. Review the catalog.");
+  } else if (!variants.includes(candidate.variant || ""))
     throw new Error("This flavor is no longer available. Review the catalog.");
   const quantity = whole(value, "Quantity", { min: 1 });
   validateUnit(unit, product, quantity);
   return {
     productId: product.id,
-    variant: candidate.variant || "",
+    variant: assortment ? "" : candidate.variant || "",
+    ...(assortment ? {selectionMode:candidate.selectionMode,allowedVariants:[...candidate.allowedVariants],excludedVariants:[...(candidate.excludedVariants||[])]} : {}),
     quantity,
     unit,
     note: "",
@@ -444,12 +451,6 @@ export function createStoreOperations(context) {
     `/api/stores/${encodeURIComponent(saved.storeId)}/${name}`;
   const draftsFor = (saved) =>
     createStoreCountDrafts(saved.workspace, saved.actorId, saved.storeId);
-  const unitChoices = (product) => [
-    ["each", "Each"],
-    ...(knownPack(product)
-      ? [["case", `Case (${product.packSize} each)`]]
-      : []),
-  ];
   const pendingCount = (saved, id) =>
     saved.workspace
       .pending?.()
@@ -845,7 +846,7 @@ export function createStoreOperations(context) {
       step: 1,
       inputmode: "numeric",
     });
-    const unit = select(unitChoices(product), entry.unit);
+    const unit = {value: entry.unit || "each"};
     if (
       entry.unit === "case" &&
       entry.packSize != null &&
@@ -853,7 +854,7 @@ export function createStoreOperations(context) {
     )
       m.content.append(
         notice(
-          `This observation used ${entry.packSize} each per case. The catalog now uses ${product.packSize} each per case. Enter the observed individual units, or switch units after reviewing the new case size.`,
+          `This saved observation uses ${entry.packSize} items per case. The catalog now uses ${product.packSize}. Review the saved observation before syncing.`,
         ),
       );
     const measured = input("datetime-local", localDateInput(entry.measuredAt), {
@@ -914,7 +915,7 @@ export function createStoreOperations(context) {
         : "";
       return entry;
     };
-    for (const control of [quantity, unit, measured, target, note])
+    for (const control of [quantity, measured, target, note])
       control.addEventListener("input", () => {
         try {
           update();
@@ -930,8 +931,7 @@ export function createStoreOperations(context) {
       el(
         "div",
         { class: "store-count-fields" },
-        field("Observed quantity", quantity),
-        field("Unit", unit),
+        field(entry.unit === "case" ? "Observed quantity (saved cases)" : "Observed quantity", quantity),
         field("Measured at", measured),
         field("Target stock (each)", target),
       ),
@@ -1165,7 +1165,7 @@ export function createStoreOperations(context) {
       max: MAX_QUANTITY,
       min: -MAX_QUANTITY,
     });
-    const unit = select(unitChoices(product), "each");
+    const unit = {value:"each"};
     const at = input("datetime-local", localDateInput(), {
       max: localDateInput(),
     });
@@ -1183,7 +1183,6 @@ export function createStoreOperations(context) {
           quantity,
           "Use positive quantities for receipts, damage, returns and transfers. Corrections can be signed.",
         ),
-        field("Unit", unit),
         field("Effective at", at),
       ),
       field(
@@ -1332,11 +1331,11 @@ export function createStoreOperations(context) {
           (line) =>
             line.productId === candidate.productId &&
             (line.variant || "") === (candidate.variant || "") &&
-            line.selectionMode !== "mix",
+            !["mix","each"].includes(line.selectionMode),
         );
         const quantity = input(
           "number",
-          exactLines.length ? "" : (suggestion?.quantity ?? ""),
+          exactLines.length ? "" : (suggestion ? suggestion.quantity * (suggestion.unit === "case" ? product.packSize : 1) : ""),
           {
             min: 1,
             max: MAX_QUANTITY,
@@ -1345,9 +1344,6 @@ export function createStoreOperations(context) {
             "aria-label": `Quantity to add for ${candidate.name} ${candidate.variant || "Standard"}`,
           },
         );
-        const unit = select(unitChoices(product), suggestion?.unit || "each", {
-          "aria-label": `Order unit for ${candidate.name}`,
-        });
         const latest = candidate.latestCount;
         const card = el(
           "article",
@@ -1363,7 +1359,7 @@ export function createStoreOperations(context) {
                 {},
                 candidate.name || product?.name || candidate.productId,
               ),
-              el("p", { class: "small" }, candidate.variant || "Standard"),
+              el("p", { class: "small" }, candidate.variant || (candidate.selectionMode === "each" ? "Each" : candidate.selectionMode === "mix" ? "Mix" : "")),
             ),
             el(
               "span",
@@ -1423,7 +1419,7 @@ export function createStoreOperations(context) {
             el(
               "p",
               { class: "store-suggestion small" },
-              `${suggestion.planningDays || 7}-day plan: target ${units(suggestion.targetEach)} − estimated available ${units(suggestion.availableEach)}${suggestion.pendingEach ? ` (including ${units(suggestion.pendingEach)} pending receipts)` : ""}. Suggested total order quantity: ${suggestion.quantity} ${suggestion.unit}.`,
+              `${suggestion.planningDays || 7}-day plan: target ${units(suggestion.targetEach)} − estimated available ${units(suggestion.availableEach)}${suggestion.pendingEach ? ` (including ${units(suggestion.pendingEach)} pending receipts)` : ""}. Suggested total order quantity: ${suggestion.quantity * (suggestion.orderMultipleEach || 1)}.`,
             ),
           );
         else
@@ -1486,7 +1482,6 @@ export function createStoreOperations(context) {
               exactLines.length ? "Extra quantity to add" : "Quantity to add",
               quantity,
             ),
-            field("Unit", unit),
             button(
               "Add to order",
               () => {
@@ -1495,7 +1490,7 @@ export function createStoreOperations(context) {
                   candidate,
                   product,
                   quantity.value,
-                  unit.value,
+                  "each",
                 );
                 addLines([line]);
                 m.close();
@@ -1705,7 +1700,7 @@ export function createStoreOperations(context) {
               el(
                 "li",
                 {},
-                `${line.name || line.productName || getProducts().find((product) => product.id === line.productId)?.name || line.productId}${line.selectionMode === "mix" ? ` / Mix · ${(line.allowedVariants || []).map((variant) => variant || "Standard").join(", ")} allowed; not guaranteed` : line.variant ? ` / ${line.variant}` : ""} · ${line.quantity} ${line.unit}`,
+                `${line.name || line.productName || getProducts().find((product) => product.id === line.productId)?.name || line.productId}${["mix","each"].includes(line.selectionMode) ? ` / ${line.selectionMode === "each" ? "Each" : "Mix"}${line.excludedVariants?.length ? " · NO " + line.excludedVariants.join(", ") : ""}` : line.variant ? ` / ${line.variant}` : ""} · ${line.quantity} ${line.unit}`,
               ),
             ),
           ),
@@ -1727,7 +1722,7 @@ export function createStoreOperations(context) {
               if (
                 (placement.lines || []).some(
                   (line) =>
-                    line.selectionMode === "mix" && !line.allocations?.length,
+                    ["mix","each"].includes(line.selectionMode) && !line.allocations?.length,
                 )
               )
                 throw new Error(
