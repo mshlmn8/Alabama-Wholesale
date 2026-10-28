@@ -787,16 +787,21 @@ function workspaceProtection() {
   if (pending) return { label: `${pending} action pending`, tone: "warning" };
   const unconfirmed = unconfirmedDrafts();
   if (unconfirmed.length) {
+    const needsAttention = unconfirmed.filter(
+      (item) => ["error", "conflict", "blocked"].includes(draftProtection(item.id).phase),
+    ).length;
     const unprotected = unconfirmed.some(
       (item) => !draftProtection(item.id).localPersisted,
     );
     return {
       label: unprotected
         ? "Draft not yet protected"
+        : needsAttention
+        ? `${needsAttention} ${needsAttention === 1 ? "draft needs" : "drafts need"} attention`
         : navigator.onLine
         ? `${unconfirmed.length} draft saving`
         : `${unconfirmed.length} draft on this device`,
-      tone: unprotected ? "error" : "warning",
+      tone: unprotected || needsAttention ? "error" : "warning",
     };
   }
   return {
@@ -1005,64 +1010,65 @@ async function api(path, { method = "GET", body, raw = false, signal } = {}) {
         ),
         { code: "NETWORK" },
       );
-    const headers = await firebase.credentials(false, scope.identity);
-    if (!scopeCurrent(scope)) throw new SessionChanged();
-    if (body !== undefined) headers["Content-Type"] = "application/json";
-    if (!navigator.onLine)
-      throw Object.assign(
-        new Error(
-          "You are offline. Check your draft’s save status before closing this tab.",
-        ),
-        { code: "NETWORK" },
-      );
-    const controller = new AbortController(),
-      timeout = setTimeout(() => controller.abort(), 45000);
-    const abort = () => controller.abort();
+    const controller = new AbortController();
+    let cancelRequest;
+    const cancelled = new Promise((resolve, reject) => { cancelRequest = reject; });
+    const cancel = (error) => {
+      cancelRequest(error);
+      controller.abort();
+    };
+    // Bound credentials, response headers AND the JSON body. Aborting fetch alone
+    // cannot release a stalled credential refresh, and headers are not a receipt.
+    const timeout = setTimeout(() => cancel(Object.assign(
+      new Error("The request timed out. Retry uses the same request ID."),
+      { code: "NETWORK" },
+    )), 45000);
+    const abort = () => cancel(new DOMException("Request cancelled", "AbortError"));
     signal?.addEventListener("abort", abort, { once: true });
-    if (signal?.aborted) controller.abort();
-    let response;
+    if (signal?.aborted) abort();
+    const request = async () => {
+      controller.signal.throwIfAborted();
+      const headers = await firebase.credentials(false, scope.identity);
+      if (!scopeCurrent(scope)) throw new SessionChanged();
+      // Credentials can complete after the deadline; never send that late action.
+      controller.signal.throwIfAborted();
+      if (body !== undefined) headers["Content-Type"] = "application/json";
+      if (!navigator.onLine)
+        throw Object.assign(new Error("Reconnect before retrying this request."), { code: "NETWORK" });
+      let response;
+      try {
+        response = await fetch(path, {
+          method,
+          headers,
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: controller.signal,
+          cache: "no-store",
+        });
+      } catch {
+        throw Object.assign(new Error(
+          "Could not reach the server. Check your draft’s save status before closing this tab.",
+        ), { code: "NETWORK" });
+      }
+      if (!scopeCurrent(scope)) throw new SessionChanged();
+      if (!response.ok) {
+        let data;
+        try { data = await response.json(); } catch {}
+        throw Object.assign(new Error(
+          data?.error?.message || `The server could not complete the request (${response.status}).`,
+        ), {
+          code: data?.error?.code || String(response.status),
+          status: response.status,
+          outcome: data?.error?.outcome === "rejected" ? "rejected" : null,
+        });
+      }
+      return raw ? response : response.json();
+    };
     try {
-      response = await fetch(path, {
-        method,
-        headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: controller.signal,
-        cache: "no-store",
-      });
-    } catch (error) {
-      if (signal?.aborted)
-        throw new DOMException("Request cancelled", "AbortError");
-      throw Object.assign(
-        new Error(
-          error.name === "AbortError"
-            ? "The request timed out. Retry uses the same request ID."
-            : "Could not reach the server. Check your draft’s save status before closing this tab.",
-        ),
-        { code: "NETWORK" },
-      );
+      return await Promise.race([request(), cancelled]);
     } finally {
       clearTimeout(timeout);
       signal?.removeEventListener("abort", abort);
     }
-    if (!scopeCurrent(scope)) throw new SessionChanged();
-    if (!response.ok) {
-      let data;
-      try {
-        data = await response.json();
-      } catch {}
-      throw Object.assign(
-        new Error(
-          data?.error?.message ||
-            `The server could not complete the request (${response.status}).`,
-        ),
-        {
-          code: data?.error?.code || String(response.status),
-          status: response.status,
-          outcome: data?.error?.outcome === "rejected" ? "rejected" : null,
-        },
-      );
-    }
-    return raw ? response : response.json();
   });
 }
 function editorIsActive() {
@@ -1262,7 +1268,30 @@ async function sendEntry(entry) {
       scopeCurrent,
       () => api("/api/commands", { method: "POST", body: entry.command }),
       (data) => {
-        const result = data.result || {};
+        const result = data?.result;
+        const order = result?.order || result;
+        const { type, payload } = entry.command;
+        let confirmed = !!result && typeof result === "object" && !Array.isArray(result);
+        if (["order.save", "order.submit"].includes(type)) {
+          confirmed = confirmed && order.id === payload.id &&
+            typeof order.storeId === "string" && !!order.storeId &&
+            (!payload.storeId || order.storeId === payload.storeId) &&
+            Array.isArray(order.lines) && Number.isSafeInteger(order.version) && order.version > 0 &&
+            (type === "order.save" ? order.status === "draft" :
+              ["submitted", "approved", "picking", "delivered"].includes(order.status) &&
+              typeof order.invoiceNumber === "string" && !!order.invoiceNumber);
+        } else if (type === "order.handoff") {
+          confirmed = confirmed && typeof result.id === "string" && !!result.id &&
+            result.orderId === payload.id && result.snapshot?.id === payload.id &&
+            typeof result.storeId === "string" && !!result.storeId &&
+            result.snapshot.storeId === result.storeId && Array.isArray(result.snapshot.lines) &&
+            typeof result.contentHash === "string" && !!result.contentHash &&
+            Number.isSafeInteger(result.orderVersion) && result.orderVersion > 0 &&
+            (payload.expectedVersion === undefined || result.orderVersion === payload.expectedVersion);
+        }
+        if (!confirmed) throw Object.assign(new Error(
+          "The server response did not confirm this action. Retry in Sync center to check the original request.",
+        ), { code: "INVALID_CONFIRMATION" });
         if (entry.command.type === "order.save") {
           scope.workspace.markDraftSynced(
             entry.command.payload.id,

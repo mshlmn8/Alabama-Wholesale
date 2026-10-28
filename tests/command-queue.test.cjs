@@ -163,3 +163,48 @@ test("an uncertain order submit retains its exact request and retries without a 
   assert.equal((await f.repo.list("ledger")).length, 1);
   assert.equal(f.workspace.pending().length, 0);
 });
+
+test("incomplete or mismatched submission responses preserve the draft and original retry", async () => {
+  for (const damage of [() => ({}), () => ({ result: {} }),
+    result => ({ result: { ...result, id: "another-order" } }),
+    result => ({ result: { ...result, status: "draft" } }),
+    result => ({ result: { ...result, invoiceNumber: undefined } }),
+  ]) {
+    const f = await fixture();
+    const originalDraft = f.workspace.getDraft(f.draft.id), api = f.context.api;
+    f.context.api = async (url, options) => damage((await api(url, options)).result);
+    await assert.rejects(() => f.command("order.submit", {
+      id: f.draft.id, expectedVersion: f.draft.version, expectedTotalCents: 400,
+    }), { code: "INVALID_CONFIRMATION" });
+    assert.deepEqual(f.workspace.getDraft(f.draft.id), originalDraft);
+    assert.equal(f.workspace.pending().length, 1);
+    assert.equal(f.workspace.rejected().length, 0);
+    const pending = f.workspace.pending()[0].command;
+    f.context.api = api;
+    await f.flush(true);
+    assert.deepEqual(f.calls, [pending, pending]);
+    assert.equal((await f.repo.list("ledger")).length, 1);
+    assert.equal(f.workspace.getDraft(f.draft.id), null);
+    assert.equal(f.workspace.pending().length, 0);
+  }
+});
+
+test("a mismatched save or handoff confirmation remains recoverable with the same request", async () => {
+  for (const type of ["order.save", "order.handoff"]) {
+    const f = await fixture(), api = f.context.api;
+    const before = f.workspace.getDraft(f.draft.id);
+    f.context.api = async (url, options) => {
+      const data = await api(url, options);
+      return { result: { ...data.result, ...(type === "order.save" ? { id: "wrong" } : { orderId: "wrong" }) } };
+    };
+    await assert.rejects(() => f.command(type, {
+      id: f.draft.id, expectedVersion: f.draft.version,
+    }, { localRevision: before.localRevision }), { code: "INVALID_CONFIRMATION" });
+    assert.deepEqual(f.workspace.getDraft(f.draft.id), before);
+    const pending = f.workspace.pending()[0].command;
+    f.context.api = api;
+    await f.flush(true);
+    assert.deepEqual(f.calls, [pending, pending]);
+    assert.equal(f.workspace.pending().length, 0);
+  }
+});

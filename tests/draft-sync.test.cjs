@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 const { MemoryRepository } = require("../lib/repository.cjs");
 const { executeCommand } = require("../lib/domain.cjs");
 const modules = new Map();
@@ -447,6 +448,60 @@ test("a validation rejection waits for a corrected edit and then uses a new comm
   assert.notEqual(f.calls[0].id, f.calls[1].id);
   assert.equal(f.sync.status("d1").cloudConfirmed, true);
 });
+test("a correction made while a rejected save is in flight saves without another edit", async () => {
+  const gate = deferred();
+  let first = true;
+  const f = await fixture({ send: async (command, actual) => {
+    if (first) { first = false; await gate.promise; }
+    return actual(command);
+  } });
+  f.edit({ lines: [{ id: "l1", productId: "p1", variant: "bad", quantity: 1, unit: "each" }] });
+  await f.timers.advance(600);
+  const oldSave = f.sync.flush("d1");
+  const rejected = assert.rejects(oldSave, { code: "INVALID_VARIANT" });
+  f.edit({ lines: [{ id: "l1", productId: "p1", variant: "Lime", quantity: 2, unit: "each" }] });
+  const correctedSave = f.sync.flush("d1");
+  // Attach immediately so an incorrectly rejected new waiter is also observed.
+  const correctedResult = correctedSave.then(value => ({ value }), error => ({ error }));
+  gate.resolve();
+  await rejected;
+  await f.timers.advance(2000);
+  assert.equal(f.calls.length, 2, "the corrected revision must run automatically");
+  assert.notEqual(f.calls[0].id, f.calls[1].id);
+  assert.equal(f.sync.status("d1").cloudConfirmed, true);
+  assert.equal((await correctedResult).value?.lines[0].quantity, 2);
+  assert.equal((await f.repo.get("orders", "d1")).version, 1);
+});
+
+test("an authentication failure on replay keeps the original save before corrected edits", async () => {
+  let attempt = 0;
+  const f = await fixture({ send: async (command, actual) => {
+    attempt++;
+    if (attempt === 2)
+      throw Object.assign(new Error("Sign in again"), { status: 401, code: "UNAUTHENTICATED" });
+    const result = await actual(command);
+    if (attempt === 1) throw Object.assign(new Error("Response lost"), { code: "NETWORK" });
+    return result;
+  } });
+  f.edit({ notes: "Original save" });
+  await f.timers.advance(2000);
+  assert.equal(f.sync.status("d1").phase, "error");
+  f.edit({ notes: "Keep these newer edits" });
+  await f.timers.advance(2000);
+  assert.equal(f.calls.length, 2, "unproven auth failures cannot discard the original receipt");
+  f.sync.dispose();
+  f.sync = f.setup();
+  f.sync.seed([]);
+  await f.sync.retry("d1");
+  assert.deepEqual(f.calls[2], f.calls[0]);
+  assert.notEqual(f.calls[3].id, f.calls[0].id);
+  assert.equal(f.calls[3].payload.expectedVersion, 1);
+  const order = await f.repo.get("orders", "d1");
+  assert.equal(order.version, 2);
+  assert.equal(order.notes, "Keep these newer edits");
+  assert.equal(f.sync.status("d1").cloudConfirmed, true);
+});
+
 test("automatic transient retries stop after five attempts and retain the exact recovery command", async () => {
   let fail = true;
   const f = await fixture({
@@ -467,10 +522,22 @@ test("automatic transient retries stop after five attempts and retain the exact 
   f.sync.seed([]);
   await f.timers.advance(120000);
   assert.equal(f.calls.length, 5);
+  assert.equal(f.sync.status("d1").phase, "error");
+  assert.equal(f.sync.status("d1").code, "RETRY_LIMIT");
+  await assert.rejects(() => f.sync.flush("d1"), { code: "RETRY_LIMIT" });
+  const app = fs.readFileSync(path.join(__dirname, "../public/app.js"), "utf8");
+  const view = vm.createContext({
+    ws: f.ws, navigator: { onLine: true },
+    unconfirmedDrafts: () => f.ws.listDrafts().filter(draft => !f.sync.status(draft.id).cloudConfirmed),
+    draftProtection: id => f.sync.status(id),
+  });
+  vm.runInContext(app.slice(app.indexOf("function workspaceProtection("), app.indexOf("function updateWorkspaceProtection(")), view);
+  assert.equal(view.workspaceProtection().label, "1 draft needs attention");
   fail = false;
   await f.sync.retry("d1");
   assert.equal(f.calls.length, 6);
   assert.equal(f.sync.status("d1").cloudConfirmed, true);
+  assert.equal(view.workspaceProtection().label, "Saved online");
 });
 test("same-draft manual save or submit blocks autosave until the queued action is resolved", async () => {
   const f = await fixture();
