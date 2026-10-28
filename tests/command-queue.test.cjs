@@ -61,7 +61,7 @@ async function fixture() {
   });
   const source = fs.readFileSync(path.join(__dirname, "../public/app.js"), "utf8");
   vm.runInContext(source.slice(source.indexOf("async function sendEntry("), source.indexOf("function setView(")), context);
-  return { workspace, repo, calls, actual, draft, command: context.command, flush: context.flushQueue,
+  return { workspace, repo, calls, actual, draft, context, command: context.command, flush: context.flushQueue,
     send: (fn) => { send = fn; }, account: (value) => { current = value; } };
 }
 
@@ -77,6 +77,50 @@ test("a pending settings save does not prevent compiling an order for Mail", asy
   await f.flush(true);
   assert.deepEqual(f.calls[1], entry.command);
   assert.equal(f.workspace.pending().length, 0);
+});
+
+test("a rejected stale handoff stops blocking and a fresh review succeeds", async () => {
+  const f = await fixture();
+  const local = f.workspace.getDraft(f.draft.id);
+  await assert.rejects(() => f.command("order.handoff", {
+    id: f.draft.id, expectedVersion: 0,
+  }), { code: "VERSION_CONFLICT" });
+  assert.equal(f.workspace.pending().length, 0);
+  assert.equal(f.workspace.rejected().length, 1);
+  const rejected = f.workspace.rejected()[0];
+  assert.equal(rejected.command.payload.expectedVersion, 0);
+  assert.deepEqual(f.workspace.getDraft(f.draft.id), local);
+  const result = await f.command("order.handoff", {
+    id: f.draft.id, expectedVersion: f.draft.version,
+  });
+  assert.equal(result.orderId, f.draft.id);
+  assert.notEqual(f.calls[0].id, f.calls[1].id);
+  await f.flush(true);
+  assert.equal(f.calls.length, 2, "retry never replays the rejected request");
+  assert.deepEqual(f.workspace.rejected()[0], rejected);
+  assert.equal((await f.repo.list("ledger")).length, 0);
+});
+
+test("manual retry cannot report confirmation when offline or already syncing", async () => {
+  const f = await fixture();
+  f.workspace.enqueue({ id: "offline", type: "notification.read", payload: { id: "n1" } });
+  f.context.navigator.onLine = false;
+  await assert.rejects(() => f.flush(true), /connect|offline/i);
+  f.context.navigator.onLine = true;
+  f.context.queueBusy = true;
+  await assert.rejects(() => f.flush(true), /already|progress/i);
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.workspace.pending().length, 1);
+});
+
+test("a server-proven validation rejection leaves history without blocking corrections", async () => {
+  const f = await fixture();
+  await assert.rejects(() => f.command("product.save", { name: "" }), { code: "INVALID_INPUT" });
+  assert.equal(f.workspace.pending().length, 0);
+  assert.equal(f.workspace.rejected()[0].outcome, "rejected");
+  const result = await f.command("product.save", { name: "Corrected product" });
+  assert.equal(result.name, "Corrected product");
+  assert.equal(f.workspace.rejected().length, 1);
 });
 
 test("a pending notification read does not prevent a reviewed order submission", async () => {

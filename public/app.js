@@ -2,7 +2,7 @@ import { createOrderCredits } from "./order-credits.js";
 import { createOrderWorkflow } from "./order-workflow.js";
 import { createStoreOperations } from "./store-operations.js";
 import { createAssortmentPanel, assortmentLabel, showPicking } from "./order-assortments.js";
-import { Workspace, StorageFailure, createDraft } from "./storage.js";
+import { Workspace, StorageFailure, createDraft, isRejectedAction } from "./storage.js";
 import { openDeviceStorage, createDeviceStorage } from "./device-storage.js";
 import { createStorageRecovery } from "./storage-recovery.js";
 import * as firebase from "./firebase.js";
@@ -1058,6 +1058,7 @@ async function api(path, { method = "GET", body, raw = false, signal } = {}) {
         {
           code: data?.error?.code || String(response.status),
           status: response.status,
+          outcome: data?.error?.outcome === "rejected" ? "rejected" : null,
         },
       );
     }
@@ -1291,6 +1292,7 @@ async function sendEntry(entry) {
       friendlyError(error),
       error.code || "UNCONFIRMED",
       error.status,
+      error.outcome,
     );
     throw error;
   }
@@ -1298,10 +1300,19 @@ async function sendEntry(entry) {
   return result;
 }
 async function flushQueue(manual = false) {
-  if (queueBusy || !session || !navigator.onLine) return;
+  if (queueBusy || !session || !navigator.onLine) {
+    if (manual)
+      throw new Error(queueBusy
+        ? "A sync is already in progress. Wait for it to finish."
+        : !session ? "Sign in before retrying pending actions."
+        : "Reconnect before retrying pending actions. Nothing was sent.");
+    return;
+  }
+  const scope = operationScope();
   queueBusy = true;
   try {
-    for (const entry of ws.pending()) {
+    for (const entry of scope.workspace.pending()) {
+      if (!scopeCurrent(scope)) throw new SessionChanged();
       if (entry.error && !manual) break;
       await sendEntry(entry);
     }
@@ -6419,34 +6430,42 @@ function renderMore() {
   return root;
 }
 function showSyncCenter() {
+  const scope = operationScope();
+  const requireCurrent = () => {
+    if (!scopeCurrent(scope)) throw new SessionChanged();
+  };
   const m = modal(
     "Sync center",
-    "Drafts save online automatically. Actions below still need confirmation from the server.",
+    "Drafts save online automatically. Pending actions need confirmation; rejected actions are kept for review and do not block new work.",
     true,
   );
-  const pending = ws.pending();
+  const pending = scope.workspace.pending();
+  const rejectedActions = scope.workspace.rejected();
   if (!pending.length)
     append(
       m.content,
       empty(
-        "Everything is confirmed",
+        rejectedActions.length ? "No actions waiting" : "Everything is confirmed",
         "There are no pending server actions on this device.",
         [],
         "check",
       ),
     );
-  else
+  for (const [label, entries] of [
+    ["Pending actions", pending],
+    ["Rejected actions", rejectedActions],
+  ]) {
+    if (!entries.length) continue;
+    append(m.content, el("h2", {}, label));
+    if (label === "Rejected actions")
+      append(m.content, notice("These requests were not applied. Your saved orders and drafts are kept. Review the current information before trying a new action."));
     append(
       m.content,
       el(
         "div",
         { class: "stack" },
-        pending.map((entry) => {
-          const rejected =
-            Number.isInteger(entry.status) &&
-            entry.status >= 400 &&
-            entry.status < 500 &&
-            ![408, 425, 429].includes(entry.status);
+        entries.map((entry) => {
+          const rejected = isRejectedAction(entry);
           return el(
             "div",
             { class: "panel" },
@@ -6454,7 +6473,7 @@ function showSyncCenter() {
               "div",
               { class: "split" },
               el("h3", {}, titleCase(entry.command.type.replace(".", " "))),
-              status(entry.error ? "failed" : "pending"),
+              status(rejected ? "rejected" : entry.error ? "failed" : "pending"),
             ),
             el(
               "p",
@@ -6470,12 +6489,39 @@ function showSyncCenter() {
             el(
               "div",
               { class: "actions" },
-              button(
+              !rejected ? button(
                 "Retry same request",
                 async () => {
-                  await flushQueue(true);
-                  m.close();
-                  toast("Pending actions confirmed.");
+                  requireCurrent();
+                  try {
+                    await flushQueue(true);
+                    requireCurrent();
+                    if (!scope.workspace.pending().length)
+                      toast("Pending actions confirmed.");
+                  } finally {
+                    if (scopeCurrent(scope)) {
+                      m.close();
+                      render();
+                      showSyncCenter();
+                    }
+                  }
+                },
+                "primary",
+              ) : button(
+                entry.command.type.startsWith("order.") && entry.command.payload?.id
+                  ? "Review current order" : "Refresh workspace",
+                async () => {
+                  requireCurrent();
+                  if (entry.command.type.startsWith("order.") && entry.command.payload?.id) {
+                    const result = await api(`/api/orders/${encodeURIComponent(entry.command.payload.id)}`);
+                    requireCurrent();
+                    m.close();
+                    await showOrder(result.order);
+                  } else {
+                    await refresh();
+                    requireCurrent();
+                    m.close();
+                  }
                 },
                 "primary",
               ),
@@ -6483,6 +6529,7 @@ function showSyncCenter() {
                 ? button(
                     "Remove rejected action",
                     async () => {
+                      requireCurrent();
                       if (
                         !(await confirmAction(
                           "Remove this rejected action?",
@@ -6491,18 +6538,22 @@ function showSyncCenter() {
                         ))
                       )
                         return;
-                      ws.acknowledge(entry.command.id);
-                      await refresh();
+                      requireCurrent();
+                      scope.workspace.acknowledge(entry.command.id);
+                      await scope.workspace.flushStorage();
+                      requireCurrent();
+                      render();
                       m.close();
                       showSyncCenter();
                     },
                     "danger",
                   )
                 : null,
-              entry.code?.includes("CONFLICT") &&
+              rejected && entry.code?.includes("CONFLICT") &&
                 entry.command.type === "order.save"
                 ? button("Keep edits as a new draft", () => {
-                    const old = ws.getDraft(entry.command.payload.id);
+                    requireCurrent();
+                    const old = scope.workspace.getDraft(entry.command.payload.id);
                     if (!old)
                       throw new Error("This local draft could not be found.");
                     const copy = {
@@ -6512,7 +6563,6 @@ function showSyncCenter() {
                       localRevision: 0,
                       syncState: "local",
                     };
-                    ws.acknowledge(entry.command.id);
                     draft = saveWorkingDraft(copy);
                     storeId = copy.storeId;
                     ws.rememberPreferences({
@@ -6531,14 +6581,16 @@ function showSyncCenter() {
         }),
       ),
     );
+  }
   append(
     m.footer,
-    button("Export local drafts", () =>
+    button("Export local drafts", () => {
+      requireCurrent();
       download(
         `alabama-workspace-${new Date().toISOString().slice(0, 10)}.json`,
-        JSON.stringify(ws.exportBackup(), null, 2),
-      ),
-    ),
+        JSON.stringify(scope.workspace.exportBackup(), null, 2),
+      );
+    }),
     button("Close", m.close),
   );
 }

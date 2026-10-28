@@ -19,6 +19,58 @@ function memory() {
     removeItem: (k) => data.delete(k),
   };
 }
+test("legacy version rejections are reviewable without blocking or rewriting device data", async () => {
+  const { Workspace } = await load();
+  const store = memory();
+  const ws = new Workspace(store, "rejected");
+  const draft = ws.saveDraft({ id: "draft", lines: [], notes: "keep these notes" });
+  const entry = ws.enqueue({ id: "old", type: "order.handoff", payload: { id: "draft", expectedVersion: 1 } });
+  ws.fail(entry.command.id, "This record changed.", "VERSION_CONFLICT", 409);
+  const bytes = store.getItem(ws.key);
+  const reloaded = new Workspace(store, "rejected");
+  assert.equal(reloaded.pending().length, 0);
+  assert.equal(reloaded.rejected()[0].command.id, "old");
+  assert.deepEqual(reloaded.exportBackup().queue[0].command, entry.command);
+  assert.deepEqual(reloaded.getDraft("draft"), draft);
+  assert.equal(store.getItem(ws.key), bytes);
+});
+
+test("only proven rejections leave the active queue", async () => {
+  const { Workspace } = await load();
+  for (const [code, status, outcome, rejected] of [
+    ["INVALID_INPUT", 400, "rejected", true],
+    ["NOT_FOUND", 404, "rejected", true],
+    ["VERSION_CONFLICT", 409, undefined, true],
+    ["COMMAND_CONFLICT", 409, undefined, false],
+    ["FORBIDDEN", 403, undefined, false],
+    ["UNAUTHENTICATED", 401, undefined, false],
+    ["NOT_FOUND", 404, undefined, false],
+    ["NETWORK", undefined, undefined, false],
+    ["TIMEOUT", 408, "rejected", false],
+    ["TOO_EARLY", 425, "rejected", false],
+    ["RATE_LIMIT", 429, "rejected", false],
+    ["INTERNAL", 500, "rejected", false],
+  ]) {
+    const ws = new Workspace(memory(), "classify");
+    ws.enqueue({ id: "action", type: "order.submit", payload: { id: "draft" } });
+    ws.fail("action", "Failure", code, status, outcome);
+    assert.equal(ws.pending().length, rejected ? 0 : 1, code);
+    assert.equal(ws.rejected().length, rejected ? 1 : 0, code);
+  }
+});
+
+test("a rejected submission releases draft editing and cloud conflict recovery", async () => {
+  const { Workspace } = await load();
+  const ws = new Workspace(memory(), "editable");
+  const draft = ws.saveDraft({ id: "draft", lines: [], notes: "original" });
+  ws.enqueue({ id: "rejected-submit", type: "order.submit", payload: { id: "draft" } });
+  ws.fail("rejected-submit", "This record changed.", "VERSION_CONFLICT", 409);
+  const edited = ws.saveDraft({ ...draft, notes: "corrected" });
+  assert.equal(edited.notes, "corrected");
+  ws.reloadDraftFromCloud({ id: "draft", status: "draft", version: 2, lines: [], notes: "reviewed cloud copy" }, edited.localRevision);
+  assert.equal(ws.getDraft("draft").version, 2);
+  assert.equal(ws.rejected().length, 1);
+});
 test("failed persistence is surfaced and does not claim a draft was saved", async () => {
   const { Workspace } = await load();
   const store = memory();
