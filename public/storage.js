@@ -1,4 +1,14 @@
 const clone = (value) => JSON.parse(JSON.stringify(value));
+export function isRejectedAction(entry) {
+  // Only a transaction with no prior receipt can prove a rejection. Generic
+  // HTTP failures (including auth failures on a replay) may hide a committed
+  // action. VERSION_CONFLICT is the equivalent proof in older app versions.
+  return Number.isInteger(entry?.status) &&
+    entry.status >= 400 && entry.status < 500 &&
+    ![408, 425, 429].includes(entry.status) &&
+    (entry.outcome === "rejected" ||
+      (entry.status === 409 && entry.code === "VERSION_CONFLICT"));
+}
 const orderNumber = (draft) =>
   Number.isSafeInteger(draft?.orderNumber) && draft.orderNumber > 0
     ? draft.orderNumber
@@ -222,8 +232,9 @@ export class Workspace {
     return !!(
       data.queue.some(
         (entry) =>
-          entry.command?.payload?.id === id ||
-          entry.command?.payload?.orderId === id,
+          !isRejectedAction(entry) &&
+          (entry.command?.payload?.id === id ||
+            entry.command?.payload?.orderId === id),
       ) ||
       data.draftAutosave?.[id] ||
       this.recoveryOverrides.get(id)
@@ -245,6 +256,7 @@ export class Workspace {
     if (
       data.queue.some(
         (entry) =>
+          !isRejectedAction(entry) &&
           entry.command.type === "order.submit" &&
           entry.command.payload.id === draft.id,
       )
@@ -390,6 +402,7 @@ export class Workspace {
     if (
       data.queue.some(
         (entry) =>
+          !isRejectedAction(entry) &&
           ["order.save", "order.submit"].includes(entry.command.type) &&
           entry.command.payload.id === remote.id,
       )
@@ -626,15 +639,19 @@ export class Workspace {
     });
   }
   pending() {
-    return clone(this.read().queue);
+    return clone(this.read().queue.filter((entry) => !isRejectedAction(entry)));
   }
-  fail(id, error, code = "", status = null) {
+  rejected() {
+    return clone(this.read().queue.filter(isRejectedAction));
+  }
+  fail(id, error, code = "", status = null, outcome = null) {
     this.mutate((data) => {
       const item = data.queue.find((entry) => entry.command.id === id);
       if (item) {
         item.error = String(error);
         item.code = code;
         item.status = status;
+        item.outcome = outcome === "rejected" ? outcome : null;
         item.lastAttemptAt = Date.now();
       }
     });

@@ -16,6 +16,40 @@ const customer = {
   email_verified: true,
   firebase: { sign_in_provider: "password" },
 };
+test("command errors identify a proven rejection without changing business records", async (t) => {
+  const { request, repo } = await fixture(t);
+  const before = await repo.snapshot(["orders", "ledger", "commandReceipts", "orderHandoffs"]);
+  const response = await request("/api/commands", "owner", {
+    id: "stale-handoff", type: "order.handoff", payload: { id: "o1", expectedVersion: 0 },
+  });
+  assert.equal(response.status, 409);
+  assert.equal(JSON.parse(response.body).error.outcome, "rejected");
+  assert.deepEqual(await repo.snapshot(Object.keys(before)), before);
+  const invalid = await request("/api/commands", "owner", {
+    id: "invalid-product", type: "product.save", payload: { name: "" },
+  });
+  assert.equal(invalid.status, 400);
+  assert.equal(JSON.parse(invalid.body).error.outcome, "rejected");
+});
+
+test("authentication failures and mismatched receipts cannot claim a command was rejected", async (t) => {
+  const { request, repo } = await fixture(t);
+  const command = { id: "receipt", type: "preferences.save", payload: { theme: "dark", expectedVersion: 0 } };
+  const signedOut = await request("/api/commands", null, command);
+  assert.equal(signedOut.status, 401);
+  assert.equal(JSON.parse(signedOut.body).error.outcome, undefined);
+  assert.equal((await request("/api/commands", "owner", command)).status, 200);
+  const changed = await request("/api/commands", "owner", { ...command, payload: { ...command.payload, theme: "light" } });
+  assert.equal(changed.status, 409);
+  assert.equal(JSON.parse(changed.body).error.code, "COMMAND_CONFLICT");
+  assert.equal(JSON.parse(changed.body).error.outcome, undefined);
+  const product = { id: "committed-product", type: "product.save", payload: { name: "Product" } };
+  assert.equal((await request("/api/commands", "owner", product)).status, 200);
+  await repo.put("users", "owner", { ...(await repo.get("users", "owner")), role: "customer", storeIds: ["one"] });
+  const replay = await request("/api/commands", "owner", product);
+  assert.equal(replay.status, 403);
+  assert.equal(JSON.parse(replay.body).error.outcome, undefined);
+});
 async function fixture(t, config = {}) {
   const repo = new MemoryRepository({
     users: [

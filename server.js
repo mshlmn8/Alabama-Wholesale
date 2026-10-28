@@ -1078,6 +1078,7 @@ function createApp({
     res.status(status).json({
       error: {
         code: e.code || "internal_error",
+        ...(e.outcome === "rejected" ? { outcome: "rejected" } : {}),
         message:
           status >= 500 && !e.expose
             ? "The server could not complete this request. Please retry."
