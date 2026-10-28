@@ -18,6 +18,7 @@ import {
   categoryFilterIds,
   catalogCategoryHierarchy,
   categoryLabel,
+  sortCategories,
 } from "./category-navigation.js";
 import {
   productVariants,
@@ -2215,7 +2216,7 @@ function renderCatalog() {
     "aria-label": "Catalog categories",
   });
   function drawCategories() {
-    const all = catalogCategories;
+    const all = sortCategories(catalogCategories);
     const trail = categoryTrail(all, category);
     const row = (items, parent = null) => {
       const choices = [

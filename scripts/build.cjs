@@ -11,6 +11,8 @@ for (const file of [
   "lib/repository.cjs",
   "lib/record-capacity.cjs",
   "lib/migration.cjs",
+  "lib/legacy-subcategories.cjs",
+  "lib/restore-catalog-subcategories.cjs",
   "lib/assistant.cjs",
   "lib/assistant-chat.cjs",
   "lib/catalog-photo.cjs",
