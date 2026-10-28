@@ -140,6 +140,12 @@ export function createDraftSync({
     changed(entry);
     rejectWaiters(entry, error);
   }
+  function stopForRetryLimit(entry) {
+    stop(entry, "error", problem(
+      "RETRY_LIMIT",
+      "Automatic retries paused. Retry this draft when the connection is ready.",
+    ));
+  }
   function localStatus(entry) {
     try {
       return workspace.localDraftStatus(entry.id);
@@ -276,7 +282,8 @@ export function createDraftSync({
       entry.generation++;
       entry.lastEdit = now();
       if (entry.firstDirty === null) entry.firstDirty = now();
-      if (entry.definitive && entry.phase !== "conflict") {
+      if (entry.definitive && entry.phase !== "conflict" &&
+          entry.pending?.failure?.outcome === "rejected") {
         entry.pending = null;
         entry.definitive = false;
         entry.error = null;
@@ -343,7 +350,11 @@ export function createDraftSync({
       changed(entry);
       return;
     }
-    if (entry.definitive || (entry.pending?.attempts ?? 0) >= 5) return;
+    if (entry.definitive) return;
+    if ((entry.pending?.attempts ?? 0) >= 5) {
+      stopForRetryLimit(entry);
+      return;
+    }
     if (!online()) {
       stop(
         entry,
@@ -500,14 +511,7 @@ export function createDraftSync({
     }
     const pending = entry.pending;
     if (pending.attempts >= 5) {
-      stop(
-        entry,
-        "error",
-        problem(
-          "RETRY_LIMIT",
-          "Automatic retries paused. Retry this draft when the connection is ready.",
-        ),
-      );
+      stopForRetryLimit(entry);
       return;
     }
     entry.running = true;
@@ -564,6 +568,7 @@ export function createDraftSync({
         );
       const definitive =
         status >= 400 && status < 500 && ![408, 425, 429].includes(status);
+      const rejected = definitive && error.outcome === "rejected";
       entry.definitive = definitive;
       entry.error = error;
       if (conflict || definitive) {
@@ -572,10 +577,25 @@ export function createDraftSync({
           code: String(error.code || "SAVE_REJECTED"),
           message: String(error.message || "The draft save was rejected."),
           status,
+          ...(rejected ? { outcome: "rejected" } : {}),
         };
         remember(entry, pendingRecord(entry));
       }
-      if (conflict) stop(entry, "conflict", error);
+      if (rejected && !conflict && entry.key !== pending.key) {
+        // A correction may already be waiting when the old payload is rejected.
+        // Only proof of rejection lets us replace its immutable request safely.
+        entry.pending = null;
+        entry.definitive = false;
+        entry.error = null;
+        entry.phase = "dirty";
+        remember(entry, null);
+        const remaining = [];
+        for (const waiter of entry.waiters) {
+          if (waiter.generation <= pending.generation) waiter.reject(error);
+          else remaining.push(waiter);
+        }
+        entry.waiters = remaining;
+      } else if (conflict) stop(entry, "conflict", error);
       else if (definitive || pending.attempts >= 5) stop(entry, "error", error);
       else if (!online())
         stop(
@@ -825,8 +845,11 @@ export function createDraftSync({
       );
       return Promise.reject(entry.error);
     }
-    if (entry.definitive || (entry.pending?.attempts ?? 0) >= 5)
+    if (entry.definitive) return Promise.reject(entry.error);
+    if ((entry.pending?.attempts ?? 0) >= 5) {
+      stopForRetryLimit(entry);
       return Promise.reject(entry.error);
+    }
     const promise = new Promise((resolve, reject) =>
       entry.waiters.push({ generation: entry.generation, resolve, reject }),
     );
