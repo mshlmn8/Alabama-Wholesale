@@ -3,6 +3,11 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const workerSource = fs.readFileSync(
+  path.join(__dirname, "../public/sw.js"),
+  "utf8",
+);
+const currentVersion = workerSource.match(/const VERSION = "([^"]+)"/)[1];
 
 function worker({
   fetch = async () => new Response("fresh"),
@@ -22,34 +27,31 @@ function worker({
     match: async () => undefined,
     ...cache,
   };
-  vm.runInNewContext(
-    fs.readFileSync(path.join(__dirname, "../public/sw.js"), "utf8"),
-    {
-      URL,
-      fetch,
-      caches: {
-        open: async () => storage,
-        keys: async () => [],
-        delete: async (key) => {
-          calls.deleted.push(key);
-          return true;
-        },
-        ...caches,
+  vm.runInNewContext(workerSource, {
+    URL,
+    fetch,
+    caches: {
+      open: async () => storage,
+      keys: async () => [],
+      delete: async (key) => {
+        calls.deleted.push(key);
+        return true;
       },
-      self: {
-        location: { origin: "https://wholesale.example" },
-        addEventListener: (type, handler) => handlers.set(type, handler),
-        skipWaiting: async () => {
-          calls.skipped++;
-        },
-        clients: {
-          claim: async () => {
-            calls.claimed++;
-          },
+      ...caches,
+    },
+    self: {
+      location: { origin: "https://wholesale.example" },
+      addEventListener: (type, handler) => handlers.set(type, handler),
+      skipWaiting: async () => {
+        calls.skipped++;
+      },
+      clients: {
+        claim: async () => {
+          calls.claimed++;
         },
       },
     },
-  );
+  });
   return {
     calls,
     async lifecycle(type) {
@@ -181,13 +183,24 @@ test("activation removes old app caches without deleting unrelated caches", asyn
         "aw-v2-20260922-4",
         "aw-v2-20260928-1",
         "aw-v2-20260928-2",
+        "aw-v2-20261008-1",
+        "aw-v2-20261012-1",
+        currentVersion,
         "aw-warehouse-v1",
         "other-app",
       ],
     },
   });
   await sw.lifecycle("activate");
-  assert.deepEqual(sw.calls.deleted, ["aw-v2-20260914-2", "alabama-legacy", "aw-v2-20260922-4", "aw-v2-20260928-1"]);
+  assert.deepEqual(sw.calls.deleted, [
+    "aw-v2-20260914-2",
+    "alabama-legacy",
+    "aw-v2-20260922-4",
+    "aw-v2-20260928-1",
+    "aw-v2-20260928-2",
+    "aw-v2-20261008-1",
+    "aw-v2-20261012-1",
+  ]);
   assert.equal(sw.calls.claimed, 1);
 });
 

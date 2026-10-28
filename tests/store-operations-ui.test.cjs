@@ -967,3 +967,10 @@ test("placement UI loads older orders without duplicate cards and drops a late r
     ui.close();
   }
 });
+
+test('Each replenishment preserves one logical row and explicit exclusions',async()=>{
+ const {prepareReplenishmentLine}=await helpers;
+ const candidate={productId:product.id,variant:'',selectionMode:'each',allowedVariants:['Apple'],excludedVariants:['Orange'],status:'missing'};
+ const result=prepareReplenishmentLine(candidate,product,'2','each');assert.equal(result.selectionMode,'each');assert.equal(result.quantity,2);assert.deepEqual(result.allowedVariants,['Apple']);assert.deepEqual(result.excludedVariants,['Orange']);
+ assert.throws(()=>prepareReplenishmentLine({...candidate,allowedVariants:['Missing']},product,'2','each'),/flavor|available/i);
+});

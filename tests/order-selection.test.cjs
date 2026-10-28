@@ -15,6 +15,13 @@ const product = {
   packSize: 12,
 };
 
+test("new selections offer only actual named variants even on legacy Standard-enabled products", async () => {
+  const { productVariants, selectedProductLines } = await helpers;
+  const item = { ...product, standardVariantEnabled: true };
+  assert.deepEqual(productVariants(item), product.variants);
+  assert.deepEqual(selectedProductLines(item, ["2", "0", "0"], "each").map(line => [line.variant, line.quantity]), [["apple", 2]]);
+});
+
 test("flavor choices sort alphabetically with numeric names and base sensitivity without mutating the catalog", async () => {
   const { productVariants } = await helpers;
   const variants = Object.freeze([
@@ -43,36 +50,13 @@ test("flavor choices sort alphabetically with numeric names and base sensitivity
   ]);
 });
 
-test("quantities follow the displayed alphabetical flavor order with optional Standard first", async () => {
+test("quantities follow only the displayed named flavors on legacy products", async () => {
   const { productVariants, selectedProductLines } = await helpers;
-  const unsorted = Object.freeze({
-    ...product,
-    variants: Object.freeze(["orange", "apple", "cranberry"]),
-  });
   for (const standardVariantEnabled of [false, true]) {
-    const item = { ...unsorted, standardVariantEnabled };
-    const quantities = Object.freeze(
-      standardVariantEnabled ? ["4", "2", "0", "7"] : ["2", "0", "7"],
-    );
-    assert.deepEqual(productVariants(item), [
-      ...(standardVariantEnabled ? [""] : []),
-      "apple",
-      "cranberry",
-      "orange",
-    ]);
-    assert.deepEqual(
-      selectedProductLines(item, quantities, "each").map((line) => [
-        line.variant,
-        line.quantity,
-      ]),
-      [
-        ...(standardVariantEnabled ? [["", 4]] : []),
-        ["apple", 2],
-        ["orange", 7],
-      ],
-    );
+    const item = { ...product, variants: ["orange", "apple", "cranberry"], standardVariantEnabled };
+    assert.deepEqual(productVariants(item), ["apple", "cranberry", "orange"]);
+    assert.deepEqual(selectedProductLines(item, ["2", "0", "7"], "each").map(line => [line.variant, line.quantity]), [["apple", 2], ["orange", 7]]);
   }
-  assert.deepEqual(unsorted.variants, ["orange", "apple", "cranberry"]);
 });
 
 test("two flavors become separate lines and unselected flavors are omitted", async () => {
@@ -140,30 +124,14 @@ test("standard products and cases preserve the existing line contract", async ()
   );
 });
 
-test("products that gained flavors retain Standard without changing named variants", async () => {
+test("legacy Standard flags do not create extra options or mutate catalog data", async () => {
   const { productVariants, selectedProductLines } = await helpers;
   const mixed = { ...product, standardVariantEnabled: true };
   const before = structuredClone(mixed);
-  assert.deepEqual(productVariants(mixed), ["", ...product.variants]);
-  assert.deepEqual(
-    selectedProductLines(mixed, ["2", "0", "3", "0"], "each").map((line) => [
-      line.variant,
-      line.quantity,
-    ]),
-    [
-      ["", 2],
-      ["cranberry", 3],
-    ],
-  );
+  assert.deepEqual(productVariants(mixed), product.variants);
+  assert.deepEqual(selectedProductLines(mixed, ["2", "0", "3"], "each").map(line => [line.variant, line.quantity]), [["apple", 2], ["orange", 3]]);
   assert.deepEqual(mixed, before);
-  assert.deepEqual(
-    productVariants({ ...mixed, standardVariantEnabled: "true" }),
-    product.variants,
-  );
-  assert.deepEqual(
-    productVariants({ variants: [], standardVariantEnabled: true }),
-    [""],
-  );
+  assert.deepEqual(productVariants({ variants: [], standardVariantEnabled: true }), [""]);
 });
 
 function draftLine(overrides = {}) {

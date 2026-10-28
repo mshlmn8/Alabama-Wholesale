@@ -27,7 +27,7 @@ function body(draft) {
       quantity: line.quantity,
       unit: line.unit ?? "each",
       note: clean(line.note),
-      ...(line.selectionMode === "mix" ? {selectionMode:"mix",allowedVariants:clone(line.allowedVariants),excludedVariants:clone(line.excludedVariants || [])} : {}),
+      ...(["mix", "each"].includes(line.selectionMode) ? {selectionMode:line.selectionMode,allowedVariants:clone(line.allowedVariants),excludedVariants:clone(line.excludedVariants || [])} : {}),
     })),
     notes: clean(draft.notes),
     ...(draft.creditRequestIds ? {creditRequestIds:clone(draft.creditRequestIds)} : {}),

@@ -202,3 +202,13 @@ test('an empty source cannot consume the global restoration marker', async () =>
   await assert.rejects(() => restore(repo, { sourceCategories: [], sourceProducts: [], now, expectedFingerprint: 'a'.repeat(64) }), { code: 'INVALID_RESTORATION_INPUT' });
   assert.equal(await repo.get('settings', 'legacyCatalogHierarchyV1'), null);
 });
+
+test('persisted restoration works with the current catalog projection without duplicate children', async () => {
+  const input = fixture(), plan = run(input);
+  const { catalogCategoryHierarchy } = await import('data:text/javascript;base64,' + Buffer.from(fs.readFileSync(require('node:path').join(__dirname, '../public/category-navigation.js'), 'utf8')).toString('base64'));
+  const categories = [...input.categories, ...plan.categoryCreates];
+  const hierarchy = catalogCategoryHierarchy(categories, plan.productUpdates);
+  assert.equal(hierarchy.categories.length, categories.length);
+  assert.equal(hierarchy.categories.some(category => category.displayOnly), false);
+  assert.deepEqual(hierarchy.productCategoryIds.get('p1'), plan.productUpdates[0].categoryIds);
+});

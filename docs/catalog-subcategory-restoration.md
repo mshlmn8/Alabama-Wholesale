@@ -21,10 +21,12 @@ The archived catalog preview yields 49 child categories and 619 eligible product
 
 ## Verification
 
-- 799 Node 22 tests pass, including 30 restoration tests and nine legacy classification tests.
-- Eight Firestore emulator checks pass. The new check restores 619 products under concurrent retries, with one completion audit and unchanged saved orders.
+- 833 Node 22 tests pass, including 31 restoration tests and nine legacy classification tests.
+- Nine Firestore emulator checks pass. The restoration check restores 619 products under concurrent retries, with one completion audit and unchanged saved orders.
 - Build and diff checks pass.
 - The shared classifier matches all eight archived category lists and all 628 archived product classifications.
 - Synthetic browser checks confirm nested drink tabs, Waters-only filtering, custom Apparels filtering, and scrollable rows at 390px without page overflow.
 
 Live application requires authenticated Firebase access and is separate from deploying the code. Never claim the data restoration is complete based on the archived preview alone.
+
+The October 27 release preserves the newer catalog display projection and ordering layouts. Persisted children take precedence over projected children, with regression coverage preventing duplicate groups or memberships. The production dependency audit passes after compatible updates to body-parser, Nodemailer and qs.

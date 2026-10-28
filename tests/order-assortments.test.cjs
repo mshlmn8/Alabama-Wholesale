@@ -52,3 +52,40 @@ test('cancelled mixed orders release all per-flavor reservations once',async()=>
  await f.run('order.transition',{id:o.id,status:'cancelled',expectedVersion:o.version},buyer,'cancel');
  assert.equal((await f.repo.list('inventory')).reduce((s,x)=>s+x.reserved,0),0);
 });
+
+const each=(quantity=2,unit='each')=>({...mix(quantity,unit),selectionMode:'each'});
+test('Each prices one logical line per allowed flavor and preserves varied frozen prices and tax',()=>{
+ const order=calculateOrder([each()], [{...product,taxable:true,variantPricesCents:{Cola:115}}], {...store,taxRateBps:725});
+ assert.equal(order.lines.length,1);assert.equal(order.lines[0].selectionMode,'each');assert.equal(order.lines[0].quantity,2);assert.equal(order.lines[0].eachQuantity,4);assert.equal(order.subtotalCents,430);assert.equal(order.taxCents,32);
+ assert.deepEqual(order.lines[0].assortmentPricesCents,[{variant:'Orange',unitPriceCents:100},{variant:'Cola',unitPriceCents:115}]);
+});
+test('Each reserves quantity per allowed flavor without adding excluded stock',async()=>{
+ const f=fixture();const o=await submit(f,each(2,'case'));assert.equal(o.lines.length,1);assert.equal(o.totalCents,4800);
+ assert.equal((await f.repo.get('inventory',inventoryId('faygo','Orange'))).reserved,24);assert.equal((await f.repo.get('inventory',inventoryId('faygo','Cola'))).reserved,24);assert.equal((await f.repo.get('inventory',inventoryId('faygo','Grape'))).reserved,0);
+ await f.run('order.transition',{id:o.id,status:'cancelled',expectedVersion:o.version},buyer);assert.equal((await f.repo.list('inventory')).reduce((s,x)=>s+x.reserved,0),0);
+});
+test('Each needs actual per-flavor confirmation and never accepts a mix split or an excluded flavor',async()=>{
+ const f=fixture();let o=await submit(f,each());o=await f.run('order.transition',{id:o.id,status:'approved',expectedVersion:o.version});o=await f.run('order.transition',{id:o.id,status:'picking',expectedVersion:o.version});
+ await assert.rejects(f.run('order.transition',{id:o.id,status:'delivered',expectedVersion:o.version}),{code:'MIX_PICK_REQUIRED'});
+ for(const variants of [[{variant:'Orange',quantity:4}],[{variant:'Orange',quantity:2},{variant:'Grape',quantity:2}]])await assert.rejects(f.run('order.pick',{id:o.id,expectedVersion:o.version,allocations:[{lineId:'l1',variants}]}),{code:'INVALID_MIX_ALLOCATION'});
+ o=await f.run('order.pick',{id:o.id,expectedVersion:o.version,allocations:[{lineId:'l1',variants:[{variant:'Orange',quantity:2},{variant:'Cola',quantity:2}]}]});
+ o=await f.run('order.transition',{id:o.id,status:'delivered',expectedVersion:o.version});assert.equal(o.totalCents,400);assert.equal((await f.repo.get('inventory',inventoryId('faygo','Orange'))).onHand,98);assert.equal((await f.repo.get('inventory',inventoryId('faygo','Grape'))).onHand,100);
+ assert.equal((await f.repo.list('storeInventoryMovements')).reduce((s,x)=>s+x.quantityEach,0),4);
+});
+test('Each returns use per-flavor frozen prices and taxes',async()=>{
+ const f=fixture();await f.repo.put('products',product.id,{...product,taxable:true,variantPricesCents:{Cola:115}});await f.repo.put('stores',store.id,{...store,taxRateBps:725});
+ let o=await submit(f,each());o=await f.run('order.transition',{id:o.id,status:'approved',expectedVersion:o.version});o=await f.run('order.transition',{id:o.id,status:'picking',expectedVersion:o.version});o=await f.run('order.pick',{id:o.id,expectedVersion:o.version,allocations:[{lineId:'l1',variants:[{variant:'Orange',quantity:2},{variant:'Cola',quantity:2}]}]});o=await f.run('order.transition',{id:o.id,status:'delivered',expectedVersion:o.version});
+ const {helpers}=require('../lib/domain.cjs');const rows=helpers.returnableLines(o);assert.equal(rows.find(x=>x.variant==='Cola').unitPriceCents,115);assert.equal(rows.reduce((s,x)=>s+x.lineTotalCents,0),430);assert.equal(rows.reduce((s,x)=>s+x.taxCents,0),32);
+});
+
+test('legacy blank and prototype-named Each flavors retain frozen prices through snapshot serialization',()=>{
+ const legacy={...product,variants:['__proto__','Orange'],standardVariantEnabled:true,taxable:true,variantPricesCents:Object.fromEntries([['__proto__',125]])};
+ const line={...each(),allowedVariants:['','__proto__'],excludedVariants:['Orange']};
+ const calculated=calculateOrder([line],[legacy],{...store,taxRateBps:725});
+ assert.deepEqual(calculated.lines[0].assortmentPricesCents,[{variant:'',unitPriceCents:100},{variant:'__proto__',unitPriceCents:125}]);
+ const saved={...calculated.lines[0],pickedAt:1800000000001,allocations:[{variant:'',quantity:2,eachQuantity:2},{variant:'__proto__',quantity:2,eachQuantity:2}]};
+ const roundtrip=JSON.parse(JSON.stringify(saved));
+ assert.deepEqual(roundtrip.assortmentPricesCents,saved.assortmentPricesCents);
+ const {helpers}=require('../lib/domain.cjs');const rows=helpers.returnableLines({lines:[roundtrip]});
+ assert.equal(rows.find(row=>row.variant==='').unitPriceCents,100);assert.equal(rows.find(row=>row.variant==='__proto__').unitPriceCents,125);assert.equal(rows.reduce((sum,row)=>sum+row.lineTotalCents,0),calculated.subtotalCents);assert.equal(rows.reduce((sum,row)=>sum+row.taxCents,0),calculated.taxCents);
+});

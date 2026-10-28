@@ -1337,3 +1337,46 @@ test("master all-store status pages remain globally ordered across store boundar
     expected.map((row) => row.id),
   );
 });
+
+test("state exposes only a verified legacy fallback flag so catalog children work across the HTTP boundary", async (t) => {
+  const { request, repo } = await fixture(t);
+  const provenance = (collection) => ({ sourceHash: "a".repeat(64), sourcePath: `state/data/${collection}/0`, sourceChecksum: "PRIVATE_SOURCE_CHECKSUM" });
+  const categories = [
+    { id: "drinks", name: "DRINKS & BAGS", version: 1, migration: provenance("categories"), legacy: { raw: "PRIVATE_CATEGORY_ARCHIVE" } },
+    { id: "edited", name: "CANDIES", version: 2, updatedBy: "owner", migration: provenance("categories") },
+    { id: "new", name: "TOBACCO", version: 1, legacySubcategoryFallback: true },
+    { id: "invalid", name: "NOVELTIES", version: 1, migration: { ...provenance("categories"), sourcePath: {} } },
+    { id: "wrong-source", name: "MERCHANDISE", version: 1, migration: provenance("items") },
+  ];
+  const products = [
+    { id: "water", name: "Water bottle", version: 1, categoryIds: ["drinks"], migration: provenance("items"), legacy: { raw: "PRIVATE_PRODUCT_ARCHIVE" } },
+    { id: "modern", name: "Water bottle", version: 1, categoryIds: ["drinks"] },
+    { id: "changed", name: "Water bottle", version: 2, updatedBy: "owner", categoryIds: ["drinks"], migration: provenance("products") },
+  ];
+  for (const record of categories) await repo.put("categories", record.id, record);
+  for (const record of products) await repo.put("products", record.id, record);
+  const response = await request("/api/state", "customer");
+  assert.equal(response.status, 200, response.body);
+  const state = JSON.parse(response.body);
+  assert.equal(state.categories.find((item) => item.id === "drinks").legacySubcategoryFallback, true);
+  for (const id of ["edited", "new", "invalid", "wrong-source"])
+    assert.equal(state.categories.find((item) => item.id === id).legacySubcategoryFallback, undefined, id);
+  assert.equal(state.products.find((item) => item.id === "water").legacySubcategoryFallback, true);
+  for (const id of ["modern", "changed"])
+    assert.equal(state.products.find((item) => item.id === id).legacySubcategoryFallback, undefined, id);
+  for (const record of [...state.categories, ...state.products]) {
+    assert.equal(record.migration, undefined);
+    assert.equal(record.legacy, undefined);
+  }
+  for (const secret of ["a".repeat(64), "state/data/", "PRIVATE_SOURCE_CHECKSUM", "PRIVATE_CATEGORY_ARCHIVE", "PRIVATE_PRODUCT_ARCHIVE"])
+    assert.equal(response.body.includes(secret), false, secret);
+  const { catalogCategoryHierarchy, categoryFilterIds } = await import("../public/category-navigation.js");
+  const hierarchy = catalogCategoryHierarchy(state.categories, state.products);
+  const waters = hierarchy.categories.find((item) => item.name === "Waters");
+  assert.ok(waters, "HTTP projection retains enough information for the known legacy taxonomy");
+  const filter = categoryFilterIds(hierarchy.categories, waters.id);
+  assert.deepEqual(state.products.filter((item) => hierarchy.productCategoryIds.get(item.id).some((id) => filter.has(id))).map((item) => item.id), ["water"]);
+  for (const id of ["edited", "new", "invalid", "wrong-source"])
+    assert.equal(hierarchy.categories.some((item) => item.parentId === id), false, id);
+  assert.deepEqual((await repo.get("products", "water")).migration, products[0].migration, "read projection preserves private source evidence in storage");
+});

@@ -232,3 +232,11 @@ test("credit attachment changes invalidate an in-flight Mail handoff", async () 
   );
   assert.equal(h.commands.length, 0);
 });
+
+test('Each receipts confirm quantity per eligible flavor while retaining one selection row',async()=>{
+ const {prepareReceiptAllocations}=await helpers;
+ const placement={lines:[{id:'each',selectionMode:'each',quantity:2,unit:'each',allowedVariants:['Apple','Orange'],excludedVariants:['Grape']}]};
+ const rows=[{lineId:'each',allocations:[{variant:'Apple',quantity:2},{variant:'Orange',quantity:2}]}];
+ assert.deepEqual(prepareReceiptAllocations(placement,rows),rows);
+ for(const allocations of [[{variant:'Apple',quantity:4}],[{variant:'Apple',quantity:2},{variant:'Grape',quantity:2}]])assert.throws(()=>prepareReceiptAllocations(placement,[{lineId:'each',allocations}]),/quantity|flavor|permitted/i);
+});

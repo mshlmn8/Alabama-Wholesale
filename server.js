@@ -45,8 +45,21 @@ const ORDER_SUMMARY_FIELDS = [
   "legacy.needsPriceReview",
   "legacy.requiresReview",
 ];
-const publicCatalogRecord = (record) => {
-  const { migration, legacy, ...result } = record;
+const publicCatalogRecord = (record, collection) => {
+  const { migration, legacy, legacySubcategoryFallback, ...result } = record;
+  const sourcePath = migration?.sourcePath;
+  const sourceCollection = typeof sourcePath === "string"
+    ? /^state\/data\/(categories|items|products)\//u.exec(sourcePath)?.[1]
+    : null;
+  const expectedSource = collection === "categories"
+    ? sourceCollection === "categories"
+    : collection === "products" && ["items", "products"].includes(sourceCollection);
+  // Public catalog reads need only eligibility for the known legacy display
+  // taxonomy. Keep archive contents, hashes and source paths private, and never
+  // trust a flag stored on the record itself.
+  if (record.version === 1 && !record.updatedBy && expectedSource &&
+      /^[a-f0-9]{64}$/u.test(migration?.sourceHash || ""))
+    result.legacySubcategoryFallback = true;
   return result;
 };
 const PUBLIC = path.join(__dirname, "public");
@@ -214,7 +227,7 @@ function createApp({
   async function catalog(collection) {
     const cached = catalogCache.get(collection);
     if (cached && cached.expires > now()) return cached.value;
-    const value = (await repo.list(collection)).map(publicCatalogRecord);
+    const value = (await repo.list(collection)).map((record) => publicCatalogRecord(record, collection));
     catalogCache.set(collection, { value, expires: now() + 15000 });
     return value;
   }

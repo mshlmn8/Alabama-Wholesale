@@ -120,3 +120,10 @@ test('invoice PDFs retain every line above the old rendering cap',async()=>{
   const content=normalized(pdf);
   for(let i=0;i<lines.length;i++)assert.ok(content.includes(('LARGE-SKU-'+String(i).padStart(4,'0')).toLowerCase()),'missing line '+i);
 });
+
+test('Each invoice keeps 2 each and exclusions without adding allowed or picked flavor names',async()=>{
+ const {calculateOrder}=require('../lib/domain.cjs');
+ const calculated=calculateOrder([{id:'each',productId:'p1',variant:'',selectionMode:'each',quantity:2,allowedVariants:['Apple','Orange'],excludedVariants:['Grape'],unit:'each'}],[{id:'p1',name:'Drink',variants:['Apple','Orange','Grape'],priceCents:100,taxable:false}],{id:'store1',taxRateBps:0});
+ const original=fixture({...calculated,lines:calculated.lines.map(line=>({...line,pickedAt:1,allocations:[{variant:'Apple',quantity:2},{variant:'Orange',quantity:2}]}))});
+ const content=normalized(await renderDocument(original,currentStore,'invoice'));assert.ok(content.includes('2each'));assert.ok(content.includes('donotinclude:grape'));assert.ok(!content.includes('apple'));assert.ok(!content.includes('orange'));
+});
