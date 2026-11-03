@@ -1,4 +1,4 @@
-const VERSION = "aw-v2-20261102-1";
+const VERSION = "aw-v2-20261102-2";
 const SHELL = [
   "/",
   "/app.js",
@@ -36,8 +36,13 @@ const SHELL = [
   "/firebase.js",
   "/firebase-config.json",
   "/manifest.webmanifest",
-  "/assets/logo.png",
-  "/assets/app-icon-v2.svg",
+  "/assets/logo-transparent-v3.png",
+  "/assets/app-icon-v3-192.png",
+  "/assets/app-icon-v3-512.png",
+  "/assets/app-icon-maskable-v3-512.png",
+  "/assets/apple-touch-icon-v3.png",
+  "/assets/favicon-v3-32.png",
+  "/assets/favicon-v3-48.png",
   "/assets/fonts/manrope-latin.woff2",
 ];
 const SDK = "https://www.gstatic.com/firebasejs/12.19.0/";

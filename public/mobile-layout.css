@@ -31,7 +31,7 @@
     border-bottom: 1px solid var(--line);
   }
   .workspace-mark {
-    width: 56px;
+    width: 68px;
     max-height: 32px;
   }
   .topbar .store-picker-trigger {

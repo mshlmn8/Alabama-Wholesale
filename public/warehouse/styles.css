@@ -201,8 +201,9 @@ textarea:focus-visible,
 }
 .brand {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
   font-size: 13px;
   line-height: 1.3;
   text-decoration: none;
@@ -213,18 +214,16 @@ textarea:focus-visible,
   display: block;
   letter-spacing: 0.16em;
   font-size: 9px;
-  margin-top: 5px;
+  margin-top: 0;
   color: #adbec4;
 }
-.brand-mark {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #ef7138;
-  width: 41px;
-  height: 41px;
-  border-radius: 7px;
-  color: #fff;
+.brand-logo {
+  display: block;
+  width: 168px;
+  max-width: 100%;
+  height: auto;
+  object-fit: contain;
+  filter: brightness(0) invert(1);
   flex: 0 0 auto;
 }
 .sidebar nav {
@@ -705,20 +704,9 @@ dialog::backdrop {
 .auth-intro .eyebrow {
   color: #f6976b;
 }
-.warehouse-illustration {
-  height: 110px;
-  width: 125px;
-  border: 3px solid #628391;
-  transform: skewY(-8deg);
-  display: grid;
-  place-items: center;
-  margin: 15px 0 30px;
-  box-shadow: 14px 14px 0 #244758;
-}
-.warehouse-illustration span {
-  font-size: 38px;
-  font-weight: 800;
-  color: #f28c56;
+.auth-intro .brand-logo {
+  width: 240px;
+  margin: 0 0 30px;
 }
 .auth-screen form {
   display: flex;
@@ -779,9 +767,8 @@ dialog::backdrop {
   .brand small {
     font-size: 8px;
   }
-  .brand-mark {
-    width: 35px;
-    height: 35px;
+  .brand-logo {
+    width: 150px;
   }
   .sidebar nav {
     display: flex;
@@ -932,9 +919,12 @@ dialog::backdrop {
   .auth-intro h2 {
     font-size: 27px;
   }
-  .auth-intro p:last-child,
-  .warehouse-illustration {
+  .auth-intro p:last-child {
     display: none;
+  }
+  .auth-intro .brand-logo {
+    width: 150px;
+    margin-bottom: 18px;
   }
   .auth-screen form {
     padding: 28px;
