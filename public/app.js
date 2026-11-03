@@ -1768,10 +1768,10 @@ function render() {
     { class: "topbar" },
     el("img", {
       class: "workspace-mark",
-      src: "/assets/logo.png",
+      src: "/assets/logo-transparent-v3.png",
       alt: "Alabama Wholesale",
-      width: 1050,
-      height: 370,
+      width: 1386,
+      height: 588,
     }),
     el(
       "div",
@@ -1900,10 +1900,10 @@ function brand(extraClass = "") {
     { class: `brand ${extraClass}`.trim() },
     el("img", {
       class: "brand-logo",
-      src: "/assets/logo.png",
+      src: "/assets/logo-transparent-v3.png",
       alt: "Alabama Wholesale",
-      width: 1050,
-      height: 370,
+      width: 1386,
+      height: 588,
     }),
   );
 }

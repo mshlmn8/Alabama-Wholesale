@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "aw-warehouse-shell-";
-const CACHE_NAME = CACHE_PREFIX + "v1";
+const CACHE_NAME = CACHE_PREFIX + "v2";
 const SHELL = [
   "/warehouse/",
   "/warehouse/index.html",
@@ -8,7 +8,13 @@ const SHELL = [
   "/warehouse/screens.js",
   "/warehouse/styles.css",
   "/warehouse/manifest.webmanifest",
-  "/warehouse/icon.svg",
+  "/assets/logo-transparent-v3.png",
+  "/warehouse/app-icon-v3-192.png",
+  "/warehouse/app-icon-v3-512.png",
+  "/warehouse/app-icon-maskable-v3-512.png",
+  "/assets/apple-touch-icon-v3.png",
+  "/assets/favicon-v3-32.png",
+  "/assets/favicon-v3-48.png",
   "/firebase.js",
 ];
 self.addEventListener("install", (event) => {

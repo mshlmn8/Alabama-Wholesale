@@ -326,8 +326,14 @@ function render() {
     el(
       "a",
       { href: "/warehouse/", class: "brand" },
-      el("span", { class: "brand-mark" }, "AW"),
-      el("span", {}, "Alabama Wholesale", el("small", {}, "OPERATIONS")),
+      el("img", {
+        class: "brand-logo",
+        src: "/assets/logo-transparent-v3.png",
+        alt: "Alabama Wholesale",
+        width: 1386,
+        height: 588,
+      }),
+      el("small", {}, "OPERATIONS"),
     ),
     nav,
     el(
@@ -441,11 +447,13 @@ function authScreen(message = "") {
       el(
         "div",
         { class: "auth-intro" },
-        el(
-          "div",
-          { class: "warehouse-illustration", "aria-hidden": "true" },
-          el("span", {}, "AW"),
-        ),
+        el("img", {
+          class: "brand-logo",
+          src: "/assets/logo-transparent-v3.png",
+          alt: "Alabama Wholesale",
+          width: 1386,
+          height: 588,
+        }),
         el("p", { class: "eyebrow" }, "RECEIVE WITH CONFIDENCE"),
         el("h2", {}, "Know what is here.\nKnow what is coming."),
         el(
