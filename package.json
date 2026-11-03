@@ -10,6 +10,7 @@
     "start": "node server.js",
     "test": "node --test tests/*.test.cjs",
     "build": "node scripts/build.cjs",
+    "apphosting:build": "npm run build",
     "test:rules": "npx firebase-tools emulators:exec --only firestore --project demo-alabama-wholesale \"node --test tests/rules.integration.cjs\""
   },
   "dependencies": {

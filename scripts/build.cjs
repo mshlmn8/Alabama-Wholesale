@@ -2,6 +2,12 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const root = path.resolve(__dirname, "..");
+const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+const hosting = fs.readFileSync(path.join(root, "apphosting.yaml"), "utf8");
+if (Object.keys(manifest.overrides || {}).length && /^\s+buildCommand:/m.test(hosting))
+  throw Error(
+    "Use package.json scripts.apphosting:build: the App Hosting YAML build override drops npm overrides.",
+  );
 for (const file of [
   "server.js",
   "lib/auth.cjs",

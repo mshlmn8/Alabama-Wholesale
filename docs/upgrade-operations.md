@@ -2,7 +2,9 @@
 
 ## Runtime and access
 
-The deployed app is an Express server on Firebase App Hosting. `apphosting.yaml` explicitly sets the build/run commands and limits public content to `public/`. Firebase Admin uses the existing App Hosting service account. Its existing SDK role supplies Firestore, Auth lookup and App Check verification permissions; no new broad IAM grants were needed.
+The deployed app is an Express server on Firebase App Hosting. `package.json` defines `apphosting:build`; `apphosting.yaml` sets the run command and output files. Public content is limited to `public/`. Firebase Admin uses the existing App Hosting service account. Its existing SDK role supplies Firestore, Auth lookup and App Check verification permissions; no new broad IAM grants were needed.
+
+Keep the build command in `package.json`. The App Hosting buildpack rewrites `package.json` when `scripts.buildCommand` is set in YAML, dropping fields such as npm `overrides` and causing the patched lockfile to fail installation. The build check rejects this combination. See the [upstream buildpack implementation](https://github.com/GoogleCloudPlatform/buildpacks/blob/main/pkg/nodejs/nodejs.go) (`OverrideAppHostingBuildScript`).
 
 The configured owner signs in with Google. Other staff and customers receive invitations from Team access. Legacy username/password hashes are archived as historical source only and never authorize a new session. Existing users need individual invitations; new customer accounts cannot self-assign access. The owner account cannot be disabled or reassigned through the app.
 
