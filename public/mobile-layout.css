@@ -1,0 +1,334 @@
+/* Phone presentation. Desktop layout and order/sync behavior stay in their owners. */
+.mobile-order-tools {
+  display: none;
+}
+@media screen and (max-width: 800px) {
+  :root {
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --panel2: #f1f3f5;
+    --ink: #222831;
+    --muted: #626b76;
+    --line: #e1e5e9;
+    --goldwash: #fff0e6;
+    --radius: 10px;
+  }
+  :root[data-theme="dark"] {
+    --bg: #171b20;
+    --panel: #22272e;
+    --panel2: #2c333b;
+    --ink: #f1f3f5;
+    --muted: #b2bbc5;
+    --line: #3b444e;
+    --goldwash: #443126;
+  }
+  button {
+    font-weight: 650;
+  }
+  .topbar {
+    gap: 8px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  .workspace-mark {
+    width: 56px;
+    max-height: 32px;
+  }
+  .topbar .store-picker-trigger {
+    font-size: 0.84rem;
+    font-weight: 750;
+  }
+  .topbar .store-context .sync-bar {
+    font-size: 0.65rem;
+  }
+  .topbar .top-actions .icon-button {
+    color: var(--muted);
+    border: 0;
+  }
+  .topbar .top-actions .icon {
+    width: 20px;
+    height: 20px;
+  }
+  main.content {
+    padding-top: 18px;
+  }
+  .page-heading,
+  .builder-page .page-heading {
+    margin-bottom: 16px;
+  }
+  .page-heading h1,
+  .builder-page .page-heading h1,
+  .orders-page .page-heading h1 {
+    font-size: 1.4rem;
+    letter-spacing: -0.04em;
+  }
+  .builder-page .page-heading .primary {
+    color: var(--accent-ink);
+    background: var(--panel);
+    border-color: var(--line);
+  }
+  .builder-page .page-heading .icon-button {
+    background: transparent;
+    border-color: transparent;
+  }
+  .builder-operations {
+    display: none;
+  }
+  .mobile-order-tools {
+    display: grid;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 8px;
+    padding-bottom: 8px;
+  }
+  .order-option-list {
+    gap: 0;
+  }
+  .order-option-group h3 {
+    padding: 8px 12px;
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0;
+  }
+  .order-option-action,
+  .workspace-tool-action {
+    justify-content: flex-start;
+    min-height: 48px;
+    padding: 12px;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    font-size: 0.84rem;
+    gap: 12px;
+  }
+  .order-option-action .icon {
+    color: var(--muted);
+    width: 18px;
+    height: 18px;
+  }
+  .builder-body > .order-items-section {
+    border-radius: 12px;
+  }
+  .builder-body .order-items-heading {
+    padding: 2px 8px;
+    gap: 0;
+    min-height: 48px;
+  }
+  .builder-draft-status {
+    flex-wrap: nowrap;
+    min-width: 0;
+    gap: 0;
+  }
+  .builder-draft-status .sync-bar {
+    flex: 1;
+    min-width: 0;
+    gap: 5px;
+    font-size: 0.65rem;
+  }
+  .builder-draft-status .sync-bar .icon-button {
+    flex: 0 0 44px;
+    width: 44px;
+    padding: 12px;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+  }
+  .builder-draft-status .actions button {
+    width: 44px;
+    padding: 12px;
+    font-size: 0;
+  }
+  .builder-draft-status .actions .icon {
+    width: 17px;
+    height: 17px;
+  }
+  .builder-body .order-items-heading > .order-collapse-button {
+    width: 44px;
+    padding: 12px;
+    font-size: 0;
+  }
+  .builder-body .order-items-heading > .order-collapse-button::after {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-top: 1.5px solid currentColor;
+    border-left: 1.5px solid currentColor;
+    transform: translateY(2px) rotate(45deg);
+  }
+  .builder-body .order-items-heading > .order-collapse-button[aria-expanded="false"]::after {
+    transform: translateY(-2px) rotate(225deg);
+  }
+  .builder-page .builder-columns {
+    background: transparent;
+    font-size: 0.65rem;
+    padding-block: 8px;
+  }
+  .builder-page[data-size] .builder-product-head {
+    padding-inline: 12px;
+    background: color-mix(in srgb, var(--panel2) 45%, var(--panel));
+  }
+  .builder-page .builder-product-actions .text-button {
+    width: 44px;
+    padding: 12px;
+    font-size: 0;
+  }
+  .builder-page .builder-product-actions .text-button .icon {
+    display: block;
+    width: 18px;
+    height: 18px;
+  }
+  .builder-page[data-size] .builder-flavor-row,
+  .builder-page .builder-columns {
+    grid-template-columns: minmax(0, 1fr) 56px 70px 44px;
+    gap: 4px;
+    padding-inline: 12px;
+  }
+  .builder-page .builder-flavor-row input {
+    background: var(--panel2);
+    border-color: transparent;
+    border-radius: 8px;
+  }
+  .builder-page .builder-line-amount {
+    font-size: 0.78rem;
+  }
+  .builder-body > .credits-returns,
+  .builder-page .builder-notes,
+  .builder-page .builder-other-drafts {
+    margin-top: 8px;
+    padding: 0 14px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+  }
+  .builder-body > details > summary {
+    min-height: 48px;
+    align-content: center;
+    color: var(--ink);
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+  .builder-body > details[open] {
+    padding-bottom: 14px;
+  }
+  .builder-review-bar,
+  .catalog-order-dock {
+    padding-block: 10px;
+    box-shadow: 0 -4px 18px #10182805;
+  }
+  .builder-review-bar > button {
+    border-radius: 10px;
+    font-size: 0.8rem;
+    padding-inline: 16px;
+  }
+  .builder-review-total strong {
+    font-size: 1.25rem;
+  }
+  .mobile-nav {
+    background: var(--panel);
+    gap: 6px;
+    padding-top: 6px;
+  }
+  .mobile-nav a {
+    border-radius: 10px;
+    font-size: 0.64rem;
+    font-weight: 600;
+  }
+  .mobile-nav a .icon {
+    width: 20px;
+    height: 20px;
+  }
+  .mobile-nav a.active {
+    background: var(--goldwash);
+  }
+  .mobile-nav a.active .icon {
+    background: transparent;
+    box-shadow: none;
+  }
+  .catalog-filters {
+    border-radius: 12px 12px 0 0;
+  }
+  .catalog-page .category-navigation {
+    border-radius: 0 0 12px 12px;
+  }
+  .catalog-page[data-view="grid"][data-columns] .product-card {
+    border-radius: 12px;
+  }
+  .catalog-page[data-view="grid"][data-columns] .product-image {
+    background: #fff;
+  }
+  .catalog-page[data-view="grid"][data-columns] .product-add {
+    background: var(--goldwash);
+    color: var(--accent-ink);
+    border-color: transparent;
+  }
+  .workspace-tools-grid {
+    gap: 24px;
+  }
+  .workspace-tool-list,
+  .orders-page .order-history-list {
+    border-radius: 12px;
+  }
+  .workspace-tool-row {
+    min-height: 64px;
+  }
+  .workspace-tool-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: var(--goldwash);
+  }
+  .workspace-tool-icon .icon {
+    width: 18px;
+    height: 18px;
+  }
+  dialog,
+  dialog.wide {
+    position: fixed;
+    inset: auto 0 0;
+    width: 100%;
+    max-width: 100%;
+    max-height: calc(100dvh - max(24px, env(safe-area-inset-top)));
+    margin: auto auto 0;
+    border: 0;
+    border-radius: 18px 18px 0 0;
+  }
+  dialog::backdrop {
+    background: #17212e66;
+  }
+  .dialog-body {
+    padding: 20px 20px max(20px, env(safe-area-inset-bottom));
+  }
+  .dialog-head h2 {
+    font-size: 1.2rem;
+  }
+  .dialog-head p {
+    font-size: 0.8rem;
+    line-height: 1.6;
+  }
+  .dialog-head .icon-button {
+    width: 44px;
+    height: 44px;
+    background: var(--panel2);
+    border-radius: 50%;
+  }
+  .dialog-footer {
+    bottom: calc(-1 * max(20px, env(safe-area-inset-bottom)));
+    padding-bottom: max(20px, env(safe-area-inset-bottom));
+    gap: 8px;
+  }
+  .dialog-footer:empty {
+    display: none;
+  }
+  .notice {
+    padding: 12px 14px;
+    font-size: 0.8rem;
+    border-radius: 10px;
+  }
+}
+@media screen and (max-width: 359px) {
+  .builder-page[data-size] .builder-flavor-row,
+  .builder-page .builder-columns {
+    grid-template-columns: minmax(0, 1fr) 48px 62px 44px;
+    padding-inline: 8px;
+  }
+}

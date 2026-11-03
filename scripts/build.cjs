@@ -61,6 +61,7 @@ for (const file of [
   "public/builder-layout.css",
   "public/orders-layout.css",
   "public/workspace-layout.css",
+  "public/mobile-layout.css",
   "public/catalog-photo.css",
   "public/catalog-variants.css",
   "public/order-selection.css",
