@@ -103,6 +103,9 @@ const iconPaths = {
   edit: "m4 16 12-12 4 4L8 20H4zm10-10 4 4",
   return: "M9 4 3 10l6 6M3 10h11a6 6 0 0 1 0 12",
   adjust: "M4 7h16M4 17h16M9 4v6M15 14v6",
+  undo: "M9 5 4 10l5 5M4 10h10a6 6 0 0 1 0 12",
+  redo: "m15 5 5 5-5 5M20 10H10a6 6 0 0 0 0 12",
+  copy: "M8 8h12v13H8zM16 8V3H3v13h5",
 };
 function icon(name) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -1673,9 +1676,7 @@ function render() {
     .querySelector("meta[name=theme-color]")
     ?.setAttribute(
       "content",
-      document.documentElement.dataset.theme === "light"
-        ? "#f3efe5"
-        : "#1b1e19",
+      getComputedStyle(document.documentElement).getPropertyValue("--bg").trim(),
     );
   const nav = [
     ["home", "Overview", "home"],
@@ -3209,14 +3210,33 @@ function showBuilderActions() {
         m.close();
         await fn();
       },
-      "",
+      "order-option-action",
       symbol,
     );
   append(
     m.content,
     el(
       "div",
-      { class: "stack" },
+      { class: "stack order-option-list" },
+      draft
+        ? el(
+            "div",
+            { class: "order-option-group mobile-order-tools" },
+            el("h3", {}, "Order tools"),
+            action(
+              "Check missing items",
+              () => storeOperations.showMissingItems(),
+              "spark",
+            ),
+            action("Store inventory", () => setView("store-inventory"), "box"),
+            action(
+              "Placed orders & additions",
+              () => storeOperations.showPlacementHistory(),
+              "orders",
+            ),
+            action("Email order", () => showFormattedOrder(draft), "share"),
+          )
+        : null,
       action("Item size", showBuilderSettings, "catalog"),
       action(
         "New draft",
@@ -3249,7 +3269,7 @@ function showBuilderActions() {
         ? action(
             "Copy order text",
             () => copyText(draftText(draftRecoverySnapshot(draft.id))),
-            undefined,
+            "copy",
             true,
           )
         : null,
@@ -3587,11 +3607,11 @@ function renderBuilder() {
       button("Undo", () => {
         checkDraft();
         undoDraft();
-      }),
+      }, "", "undo"),
       button("Redo", () => {
         checkDraft();
         undoDraft(true);
-      }),
+      }, "", "redo"),
     ),
   );
   draftStatus.querySelectorAll("[data-draft-history] button")[0].disabled =
