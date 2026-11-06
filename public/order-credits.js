@@ -25,6 +25,7 @@ export function creditSummary(records, storeId) {
 }
 
 export function physicalReturnLines(record) {
+  if (record.issueType === 'missing') return [];
   if (['adjustment', 'unverified'].includes(record.kind)) return [];
   const legacyRestocked = record.status === 'approved' && record.restock === true && !record.physical;
   return (record.lines || []).filter(line => line.quantity > 0).map(line => {
@@ -249,6 +250,8 @@ export function createOrderCredits(ctx) {
     const actor = ctx.getActor(), staff = actor.role !== 'customer', adjustment = ['adjustment', 'unverified'].includes(record.kind);
     const m = modal(record.creditMemoNumber || kindLabel(record), `${reference(record)} · ${record.status}`, true);
     const amount = record.status === 'approved' ? record.totalCents : requestedAmount(record);
+    if (record.issueType && record.issueType !== 'return') m.content.append(el('p', {class: 'eyebrow'}, `${record.issueType} items`));
+    if (record.photos?.length && ctx.showEvidence) m.content.append(button(`View delivery photos (${record.photos.length})`, () => {captured.check();return ctx.showEvidence(record);}));
     m.content.append(el('p', {}, record.reason || ''), el('p', {class: 'mt'}, el('strong', {}, `${record.status === 'approved' ? 'Approved account credit issued' : 'Requested credit'}: ${amount == null ? 'Unverified' : cash(amount)}`)));
     if (record.kind === 'unverified') m.content.append(notice('No financial credit has been posted. A verified original invoice and owner reconciliation are required.'));
     if (record.lines?.length) m.content.append(table(['Original item', 'Quantity', 'Credit'], record.lines.map(line => el('tr', {}, td(`${line.name || 'Original invoice line'}${line.variant ? ' · ' + line.variant : ''}`), td(line.quantity ? `${line.quantity} ${line.unit || 'each'}` : 'Adjustment'), td(line.totalCents == null ? 'Unverified' : cash(line.totalCents))))));

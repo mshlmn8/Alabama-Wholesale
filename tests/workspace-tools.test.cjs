@@ -26,6 +26,25 @@ class Control {
   setAttribute(key, value) {
     this[key] = value;
   }
+  get textContent() {
+    return this.children
+      .map((child) =>
+        child instanceof Control ? child.textContent : String(child),
+      )
+      .join(" ");
+  }
+  querySelectorAll(selector) {
+    return walk(this).filter(
+      (node) =>
+        node !== this &&
+        String(node.class || "")
+          .split(" ")
+          .includes(selector.slice(1)),
+    );
+  }
+  querySelector(selector) {
+    return this.querySelectorAll(selector)[0] || null;
+  }
 }
 const walk = (node) => [
   node,
@@ -55,6 +74,8 @@ function fixture(role) {
     append: (node, ...children) => node.append(...children),
     heading: (title, description) => el("header", {}, title, description),
     icon: (name) => el("svg", { name }),
+    input: (type, value, attrs) => el("input", { type, value, ...attrs }),
+    moreTools: { showHelp: () => actions.push("help") },
     status: (name) => el("span", {}, name),
     button: (label, callback, kind) =>
       el("button", { callback, class: kind }, label),
@@ -86,6 +107,7 @@ function fixture(role) {
   );
   const root = context.renderMore();
   return {
+    root,
     scope,
     actions,
     rows: walk(root).filter((node) => node.class === "workspace-tool-row"),
@@ -93,16 +115,18 @@ function fixture(role) {
 }
 const common = [
   "Overview",
-  "Chat with Gemini",
-  "Order templates",
-  "Builder settings",
+  "Saved items",
+  "Saved order lists",
+  "Invoices & documents",
+  "Saved instructions",
+  "App settings",
+  "Help & support",
   "Store inventory",
   "Account & payments",
-  "Returns & credits",
-  "Notifications",
-  "Notification preferences",
-  "Sync center",
-  "Workspace backup",
+  "Returns & delivery issues",
+  "Notifications & preferences",
+  "Save status",
+  "Draft backup & restore",
 ];
 const owner = [
   "Product photos",
@@ -137,4 +161,21 @@ test("a tool rendered for an earlier session cannot navigate or start an action"
   f.scope.current = false;
   for (const row of f.rows) assert.throws(() => row.callback());
   assert.deepEqual(f.actions, ["home"]);
+});
+test("More has its own page title and search filters tools without revealing owner tools to customers", () => {
+  const f = fixture("customer");
+  assert.match(f.root.textContent, /More Your store tools/);
+  const search = walk(f.root).find((node) => node.id === "more-search");
+  search.value = "invoice";
+  search.onInput();
+  assert.deepEqual(
+    f.rows.filter((row) => !row.hidden).map((row) => row["aria-label"]),
+    ["Invoices & documents"],
+  );
+  search.value = "migration";
+  search.onInput();
+  assert.equal(f.rows.filter((row) => !row.hidden).length, 0);
+  search.value = "";
+  search.onInput();
+  assert.equal(f.rows.filter((row) => !row.hidden).length, common.length);
 });

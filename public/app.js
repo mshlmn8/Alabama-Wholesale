@@ -1,3 +1,4 @@
+import { createMoreTools, mobileDestination } from "./more-tools.js";
 import { createOrderCredits } from "./order-credits.js";
 import { createOrderWorkflow } from "./order-workflow.js";
 import { createStoreOperations } from "./store-operations.js";
@@ -422,6 +423,8 @@ let config,
     "orders",
     "stores",
     "more",
+    "documents",
+    "saved-lists",
     "store-inventory",
     "inventory",
     "payments",
@@ -1685,7 +1688,7 @@ function render() {
     ["orders", "Orders", "orders"],
     ["store-inventory", "Store inventory", "box"],
     ["stores", "Stores", "stores"],
-    ["more", "Workspace", "more"],
+    ["more", "More", "more"],
   ];
   const aside = el(
     "aside",
@@ -1700,10 +1703,7 @@ function render() {
           label,
           symbol,
           view === key ||
-            (key === "more" &&
-              ["inventory", "payments", "returns", "notifications"].includes(
-                view,
-              )),
+            (key === "more" && mobileDestination(view) === "more"),
         ),
       ),
     ),
@@ -1852,6 +1852,8 @@ function render() {
     orders: renderOrders,
     stores: renderStores,
     more: renderMore,
+    documents: () => moreTools.renderDocuments(),
+    "saved-lists": () => moreTools.renderSavedLists(),
     inventory: renderInventory,
     "store-inventory": () => storeOperations.renderInventory(),
     payments: renderPayments,
@@ -1869,9 +1871,7 @@ function render() {
           key,
           key === "more" ? "More" : key === "build" ? "Build" : label,
           symbol,
-          view === key ||
-            (key === "more" &&
-              !["catalog", "build", "orders", "stores"].includes(view)),
+          mobileDestination(view) === key,
         ),
       ),
   );
@@ -2095,7 +2095,7 @@ function renderHome() {
           el("div", { class: "metric-label" }, label),
           el("div", { class: "metric" }, value),
           el("p", { class: "metric-note" }, note),
-          button("View details", () => setView(target), "text-button"),
+          button(({payments: label === "Account balance" ? "View balance" : "View payments", orders: "View orders", build: "Continue drafts", inventory: "Review stock"})[target], () => setView(target), "text-button"),
         ),
       ),
     ),
@@ -3255,6 +3255,8 @@ function showBuilderActions() {
         },
         "plus",
       ),
+      draft?.lines.length ? action("Save as order list", () => moreTools.saveList(draft), "orders") : null,
+      action("Saved order lists", () => setView("saved-lists"), "orders"),
       draft
         ? action(
             "Save online now",
@@ -4697,6 +4699,7 @@ async function showOrder(order) {
       "cart",
     ),
   );
+  if (order.lines?.length) append(m.footer, button("Save as order list", () => {m.close();moreTools.saveList(order);}, "", "orders"));
   if (order.status === "draft")
     append(
       m.footer,
@@ -5966,11 +5969,11 @@ function renderReturns() {
     "div",
     {},
     heading(
-      "Returns & credits",
-      "Request returns against delivered quantities. Staff approval creates the credit memo.",
+      "Returns & delivery issues",
+      "Report missing, wrong or damaged items. Staff approval creates the credit memo.",
       [
         button(
-          "Choose delivered order",
+          "Report a delivery issue",
           () => {
             orderFilter = "delivered";
             orderStoreScope = "selected";
@@ -6047,8 +6050,8 @@ function showReturn(order, onCreated) {
   const returnScope=operationScope(),returnStoreId=storeId;
   const returnLines=order.lines.flatMap(line=>["mix", "each"].includes(line.selectionMode)?(line.allocations||[]).map(allocation=>({...line,...allocation,selectionMode:'manual'})):[line]);
   const m = modal(
-    "Request a return",
-    `${order.invoiceNumber} · Return quantities use the same units as the delivered order.`,
+    "Report a delivery issue",
+    `${order.invoiceNumber} · Select the affected quantities. Staff reviews every request before issuing credit.`,
     true,
   );
   const rows = [];
@@ -6077,6 +6080,9 @@ function showReturn(order, onCreated) {
     rows.push({ line, quantity, remaining });
   }
   const pickup=input("checkbox","",{checked:true});
+  const issueType=select([["return","Return goods"],["missing","Missing items"],["wrong","Wrong items"],["damaged","Damaged items"]],"return");
+  issueType.addEventListener("change",()=>{pickup.disabled=issueType.value==="missing";pickup.checked=issueType.value!=="missing";});
+  const evidence=moreTools.createEvidencePicker();
   const reason = el("textarea", {
     required: true,
     maxlength: 2000,
@@ -6084,29 +6090,32 @@ function showReturn(order, onCreated) {
   });
   append(
     m.content,
-    table(
-      ["Product", "Available to return", "Return quantity"],
+    el(
+      "div",
+      {class: "return-issue-lines"},
       rows.map(({ line, quantity, remaining }) =>
         el(
-          "tr",
-          {},
-          td(
+          "section",
+          {class: "return-issue-row"},
+          el("div", {class: "return-issue-product"},
             el("strong", {}, line.name),
             el("p", { class: "small" }, assortmentLabel(line)),
           ),
-          td(`${remaining}${line.unit === "case" ? " cases" : ""}`),
-          td(quantity),
+          el("p", {class:"small"}, `${remaining} ${line.unit === "case" ? "cases" : "items"} available`),
+          field(`Affected quantity (${line.unit === "case" ? "cases" : "items"})`, quantity),
         ),
       ),
     ),
-    el("div", { class: "mt" }, field("Reason for return", reason)),
+    el("div", {class:"mt"}, field("Issue type",issueType)),
+    el("div", { class: "mt" }, field("Describe the issue", reason)),
+    evidence.node,
     el("label",{class:"check-field"},pickup,"Request pickup of returned items"),
   );
   append(
     m.footer,
     button("Cancel", m.close),
     button(
-      "Request return",
+      "Submit issue for review",
       async () => {
         const lines = [];
         for (const row of rows) {
@@ -6130,11 +6139,13 @@ function showReturn(order, onCreated) {
           orderId: order.id,
           lines,
           pickupRequested:pickup.checked,
+          issueType:issueType.value,
+          photos:evidence.photos(),
           reason: reason.value.trim(),
         });
         m.close();
         if(onCreated)onCreated(created);else setView("returns");
-        toast("Return requested. A staff member will review it.");
+        toast("Delivery issue submitted. A staff member will review it.");
       },
       "primary",
     ),
@@ -6235,205 +6246,79 @@ function workspaceToolGroup(title, options) {
 }
 function renderMore() {
   const me = state.me;
-  const options = [
-    [
-      "Overview",
-      "Continue your current order and view account activity.",
-      "home",
-      () => setView("home"),
-    ],
-    [
-      "Chat with Gemini",
-      "Ask questions about products or get help using the app.",
-      "spark",
-      () => geminiChat.open(),
-    ],
-    ...(master()
-      ? [
-          [
-            "Product photos",
-            "Find matching photos with Gemini and review products that need details.",
-            "box",
-            () => productPhotos.open(),
-          ],
-        ]
-      : []),
-    [
-      "Account & payments",
-      "Report payments and view confirmed account activity.",
-      "wallet",
-      () => setView("payments"),
-    ],
-    [
-      "Returns & credits",
-      "Request returns and track credit memos.",
-      "return",
-      () => setView("returns"),
-    ],
-    [
-      "Notifications",
-      "View order, delivery and account updates.",
-      "bell",
-      () => setView("notifications"),
-    ],
-    ...(staff()
-      ? [
-          ["Wholesale Operations", "Open the separate inventory, purchasing and receiving app.", "box", () => {location.href="/warehouse/";}],
-          [
-            "Inventory",
-            "Count stock, manage reservations and reorder levels.",
-            "box",
-            () => setView("inventory"),
-          ],
-        ]
-      : []),
-    [
-      "Store inventory",
-      "Count store stock and prepare replenishment orders.",
-      "box",
-      () => setView("store-inventory"),
-    ],
-    [
-      "Order templates",
-      "Keep reusable notes and packing instructions.",
-      "orders",
-      showTemplates,
-    ],
-    [
-      "Notification preferences",
-      "Choose the updates you want to receive.",
-      "user",
-      showNotificationPreferences,
-    ],
-    [
-      "Builder settings",
-      "Choose the item size for your account.",
-      "catalog",
-      showBuilderSettings,
-    ],
-    [
-      "Sync center",
-      "Review pending actions and retry failed saves.",
-      "refresh",
-      showSyncCenter,
-    ],
-    [
-      "Workspace backup",
-      "Export or restore your working drafts.",
-      "download",
-      showWorkspaceBackup,
-    ],
+  const search = input("search", "", {
+    id: "more-search", placeholder: "Find a tool or setting",
+    "aria-label": "Find a tool or setting",
+    onInput: () => {
+      const query = search.value.trim().toLocaleLowerCase();
+      let count = 0;
+      root.querySelectorAll(".workspace-tool-group").forEach(group => {
+        let visible = 0;
+        group.querySelectorAll(".workspace-tool-row").forEach(row => {
+          row.hidden = !row.textContent.toLocaleLowerCase().includes(query);
+          if (!row.hidden) visible++;
+        });
+        group.hidden = !visible;
+        count += visible;
+      });
+      root.querySelectorAll(".more-administration").forEach(section => {
+        const hasMatch = [...section.querySelectorAll(".workspace-tool-group")].some(group => !group.hidden);
+        section.hidden = !!query && !hasMatch;
+        if (query && hasMatch) section.open = true;
+      });
+      results.textContent = query ? `${count} matching tools` : "";
+    },
+  });
+  const results = el("p", {class: "sr-only", role: "status", "aria-live": "polite"});
+  const root = el("div", {class: "stack workspace-page more-page"},
+    heading("More", "Your store tools, account and preferences."),
+    el("div", {class: "more-search"}, icon("search"), search), results,
+  );
+  const groups = [
+    ["Quick access", [
+      ["Overview", "Store summary and current drafts", "home", () => setView("home")],
+      ["Saved items", "Your favorite catalog products", "star", () => {favoritesOnly = true; setView("catalog");}],
+    ]],
+    ["Orders & account", [
+      ["Account & payments", "Balance, payments and confirmed activity", "wallet", () => setView("payments")],
+      ["Invoices & documents", "Download invoices and credit memos", "download", () => setView("documents")],
+      ["Returns & delivery issues", "Missing, wrong or damaged items and credits", "return", () => setView("returns")],
+      ["Saved order lists", "Reuse products, quantities and flavor choices", "orders", () => setView("saved-lists")],
+      ["Store inventory", "Count stock and prepare replenishment", "box", () => setView("store-inventory")],
+    ]],
+    ["Settings & help", [
+      ["Notifications & preferences", "Updates and how you receive them", "bell", showMoreNotifications],
+      ["App settings", "Appearance and order item size", "sun", showMoreSettings],
+      ["Saved instructions", "Reusable notes and packing instructions", "edit", showTemplates],
+      ["Help & support", "Contact details, guides and assistant", "user", () => moreTools.showHelp()],
+    ]],
+    ["Data & sync", [
+      ["Save status", "Pending, failed and rejected actions", "refresh", showSyncCenter],
+      ["Draft backup & restore", "Keep a copy of your working drafts", "download", showWorkspaceBackup],
+    ]],
   ];
-  const root = el(
-    "div",
-    { class: "stack workspace-page" },
-    heading("Workspace", "Your account, ordering tools and administration."),
-    el(
-      "div",
-      { class: "panel split workspace-account" },
-      el(
-        "div",
-        {},
-        el("h2", {}, me.name || me.displayName || me.email),
-        el("p", {}, me.email),
-        status(me.role),
-      ),
-      el(
-        "div",
-        { class: "actions" },
-        button("Toggle theme", toggleWorkspaceTheme, "", "sun"),
-        button("Sign out", signOut),
-      ),
-    ),
-  );
-  append(
-    root,
-    el(
-      "div",
-      { class: "workspace-tools-grid" },
-      [
-        [
-          "Ordering",
-          [
-            "Overview",
-            "Chat with Gemini",
-            "Order templates",
-            "Builder settings",
-            "Store inventory",
-          ],
-        ],
-        [
-          "Account & operations",
-          [
-            "Account & payments",
-            "Returns & credits",
-            "Notifications",
-            "Inventory",
-            "Wholesale Operations",
-          ],
-        ],
-        [
-          "Saving & device",
-          ["Notification preferences", "Sync center", "Workspace backup"],
-        ],
-      ].map(([title, names]) =>
-        workspaceToolGroup(
-          title,
-          options.filter(([name]) => names.includes(name)),
-        ),
-      ),
-      master()
-        ? workspaceToolGroup("Administration", [
-            ...options.filter(([name]) => name === "Product photos"),
-            [
-              "Invite staff or customer",
-              "Invite an individual account with the right store access.",
-              "user",
-              showInvite,
-            ],
-            [
-              "Manage categories",
-              "Organize categories and their subcategories.",
-              "catalog",
-              showCategories,
-            ],
-            [
-              "Migration & reconciliation",
-              "Review imported records and opening balances.",
-              "stores",
-              showMigration,
-            ],
-            [
-              "Verify business backup",
-              "Check a complete copy of business records.",
-              "download",
-              showBusinessBackup,
-            ],
-            [
-              "Audit activity",
-              "Review recorded changes to the workspace.",
-              "orders",
-              showAudit,
-            ],
-            [
-              "Order email settings",
-              "Manage the existing order email service.",
-              "edit",
-              showOrderEmailSettings,
-            ],
-            [
-              "Email delivery status",
-              "Review delivery attempts and failures.",
-              "bell",
-              showEmailDelivery,
-            ],
-          ])
-        : null,
-    ),
-  );
+  if (staff()) groups.push(["Staff tools", [
+    ["Inventory", "Warehouse stock and reservations", "box", () => setView("inventory")],
+    ["Wholesale Operations", "Purchasing, receiving and warehouse tools", "stores", () => {location.href = "/warehouse/";}],
+  ]]);
+  append(root, el("div", {class: "workspace-tools-grid"}, groups.map(([title, options]) => workspaceToolGroup(title, options))));
+  if (master()) {
+    const admin = el("details", {class: "more-administration"}, el("summary", {}, "Administration"),
+      workspaceToolGroup("Business tools", [
+        ["Product photos", "Review catalog images and details", "box", () => productPhotos.open()],
+        ["Invite staff or customer", "Set up an individual account", "user", showInvite],
+        ["Manage categories", "Categories and subcategories", "catalog", showCategories],
+        ["Migration & reconciliation", "Imported records and opening balances", "stores", showMigration],
+        ["Verify business backup", "Check a full business backup", "download", showBusinessBackup],
+        ["Audit activity", "Recorded workspace changes", "orders", showAudit],
+        ["Order email settings", "Configure the order email service", "edit", showOrderEmailSettings],
+        ["Email delivery status", "Delivery attempts and failures", "bell", showEmailDelivery],
+      ]));
+    append(root, admin);
+  }
   if (master()) {
     append(
-      root,
+      root.querySelector(".more-administration"),
       el(
         "section",
         { class: "panel" },
@@ -6476,7 +6361,29 @@ function renderMore() {
       ),
     );
   }
+  append(root, el("footer", {class: "more-account"},
+    el("div", {}, el("strong", {}, me.name || me.displayName || me.email || "Your account"),
+      el("p", {class: "small"}, me.email || ""), status(me.role)),
+    button("Sign out", signOut, "text-button")));
   return root;
+}
+function showMoreNotifications() {
+  const m = modal("Notifications & preferences", "View updates or choose how to receive them.");
+  append(m.content, button("View notifications", () => {m.close();setView("notifications");}, "workspace-tool-action", "bell"),
+    button("Notification preferences", () => {m.close();showNotificationPreferences();}, "workspace-tool-action", "edit"));
+  append(m.footer, button("Close", m.close));
+}
+function showMoreSettings() {
+  const m = modal("App settings", "Choose an appearance or adjust order item size.");
+  const theme = select([["system", "Use device setting"], ["light", "Light"], ["dark", "Dark"]], preferences().theme || "system");
+  const scope = operationScope();
+  append(m.content, field("Appearance", theme), button("Order item size", () => {m.close();showBuilderSettings();}, "workspace-tool-action", "catalog"));
+  append(m.footer, button("Cancel", m.close), button("Save appearance", async () => {
+    if (!scopeCurrent(scope)) throw new SessionChanged();
+    await command("preferences.save", {theme:theme.value, expectedVersion:state.me.preferences?.version || 0});
+    if (!scopeCurrent(scope)) throw new SessionChanged();
+    ws.rememberPreferences({theme:theme.value});m.close();render();toast("Appearance saved.");
+  }, "primary"));
 }
 function showSyncCenter() {
   const scope = operationScope();
@@ -6708,7 +6615,7 @@ function showWorkspaceBackup() {
 function showTemplates() {
   const templates = preferences().templates || [];
   const m = modal(
-    "Order templates",
+    "Saved instructions",
     "Reusable notes and instructions for your next order.",
   );
   const listing = el(
@@ -8814,6 +8721,8 @@ window.addEventListener("popstate", () => {
       "orders",
       "stores",
       "more",
+      "documents",
+      "saved-lists",
       "store-inventory",
     "inventory",
       "payments",
@@ -8902,7 +8811,18 @@ function activateAddition(next){
   ws.rememberPreferences({activeDraftIds:{...preferences().activeDraftIds,[storeId]:next.id}});undo=[];redo=[];setView("build");
 }
 const orderWorkflow=createOrderWorkflow({el,input,button,field,modal,notice,toast,command,getStore:currentStore,getDraft:()=>draft,scope:operationScope,isCurrent:scopeCurrent,syncDraft,activateDraft:activateAddition,refresh});
-const orderCredits=createOrderCredits({el,input,select,button,field,modal,notice,table,td,cash,date,toast,command,api,getStore:currentStore,getDraft:()=>draft,getReturns:()=>state?.returns||[],getActor:()=>state?.me,editDraft,showReturn,downloadCreditMemo:async record=>download(orderFilename(record,{store:currentStore(),kind:"credit-memo"}),await orderPdfBlob(record,"credit-memo"),"application/pdf"),scope:operationScope,isCurrent:scopeCurrent});
+const moreTools = createMoreTools({
+  el,input,select,button,field,heading,notice,empty,modal,api,command,toast,cash,date,
+  scope:operationScope,isCurrent:scopeCurrent,getState:()=>state,getStore:currentStore,getDraft:()=>draft,
+  isCurrentScope:id=>state&&storeId===id,error:friendlyError,setView,download,filename:orderFilename,
+  confirm:confirmAction,assistant:()=>geminiChat.open(),price:linePrice,
+  addToDraft:(lines,notes)=>{
+    if(hasUnsavedDraftNotes())throw new Error("Save your current draft notes before adding a list.");
+    const combined=addSelectedProductLines(draft?.lines||[],lines,uuid);
+    editDraft(next=>{next.lines=combined;if(notes)next.notes=[next.notes,notes].filter(Boolean).join("\n");});
+  },
+});
+const orderCredits=createOrderCredits({el,input,select,button,field,modal,notice,table,td,cash,date,toast,command,api,getStore:currentStore,getDraft:()=>draft,getReturns:()=>state?.returns||[],getActor:()=>state?.me,editDraft,showReturn,showEvidence:record=>moreTools.showEvidence(record),downloadCreditMemo:async record=>download(orderFilename(record,{store:currentStore(),kind:"credit-memo"}),await orderPdfBlob(record,"credit-memo"),"application/pdf"),scope:operationScope,isCurrent:scopeCurrent});
 const storeOperations=createStoreOperations({el,input,button,field,modal,notice,table,td,toast,command,api,getStore:currentStore,getProducts:()=>state?.products||[],getCategories:()=>state?.categories||[],getDraft:()=>draft,getWorkspace:()=>ws,getActorId:()=>state?.me?.uid,scope:operationScope,isCurrent:scopeCurrent,editDraft,refresh,addLines:lines=>editDraft(next=>{next.lines=addSelectedProductLines(next.lines,lines);}),confirmPlacementReceipt:placement=>orderWorkflow.showPlacementReceipt(placement),startAddition:placement=>orderWorkflow.startAddition(placement,{placement:true})});
 boot();
 
