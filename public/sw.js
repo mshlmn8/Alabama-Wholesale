@@ -1,7 +1,9 @@
-const VERSION = "aw-v2-20261102-2";
+const VERSION = "aw-v2-20261105-more-1";
 const SHELL = [
   "/",
   "/app.js",
+  "/more-tools.js",
+  "/more-menu.css",
   "/store-operations.js", "/store-operations.css", "/order-operations.css", "/order-assortments.js", "/order-workflow.js", "/order-credits.js",
   "/category-navigation.js",
   "/catalog-search.js",

@@ -64,6 +64,7 @@ const publicCatalogRecord = (record, collection) => {
 };
 const PUBLIC = path.join(__dirname, "public");
 const BACKUP_COLLECTIONS = [
+  "orderLists", "returnPhotos",
   "suppliers", "supplierProducts", "purchaseOrders", "purchaseReceipts",
   "storeInventory", "storeInventoryCounts", "storeInventoryMovements", "storeInventoryReceipts", "orderPlacements", "orderHandoffs", "warehouseMovements", "returnEvents",
   "categories",
@@ -256,6 +257,7 @@ function createApp({
         "You do not have access to this store.",
       );
   };
+  require('./lib/return-evidence.cjs').registerReturnEvidence(app, {repo, access});
   async function scoped(collection, actor, options = {}) {
     if (
       actor.role === "master" ||
@@ -425,6 +427,7 @@ function createApp({
       contactLegacy,
       audit,
       allDrafts,
+      orderLists,
     ] = await Promise.all([
       catalog("categories"),
       catalog("products"),
@@ -447,6 +450,7 @@ function createApp({
         ? repo.list("audit", { orderBy: [["createdAt", "desc"]], limit: 100 })
         : [],
       drafts,
+      scoped('orderLists', actor, {where:[['userId','==',actor.uid]]}),
     ]);
     const stores = allStores.map((store) => {
       const result = {
@@ -499,6 +503,7 @@ function createApp({
       }),
       payments,
       returns,
+      orderLists: orderLists.filter(row => !row.deleted),
       notifications: (preferences?.notificationPreferences?.inApp === false
         ? []
         : notifications
