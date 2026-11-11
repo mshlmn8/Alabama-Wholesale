@@ -32,7 +32,7 @@ async function fixture(category = "") {
     ...(await importFile("view-helpers.js")), ...(await importFile("category-navigation.js")),
     state, category, search: "", favoritesOnly: false, storeId: "shop", draft: null,
     preferences: () => preferences, currentStore: () => ({}), ws: workspace,
-    operationScope: () => ({ workspace }), scopeCurrent: () => true,
+    operationScope: () => ({ workspace }), scopeCurrent: () => true, isPhone: () => false,
     matchMedia: () => ({ matches: true }), master: () => false,
     act: async (fn) => fn(), bindCatalogSearch() {}, showScanner() {}, showAssistant() {},
     el, input: (type, value, attrs) => el("input", { type, value, ...attrs }),

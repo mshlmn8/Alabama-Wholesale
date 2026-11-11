@@ -119,6 +119,7 @@ async function fixture({
     master: () => state.me.role === "master",
     operationScope: () => "session",
     scopeCurrent: () => true,
+    isPhone: () => false,
     SessionChanged: class extends Error {},
     hasUnsavedDraftNotes: () => false,
     productById: (id) => state.products.find((item) => item.id === id),

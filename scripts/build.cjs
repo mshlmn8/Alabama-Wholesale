@@ -57,6 +57,9 @@ for (const file of [
   "public/draft-sync.js",
   "public/order-downloads.js",
   "public/view-helpers.js",
+  "public/phone-layout.js",
+  "public/phone-catalog.js",
+  "public/catalog-quantities.js",
   "public/sw.js",
 ])
   execFileSync(process.execPath, ["--check", path.join(root, file)], {
@@ -72,6 +75,7 @@ for (const file of [
   "public/orders-layout.css",
   "public/workspace-layout.css",
   "public/mobile-layout.css",
+  "public/phone-redesign.css",
   "public/assets/logo-transparent-v3.png",
   "public/assets/app-icon-v3-192.png",
   "public/assets/app-icon-v3-512.png",

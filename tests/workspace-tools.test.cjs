@@ -65,6 +65,7 @@ function fixture(role) {
   const context = {
     state: { me: { uid: "person", name: "Test person", role }, users: [] },
     master: () => role === "master",
+    isPhone: () => false,
     staff: () => role !== "customer",
     operationScope: () => scope,
     scopeCurrent: (value) => value.current,

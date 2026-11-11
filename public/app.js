@@ -15,6 +15,15 @@ import { createDraftSync } from "./draft-sync.js";
 import { createStorePicker } from "./store-picker.js";
 import { observeWorkspaceChrome } from "./workspace-chrome.js";
 import {
+  PHONE_TABS,
+  isPhone,
+  phoneDestination,
+  watchPhoneLayout,
+} from "./phone-layout.js";
+import * as catalogQuantities from "./catalog-quantities.js";
+import { createPhoneCatalog } from "./phone-catalog.js";
+const { draftUnits } = catalogQuantities;
+import {
   categoryTrail,
   categoryFilterIds,
   catalogCategoryHierarchy,
@@ -107,6 +116,9 @@ const iconPaths = {
   undo: "M9 5 4 10l5 5M4 10h10a6 6 0 0 1 0 12",
   redo: "m15 5 5 5-5 5M20 10H10a6 6 0 0 0 0 12",
   copy: "M8 8h12v13H8zM16 8V3H3v13h5",
+  minus: "M5 12h14",
+  down: "m6 9 6 6 6-6",
+  list: "M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01",
 };
 function icon(name) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -1425,7 +1437,8 @@ function changeStore(id) {
   redo = [];
   render();
 }
-function beginDraft() {
+// Creates and activates a draft without leaving the current page.
+function startDraft() {
   if (!storeId)
     throw new Error("Add or select a store before starting an order.");
   draft = saveWorkingDraft(createDraft(storeId));
@@ -1433,10 +1446,13 @@ function beginDraft() {
   ws.rememberPreferences({ activeDraftIds: active });
   undo = [];
   redo = [];
+}
+function beginDraft() {
+  startDraft();
   setView("build");
 }
-function editDraft(change, { renderPage = true } = {}) {
-  if (!draft) beginDraft();
+function editDraft(change, { renderPage = true, stay = false } = {}) {
+  if (!draft) stay ? startDraft() : beginDraft();
   const previous = clone(draft);
   const next = clone(draft);
   change(next);
@@ -1861,25 +1877,33 @@ function render() {
     notifications: renderNotifications,
   };
   append(main, (pages[view] || renderHome)());
+  const phone = isPhone();
   const mobile = el(
     "nav",
     { class: "mobile-nav", "aria-label": "Mobile navigation" },
-    nav
-      .filter(([key]) => !["home", "store-inventory"].includes(key))
-      .map(([key, label, symbol]) =>
-        navLink(
-          key,
-          key === "more" ? "More" : key === "build" ? "Build" : label,
-          symbol,
-          mobileDestination(view) === key,
-        ),
-      ),
+    phone
+      ? PHONE_TABS.map(([key, label, symbol]) => {
+          return navLink(key, label, symbol, phoneDestination(view) === key);
+        })
+      : nav
+          .filter(([key]) => !["home", "store-inventory"].includes(key))
+          .map(([key, label, symbol]) =>
+            navLink(
+              key,
+              key === "more" ? "More" : key === "build" ? "Build" : label,
+              symbol,
+              mobileDestination(view) === key,
+            ),
+          ),
   );
+  $("app").dataset.phone = String(phone);
+  $("app").dataset.view = view;
   $("app").replaceChildren(
     aside,
     el("div", { class: "workspace" }, bar, main),
     mobile,
   );
+  if (phone) updatePhoneOrderBadge();
   workspaceChrome = observeWorkspaceChrome($("app"), {
     header: bar,
     navigation: mobile,
@@ -1893,6 +1917,23 @@ function render() {
     } catch {}
   }
   recoverDeviceStorageAutomatically();
+}
+// Shows how many units the working draft holds on the phone Order tab.
+function updatePhoneOrderBadge() {
+  const link = document.querySelector('.mobile-nav a[href="#/build"]');
+  if (!link) return;
+  const units = draftUnits(draft?.lines);
+  let badge = link.querySelector(".badge-count");
+  if (!units) {
+    badge?.remove();
+    return;
+  }
+  if (!badge) {
+    badge = el("span", { class: "badge-count" });
+    append(link, badge);
+  }
+  badge.textContent = units > 999 ? "999+" : String(units);
+  badge.setAttribute("aria-label", `${units} in your order`);
 }
 function brand(extraClass = "") {
   return el(
@@ -2020,6 +2061,8 @@ function renderHome() {
         ],
       ),
     );
+  if (isPhone())
+    return renderPhoneHome({ store, orders, drafts, open, pendingPayments, low });
   append(
     root,
     el(
@@ -2183,6 +2226,234 @@ function renderHome() {
   );
   return root;
 }
+// Phone home: the next action first, then account and history.
+function renderPhoneHome({ store, orders, drafts, open, pendingPayments, low }) {
+  const scope = operationScope();
+  const title = heading("Home", store.name);
+  title.classList.add("sr-only");
+  const root = el("div", { class: "stack phone-home" }, title);
+  const units = draftUnits(draft?.lines);
+  if (units) {
+    const totals = draftTotals();
+    const products = new Set(draft.lines.map((line) => line.productId)).size;
+    append(
+      root,
+      el(
+        "section",
+        { class: "phone-home-order" },
+        el(
+          "div",
+          { class: "phone-home-order-summary" },
+          el(
+            "div",
+            {},
+            el("h2", {}, "Order in progress"),
+            el(
+              "strong",
+              {},
+              totals.missing.length ? "Check items" : cash(totals.total),
+            ),
+          ),
+          el(
+            "span",
+            {},
+            `${units} ${units === 1 ? "item" : "items"}, ${products} ${
+              products === 1 ? "product" : "products"
+            }`,
+          ),
+        ),
+        el(
+          "div",
+          { class: "phone-home-order-actions" },
+          button("Review and submit", () => setView("build"), "primary"),
+          button("Keep adding", () => setView("catalog"), "phone-ghost"),
+        ),
+      ),
+    );
+  } else {
+    append(
+      root,
+      el(
+        "section",
+        { class: "phone-home-order" },
+        el(
+          "div",
+          { class: "phone-home-order-summary" },
+          el(
+            "div",
+            {},
+            el("h2", {}, "No order in progress"),
+            el("strong", {}, "Start your next order"),
+          ),
+        ),
+        el(
+          "div",
+          { class: "phone-home-order-actions" },
+          button("Browse catalog", () => setView("catalog"), "primary"),
+          drafts.length
+            ? button("Open drafts", () => setView("build"), "phone-ghost")
+            : button("Draft with AI", showAssistant, "phone-ghost"),
+        ),
+      ),
+    );
+  }
+  const stamp = (order) =>
+    Number(order.submittedAt || order.createdAt || order.updatedAt) || 0;
+  const last = [...orders].sort((a, b) => stamp(b) - stamp(a))[0];
+  if (last)
+    append(
+      root,
+      el(
+        "section",
+        { class: "panel phone-home-reorder" },
+        el(
+          "div",
+          {},
+          el("h2", {}, "Same as last time?"),
+          el(
+            "p",
+            {},
+            [
+              orderName(last, store),
+              date(last.date || last.legacy?.date || last.createdAt),
+              last.totalCents != null ? cash(last.totalCents) : null,
+            ]
+              .filter(Boolean)
+              .join(" · "),
+          ),
+        ),
+        button(
+          "Reorder",
+          async () => {
+            if (
+              units &&
+              !(await confirmAction(
+                "Start a new order from this one?",
+                "Your order in progress stays saved with your drafts.",
+                "Reorder",
+              ))
+            )
+              return;
+            if (!scopeCurrent(scope)) throw new SessionChanged();
+            newDraftFromOrder(last);
+          },
+          "phone-soft",
+          "refresh",
+        ),
+      ),
+    );
+  const follow = [
+    [open.length, "order in progress", "orders in progress", "orders"],
+    [
+      drafts.length - (units ? 1 : 0),
+      units ? "other working draft" : "working draft",
+      units ? "other working drafts" : "working drafts",
+      "build",
+    ],
+    staff()
+      ? [low.length, "stock item to review", "stock items to review", "inventory"]
+      : [
+          pendingPayments.length,
+          "payment awaiting verification",
+          "payments awaiting verification",
+          "payments",
+        ],
+  ].filter(([count]) => count > 0);
+  append(
+    root,
+    el(
+      "section",
+      { class: "panel phone-home-account" },
+      el(
+        "div",
+        { class: "split" },
+        el("h2", {}, "Account"),
+        button("Report a payment", () => showPaymentReport(), "text-button"),
+      ),
+      el(
+        "div",
+        { class: "phone-home-figures" },
+        [
+          [
+            "Balance",
+            store.migrationBlocked
+              ? "Review required"
+              : cash(store.balanceCents ?? balance(storeId)),
+          ],
+          [
+            "Credit limit",
+            store.creditLimitCents == null
+              ? "Not set"
+              : cash(store.creditLimitCents),
+          ],
+          ["Terms", store.terms || "Not set"],
+        ].map(([label, value]) =>
+          el("div", {}, el("span", {}, label), el("strong", {}, value)),
+        ),
+      ),
+      follow.length
+        ? el(
+            "div",
+            { class: "phone-home-follow" },
+            follow.map(([count, one, many, target]) =>
+              button(
+                `${count} ${count === 1 ? one : many}`,
+                () => setView(target),
+                "phone-home-row",
+                "arrow",
+              ),
+            ),
+          )
+        : null,
+      button("View account and payments", () => setView("payments"), "text-button"),
+    ),
+  );
+  if (store.migrationBlocked || store.reconciliationRequired)
+    append(
+      root,
+      notice(
+        el(
+          "div",
+          {},
+          "This account’s imported balance needs owner review before new charges.",
+          master()
+            ? button(
+                "Review opening balance",
+                () => showReconcile(store),
+                "text-button",
+              )
+            : null,
+        ),
+      ),
+    );
+  append(
+    root,
+    el(
+      "section",
+      { class: "panel phone-home-recent" },
+      el(
+        "div",
+        { class: "split" },
+        el("h2", {}, "Recent orders"),
+        button("See all", () => setView("orders"), "text-button"),
+      ),
+      orders.length
+        ? orderList(orders.slice(0, 3))
+        : empty(
+            "Your first order starts here",
+            "Submitted orders will appear with saved dates, invoice totals and delivery progress.",
+            [button("Browse catalog", () => setView("catalog"), "primary")],
+          ),
+    ),
+    button(
+      "Draft an order from a note or photo",
+      showAssistant,
+      "phone-home-ai",
+      "spark",
+    ),
+  );
+  return root;
+}
 function orderList(orders) {
   return el(
     "div",
@@ -2220,8 +2491,10 @@ function orderList(orders) {
     ),
   );
 }
+const phoneCatalogExpanded = new Set();
 function renderCatalog() {
   const scope = operationScope();
+  const phone = isPhone();
   const fav =
     preferences().favorites?.[storeId] ??
     currentStore()?.favoriteProductIds ??
@@ -2238,7 +2511,9 @@ function renderCatalog() {
   );
   const searchField = input("search", search, {
     id: "catalog-search",
-    placeholder: "Search name, flavor, SKU or barcode…",
+    placeholder: phone
+      ? "Search products"
+      : "Search name, flavor, SKU or barcode…",
     autocomplete: "off",
     autocapitalize: "none",
     spellcheck: false,
@@ -2261,7 +2536,10 @@ function renderCatalog() {
     const trail = categoryTrail(all, category);
     const row = (items, parent = null) => {
       const choices = [
-        [parent?.id || "", parent ? `All ${parent.name}` : "All categories"],
+        [
+          parent?.id || "",
+          parent ? `All ${parent.name}` : phone ? "All" : "All categories",
+        ],
         ...items.map((item) => [item.id, item.name]),
       ];
       return el(
@@ -2308,6 +2586,11 @@ function renderCatalog() {
       const children = all.filter((item) => item.parentId === parent.id);
       if (children.length) append(categoryNavigation, row(children, parent));
     }
+    if (phone) {
+      const top = categoryNavigation.firstElementChild;
+      top.firstElementChild.after(favoritesButton);
+      append(top, toolsButton, displayButton);
+    }
   }
   const favoritesButton = button(
     "",
@@ -2317,7 +2600,9 @@ function renderCatalog() {
     },
     "pill",
   );
-  const scanButton = button("Scan", showScanner, "", "scan");
+  const scanButton = phone
+    ? iconButton("Scan barcode", "scan", showScanner)
+    : button("Scan", showScanner, "", "scan");
   scanButton.setAttribute("aria-label", "Scan barcode");
   const columns = select(
     [1, 2, 3, 4, 5].map((value) => [String(value), String(value)]),
@@ -2332,8 +2617,12 @@ function renderCatalog() {
     checked: layout.compact,
     onChange: () => act(updateLayout),
   });
-  const listButton = button("List", () => updateLayout("list"), "", "orders");
-  const gridButton = button("Grid", () => updateLayout("grid"), "", "catalog");
+  const listButton = phone
+    ? iconButton("List view", "list", () => updateLayout("list"))
+    : button("List", () => updateLayout("list"), "", "orders");
+  const gridButton = phone
+    ? iconButton("Photo view", "catalog", () => updateLayout("grid"))
+    : button("Grid", () => updateLayout("grid"), "", "catalog");
   const gridOptions = el(
     "div",
     {
@@ -2395,7 +2684,101 @@ function renderCatalog() {
   );
   toolsButton.setAttribute("aria-haspopup", "dialog");
   const results = el("div", { class: "catalog-results" });
-  const root = el(
+  const selectedStoreId = storeId;
+  const phoneCatalog = phone
+    ? createPhoneCatalog({
+        el,
+        icon,
+        button,
+        input,
+        act,
+        cash,
+        makeId: uuid,
+        quantities: catalogQuantities,
+        expanded: phoneCatalogExpanded,
+        getLines: () => draft?.lines || [],
+        changeLines: (change) => {
+          if (!scopeCurrent(scope) || storeId !== selectedStoreId)
+            throw new SessionChanged();
+          if (hasUnsavedDraftNotes())
+            throw new Error(
+              "Save or copy your latest order notes before changing quantities.",
+            );
+          const before = draft?.lines || [];
+          const next = change(before);
+          if (next === before) return;
+          editDraft(
+            (d) => {
+              d.lines = next;
+            },
+            { renderPage: false, stay: true },
+          );
+          updateDraftProtection(draft.id);
+          updatePhoneOrderBadge();
+        },
+        priceFor: (productId, variant) =>
+          linePrice({ productId, variant, unit: "each" }),
+        availableFor: (productId, variant) => {
+          const stock = state.inventory.find(
+            (item) =>
+              item.productId === productId && (item.variant || "") === variant,
+          );
+          return stock?.onHand == null
+            ? null
+            : stock.onHand - (stock.reserved || 0);
+        },
+        totals: () => draftTotals(),
+        variantsOf: productVariants,
+        currentProduct: productById,
+        imageOf: (product) => safeImage(product.image || product.imageUrl),
+        isFavorite: (id) => fav.includes(id),
+        onFavorite: (id) => {
+          if (!scopeCurrent(scope)) throw new SessionChanged();
+          return toggleFavorite(id);
+        },
+        onEdit: master()
+          ? (product) => {
+              if (!scopeCurrent(scope)) throw new SessionChanged();
+              showProductEditor(product);
+            }
+          : null,
+        onMoreOptions: (product) => {
+          if (!scopeCurrent(scope)) throw new SessionChanged();
+          showAddProduct(product);
+        },
+        onReview: () => setView("build"),
+      })
+    : null;
+  if (phone) toolsButton.className = "pill phone-tools-chip";
+  const phoneHeading = phone
+    ? heading("Catalog", `${candidates.length} products`)
+    : null;
+  phoneHeading?.classList.add("sr-only");
+  const root = phone
+    ? el(
+        "div",
+        { class: "catalog-page phone-catalog", "data-view": layout.view },
+        phoneHeading,
+        el(
+          "div",
+          { class: "phone-catalog-head" },
+          el("div", { class: "phone-search" }, icon("search"), searchField, scanButton),
+          el(
+            "div",
+            {
+              class: "phone-view-switch",
+              role: "group",
+              "aria-label": "Catalog view",
+            },
+            listButton,
+            gridButton,
+          ),
+        ),
+        categoryNavigation,
+        results,
+        phoneCatalog.orderBar,
+      )
+    : el(
     "div",
     {
       class: "catalog-page",
@@ -2429,9 +2812,9 @@ function renderCatalog() {
         displayButton,
       ),
     ),
-    results,
-  );
-  if (draft?.lines.length) {
+        results,
+      );
+  if (!phone && draft?.lines.length) {
     const totals = draftTotals();
     const estimate = totals.missing.length ? "Check items" : cash(totals.total);
     append(
@@ -2510,6 +2893,16 @@ function renderCatalog() {
             }),
           ],
           "search",
+        ),
+      );
+      return;
+    }
+    if (phone) {
+      results.replaceChildren(
+        el(
+          "div",
+          { class: "catalog-grid phone-catalog-grid" },
+          phoneCatalog.nodes(products),
         ),
       );
       return;
@@ -2816,9 +3209,12 @@ function showAddProduct(product, initialVariant) {
         lines,
         uuid,
       );
-      editDraft((d) => {
-        d.lines = nextLines;
-      });
+      editDraft(
+        (d) => {
+          d.lines = nextLines;
+        },
+        { stay: isPhone() },
+      );
       m.close();
       toast(
         `${product.name}: ${lines.length} ${
@@ -2989,7 +3385,7 @@ function showAddProduct(product, initialVariant) {
     const current=productById(product.id);
     if(!current||current.active===false||current.deleted||lines.some(line=>(line.allowedVariants||[line.variant]).some(v=>!productVariants(current).includes(v))))throw new Error("The available flavors changed. Reopen the product.");
     const nextLines=addSelectedProductLines(draft?.lines||[],lines,uuid);
-    editDraft(d=>{d.lines=nextLines;});m.close();toast("Assortment added to your order.");
+    editDraft(d=>{d.lines=nextLines;},{stay:isPhone()});m.close();toast("Assortment added to your order.");
   }}); }
   let assortmentPanel = makeAssortmentPanel();
   flavorActions.append(assortmentPanel.addButton);
@@ -3295,6 +3691,46 @@ function showBuilderActions() {
   );
   append(m.footer, button("Close", m.close));
 }
+function productThumbnail(product) {
+  const missing = (label) =>
+    el("span", { class: "no-image", "aria-label": label }, icon("box"));
+  const image = product && safeImage(product.image || product.imageUrl);
+  return el(
+    "span",
+    { class: "builder-product-photo" },
+    image
+      ? el("img", {
+          src: image,
+          alt: "",
+          width: 180,
+          height: 145,
+          loading: "lazy",
+          decoding: "async",
+          onError: (event) =>
+            event.target.replaceWith(missing("Image unavailable")),
+        })
+      : missing("No product image"),
+  );
+}
+// Phone − / + around an order line's quantity field. They reuse the field's
+// own input handler, so validation and saving stay in one place.
+function builderStepper(quantity, label) {
+  const step = (delta) => {
+    const current = Number(quantity.value);
+    const next = Math.min(
+      1_000_000,
+      Math.max(1, (Number.isSafeInteger(current) ? current : 1) + delta),
+    );
+    if (String(next) === quantity.value) return;
+    quantity.value = String(next);
+    quantity.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const less = button("", () => step(-1), "builder-step builder-step-less", "minus");
+  const more = button("", () => step(1), "builder-step builder-step-more", "plus");
+  less.setAttribute("aria-label", `Decrease quantity for ${label}`);
+  more.setAttribute("aria-label", `Increase quantity for ${label}`);
+  return el("div", { class: "builder-stepper" }, less, quantity, more);
+}
 function renderBuilder() {
   const root = el(
     "div",
@@ -3356,7 +3792,12 @@ function renderBuilder() {
     builderStoreId = storeId;
   const checkDraft = () =>
     assertBuilderDraft(builderScope, builderDraftId, builderStoreId);
-  const review = button("Review & submit", showSubmit, "primary", "check");
+  const review = button(
+    isPhone() ? "Submit order" : "Review & submit",
+    showSubmit,
+    "primary",
+    "check",
+  );
   const totalValue = el(
     "strong",
     { "data-builder-total": "true", "aria-live": "polite" },
@@ -3459,6 +3900,7 @@ function renderBuilder() {
         el(
           "div",
           { class: "builder-product-head" },
+          isPhone() ? productThumbnail(product) : null,
           el("h2", { id: groupLabel }, options),
           el("div", { class: "builder-product-actions" }, add),
         ),
@@ -3544,7 +3986,7 @@ function renderBuilder() {
                   ? el("small", {}, savedCaseQuantityHint(line, product))
                   : null,
               ),
-              quantity,
+              isPhone() ? builderStepper(quantity, label) : quantity,
               amount,
               iconButton(`Options for ${label}`, "more", () => {
                 checkDraft();
@@ -6276,7 +6718,9 @@ function renderMore() {
   );
   const groups = [
     ["Quick access", [
-      ["Overview", "Store summary and current drafts", "home", () => setView("home")],
+      isPhone()
+        ? ["Stores", "Store details, contacts and pricing", "stores", () => setView("stores")]
+        : ["Overview", "Store summary and current drafts", "home", () => setView("home")],
       ["Saved items", "Your favorite catalog products", "star", () => {favoritesOnly = true; setView("catalog");}],
     ]],
     ["Orders & account", [
@@ -8711,6 +9155,9 @@ async function boot() {
     );
   }
 }
+watchPhoneLayout(() => {
+  if (state) render();
+});
 window.addEventListener("popstate", () => {
   const route = location.hash.slice(2);
   if (

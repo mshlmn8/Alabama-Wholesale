@@ -98,6 +98,7 @@ function fixture({ saveError = null } = {}) {
     $: (id) => nodes.get(id),
     operationScope: () => identity,
     scopeCurrent: (scope) => scope === identity,
+    isPhone: () => false,
     SessionChanged: class SessionChanged extends Error {},
     currentStore: () => ({ id: "store-1", name: "Store one" }),
     storeById: () => ({ id: "store-1", name: "Store one" }),
