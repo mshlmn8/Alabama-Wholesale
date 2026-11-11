@@ -1,6 +1,34 @@
 # Mobile ordering guide
 
-Updated October 27, 2026.
+Updated November 11, 2026.
+
+## On a phone
+
+These apply on screens up to 800px wide. Larger screens work as described in
+the rest of this guide.
+
+- **Order from the catalog.** Tap a product to open its flavors, then use
+  **−** and **+** or type a quantity. Each change is added to your order and
+  saved automatically; you stay in the catalog. A product with one option has
+  **−** and **+** on its own row. "3 in order" on a product shows how many of
+  it your order holds.
+- **List or photos.** Use the two buttons beside search to switch between the
+  list and large photo cards. In the photo view, tapping a card opens its
+  flavors just below it. **☆ Favorites**, **Catalog tools** and the photo
+  column settings are in the row of category chips.
+- **Mix / Each, notes and new flavors.** Open a product and choose **More
+  options** to use the full add screen described below. **Favorite** and, for
+  owners, **Edit product** are beside it.
+- **Order bar and tabs.** The bar above the tabs shows your item count and
+  estimated total; **Review order** opens your order. The tabs are **Home,
+  Catalog, Order, History, More**. **Order** is the Build screen and
+  **History** is Orders. **Stores** is under **More**.
+- **Your order.** Use **−** and **+** on a line or type a quantity. To remove a
+  line, open its **⋯** options. **Submit order** opens the review step before
+  anything is sent.
+- **Home.** Shows your order in progress, **Reorder** for your latest order,
+  your balance, and recent orders. Reordering while an order is in progress
+  asks first and keeps that order with your drafts.
 
 - **Choose a store.** Open the store dropdown in the header and type in **Search stores**. Tap the matching name, or use arrow keys and Enter. Searching or pressing Escape leaves the current store unchanged. Choosing a store restores its working draft. If the latest visible notes could not be saved, the app keeps you in that store so you can retry, copy or export the notes first.
 

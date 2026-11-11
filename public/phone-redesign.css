@@ -668,7 +668,7 @@
   #app[data-phone="true"] .builder-page[data-size] .builder-flavor-name {
     grid-area: name;
     align-self: end;
-    font-weight: 600;
+    font-weight: 600;    text-transform: capitalize;
   }
   #app[data-phone="true"] .builder-page .builder-line-amount {
     grid-area: amount;
