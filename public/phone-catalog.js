@@ -21,6 +21,28 @@ export function assertOrderable(product, variant, variantsOf) {
     throw new Error(OPTIONS_CHANGED);
 }
 
+// Blank restores the saved quantity (null); unreadable input is refused.
+export function typedQuantity(raw, valid) {
+  if (!valid) throw new Error("Use a whole number from 0 to 1,000,000.");
+  const text = String(raw ?? "").trim();
+  return text === "" ? null : Number(text);
+}
+
+export function assertSameDraft(knownId, currentId) {
+  if ((knownId ?? null) !== (currentId ?? null))
+    throw new Error(
+      "Your order changed since this page was shown. The quantities are now up to date; please try again.",
+    );
+}
+
+// After a change, explains a quantity that could not go as low as asked.
+export function heldElsewhereMessage(after, wanted) {
+  if (wanted < 0 || after <= wanted) return null;
+  return after === 1
+    ? "1 is in a line with a note or case unit. Change it on the Order screen."
+    : `${after} are in lines with a note or case unit. Change them on the Order screen.`;
+}
+
 export function productSummary(product, variantsOf) {
   const count = variantsOf(product).filter(Boolean).length;
   return `${
@@ -85,47 +107,67 @@ export function createPhoneCatalog(deps) {
       class: "phone-step-value",
       "aria-label": `${label} quantity`,
     });
-    const apply = (change) => {
+    const saved = () =>
+      quantities.variantQuantity(getLines(), product.id, variant);
+    const apply = (wanted, change) => {
       try {
         assertOrderable(currentProduct(product.id), variant, variantsOf);
         changeLines(change);
+        const held = heldElsewhereMessage(saved(), wanted);
+        if (held) throw new Error(held);
       } finally {
         refresh(product.id);
       }
     };
-    const less = button(
-      "",
-      () =>
-        apply((lines) =>
-          quantities.stepVariantQuantity(lines, product.id, variant, -1, makeId),
+    // Some touch browsers tap a button without first committing the field.
+    const pending = () => {
+      if (!value.validity.valid || value.value.trim() === "") return null;
+      const typed = Number(value.value);
+      return Number.isSafeInteger(typed) &&
+        typed >= 0 &&
+        typed <= 1_000_000 &&
+        typed !== saved()
+        ? typed
+        : null;
+    };
+    const step = (delta) => {
+      const typed = pending();
+      apply(Math.max(0, (typed ?? saved()) + delta), (lines) =>
+        quantities.stepVariantQuantity(
+          typed == null
+            ? lines
+            : quantities.setVariantQuantity(
+                lines,
+                product.id,
+                variant,
+                typed,
+                makeId,
+              ),
+          product.id,
+          variant,
+          delta,
+          makeId,
         ),
-      "phone-step phone-step-less",
-      "minus",
-    );
-    const more = button(
-      "",
-      () =>
-        apply((lines) =>
-          quantities.stepVariantQuantity(lines, product.id, variant, 1, makeId),
-        ),
-      "phone-step phone-step-more",
-      "plus",
-    );
+      );
+    };
+    const less = button("", () => step(-1), "phone-step phone-step-less", "minus");
+    const more = button("", () => step(1), "phone-step phone-step-more", "plus");
     less.setAttribute("aria-label", `Decrease ${label} quantity`);
     more.setAttribute("aria-label", `Increase ${label} quantity`);
     value.addEventListener("focus", () => value.select());
     value.addEventListener("change", () =>
-      act(() =>
-        apply((lines) =>
-          quantities.setVariantQuantity(
-            lines,
-            product.id,
-            variant,
-            value.value.trim() === "" ? 0 : Number(value.value),
-            makeId,
-          ),
-        ),
-      ),
+      act(() => {
+        let typed;
+        try {
+          typed = typedQuantity(value.value, value.validity.valid);
+        } finally {
+          if (typed == null) refresh(product.id);
+        }
+        if (typed == null) return;
+        apply(typed, (lines) =>
+          quantities.setVariantQuantity(lines, product.id, variant, typed, makeId),
+        );
+      }),
     );
     const root = el(
       "div",
@@ -192,10 +234,6 @@ export function createPhoneCatalog(deps) {
       entry.pill,
       el("span", { class: "phone-product-chevron" }, icon("down")),
     );
-    entry.open.setAttribute(
-      "aria-label",
-      `${product.name}, ${single ? "product options" : "choose quantities"}`,
-    );
     entry.card = el(
       "article",
       {
@@ -210,25 +248,30 @@ export function createPhoneCatalog(deps) {
     );
     entries.set(product.id, entry);
     syncOpen(entry);
-    refresh(product.id);
     return entry;
   }
 
   function panelFor(entry) {
     if (entry.panel) return entry.panel;
     const { product, variants, single } = entry;
-    const rows = single
-      ? []
-      : variants.map((variant) => {
+    // A single product's row shows only in dense photo grids, where the card
+    // is too narrow for its own stepper.
+    const rows = variants.map((variant) => {
           const price = priceFor(product.id, variant);
           const available = availableFor(product.id, variant);
           const row = el(
             "div",
-            { class: "phone-flavor-row" },
+            {
+              class: `phone-flavor-row${single ? " phone-flavor-row-single" : ""}`,
+            },
             el(
               "div",
               { class: "phone-flavor-info" },
-              el("span", { class: "phone-flavor-name" }, variant || "Standard"),
+              el(
+                "span",
+                { class: "phone-flavor-name" },
+                variant || (single ? product.name : "Standard"),
+              ),
               el(
                 "small",
                 {},
@@ -313,7 +356,7 @@ export function createPhoneCatalog(deps) {
     }
     const panel = panelFor(entry);
     if (entry.card.isConnected && !panel.isConnected) entry.card.after(panel);
-    refresh(entry.product.id);
+    refresh(entry.product.id, false);
   }
 
   function toggle(product) {
@@ -322,7 +365,7 @@ export function createPhoneCatalog(deps) {
     syncOpen(entryFor(product));
   }
 
-  function refresh(productId) {
+  function refresh(productId, bar = true) {
     const lines = getLines();
     for (const [id, entry] of entries) {
       if (productId != null && id !== productId) continue;
@@ -338,14 +381,17 @@ export function createPhoneCatalog(deps) {
       entry.pill.hidden = !total;
       entry.card.dataset.inOrder = String(total > 0);
     }
-    updateBar();
+    if (bar) updateBar();
   }
 
   function nodes(products) {
-    return products.flatMap((product) => {
+    const list = products.flatMap((product) => {
       const entry = entryFor(product);
       return expanded.has(product.id) ? [entry.card, panelFor(entry)] : [entry.card];
     });
+    refresh(null, false);
+    updateBar();
+    return list;
   }
 
   updateBar();

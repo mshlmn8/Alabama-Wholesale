@@ -59,3 +59,37 @@ test("option counts read naturally for single and multi-option products", async 
   );
   assert.equal(productSummary({ id: "a" }, variantsOf), "Single product");
 });
+
+test("a blank typed quantity restores the field and an unreadable one is refused", async () => {
+  const { typedQuantity } = await mod;
+  assert.equal(typedQuantity("12", true), 12);
+  assert.equal(typedQuantity(" 0 ", true), 0);
+  assert.equal(typedQuantity("", true), null);
+  assert.equal(typedQuantity("   ", true), null);
+  assert.throws(() => typedQuantity("", false), /whole number from 0 to 1,000,000/);
+  assert.throws(() => typedQuantity("12", false), /whole number from 0 to 1,000,000/);
+});
+
+test("a quantity change is refused when the order was replaced since the catalog was drawn", async () => {
+  const { assertSameDraft } = await mod;
+  assert.doesNotThrow(() => assertSameDraft("draft-1", "draft-1"));
+  assert.doesNotThrow(() => assertSameDraft(null, null));
+  assert.throws(() => assertSameDraft("draft-1", "draft-2"), /Your order changed/);
+  assert.throws(() => assertSameDraft("draft-1", null), /Your order changed/);
+  assert.throws(() => assertSameDraft(null, "draft-2"), /Your order changed/);
+});
+
+test("minus explains itself when only a noted or case line holds the quantity", async () => {
+  const { heldElsewhereMessage } = await mod;
+  assert.equal(heldElsewhereMessage(2, 2), null);
+  assert.equal(heldElsewhereMessage(1_000_000, 1_000_001), null);
+  assert.equal(heldElsewhereMessage(0, -1), null);
+  assert.match(
+    heldElsewhereMessage(1, 0),
+    /1 is in a line with a note or case unit\. Change it on the Order screen\./,
+  );
+  assert.match(
+    heldElsewhereMessage(5, 2),
+    /5 are in lines with a note or case unit\. Change them on the Order screen\./,
+  );
+});

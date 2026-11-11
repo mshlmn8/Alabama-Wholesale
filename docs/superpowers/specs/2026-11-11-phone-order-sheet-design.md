@@ -74,10 +74,14 @@ Quantity rules (pure, unit-tested in `public/catalog-quantities.js`):
 
 - A flavor's quantity is the sum of its manual draft lines.
 - `+` raises the plain line (unit `each`, no note); it creates one if needed.
-- `−` lowers the plain line first, otherwise the last manual line for that
-  flavor, and removes a line that reaches zero.
+- `−` lowers the plain line first and removes it at zero; otherwise it lowers
+  the last manual line for that flavor but never removes a line that carries a
+  note or a case unit. The catalog then says to change it on the Order screen.
 - A typed quantity sets the plain line so the flavor total matches; lines with
-  notes or case units are left alone. Limits stay 0 to 1,000,000.
+  notes or case units are left alone. A blank field restores the saved
+  quantity. Limits stay 0 to 1,000,000.
+- A change is refused, and the catalog redrawn, when the working draft was
+  replaced since the page was drawn (for example from another device).
 - Mix / Each lines count toward "N in order" but are edited in Order.
 - Changes are refused while order notes are unsaved, as today.
 

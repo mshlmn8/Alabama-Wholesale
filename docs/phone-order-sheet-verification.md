@@ -24,8 +24,8 @@ Above 800px nothing changes.
 
 ## Results
 
-- **Automated tests:** `npm test` on Node 22: 884 passed, 0 failed. This
-  includes 20 new tests for the quantity rules, the phone tab mapping, the
+- **Automated tests:** `npm test` on Node 22: 889 passed, 0 failed. This
+  includes 25 new tests for the quantity rules, the phone tab mapping, the
   catalog helpers and the offline shell list. `npm run build` passed.
 - **Phone flow, Chromium at 390×844, 25 checks passed:** first `+` from an
   empty order stays on the catalog and creates the draft; the count, order bar
@@ -36,6 +36,13 @@ Above 800px nothing changes.
   flavor; the order screen's `−`/`+` change the line and total; Submit order
   opens "Review your order"; Home shows the order in progress; Reorder asks
   before replacing it; Stores opens from More; no page errors.
+- **Edge cases, 12 checks passed:** `−` keeps a line that has a note and says
+  to change it on the Order screen; a blank typed quantity restores the saved
+  one; typing 0 keeps the noted line; a typed value followed by `+` without
+  leaving the field saves both; the Order tab count follows edits made on the
+  order screen; the main button is readable in dark appearance (dark text on
+  light orange) and has no navy outline in light; in a four-column photo grid
+  a single product's stepper moves into its panel.
 - **Breakpoint:** resizing 390 → 1200 → 390 re-rendered each layout with the
   same draft total and no error.
 - **Overflow:** 54 cases at 320, 390 and 800px, light and dark, across catalog
@@ -51,6 +58,19 @@ Above 800px nothing changes.
 scratch copy of the demo was seeded with nine real catalog products and their
 photos so flavors and images were realistic. Prices, stock and order history
 are synthetic. No production data was read or changed and no email was sent.
+
+## Independent review
+
+A separate reviewer read the branch and found no critical defect and four
+important ones, all fixed with a failing test first: `−` could delete a line
+with a note; dark-appearance buttons lost contrast; a draft replaced in the
+background left stale counts; unreadable typed input saved as zero. Smaller
+fixes from the same review: the Order tab count on the order screen, Reorder
+skipping cancelled orders, no layout switch while a field or dialog is in use,
+screen-reader text on product rows, and dense photo grids.
+
+Known and left as is: a line ordered by the case counts as its number in "N in
+order" and the item count.
 
 ## Not verified
 

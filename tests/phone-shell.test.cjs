@@ -65,3 +65,10 @@ test("the build check knows the phone redesign files", () => {
   ])
     assert.ok(build.includes(`"${file}"`), `${file} is checked by the build`);
 });
+
+test("the phone palette keeps the base action colour so dark buttons stay readable", () => {
+  const css = read("public/phone-redesign.css");
+  assert.equal(/--gold\s*:/.test(css), false);
+  assert.equal(/--onaccent\s*:/.test(css), false);
+  assert.match(css, /button\.primary\s*\{[^}]*border-color:\s*var\(--gold\)/);
+});

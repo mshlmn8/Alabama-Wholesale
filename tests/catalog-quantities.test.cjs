@@ -76,7 +76,7 @@ test("plus stops at 1,000,000 and returns the same array", async () => {
   assert.equal(stepVariantQuantity(lines, "faygo", "orange", 1, ids()), lines);
 });
 
-test("minus lowers the plain line first, then the last manual line, removing a line at zero", async () => {
+test("minus lowers the plain line first and removes it at zero, then lowers the last manual line", async () => {
   const { stepVariantQuantity } = await helpers;
   const lines = [
     line("n", "orange", 2, { note: "cold" }),
@@ -86,7 +86,16 @@ test("minus lowers the plain line first, then the last manual line, removing a l
   assert.deepEqual(once.map((l) => [l.id, l.quantity]), [["n", 2]]);
   const twice = stepVariantQuantity(once, "faygo", "orange", -1, ids());
   assert.deepEqual(twice.map((l) => [l.id, l.quantity, l.note]), [["n", 1, "cold"]]);
-  assert.deepEqual(stepVariantQuantity(twice, "faygo", "orange", -1, ids()), []);
+});
+
+test("minus never deletes a line that carries a note or a case unit", async () => {
+  const { stepVariantQuantity } = await helpers;
+  const noted = [line("n", "orange", 1, { note: "deliver Tuesday" })];
+  assert.equal(stepVariantQuantity(noted, "faygo", "orange", -1, ids()), noted);
+  const cased = [line("c", "orange", 1, { unit: "case" })];
+  assert.equal(stepVariantQuantity(cased, "faygo", "orange", -1, ids()), cased);
+  const plain = [line("a", "orange", 1)];
+  assert.deepEqual(stepVariantQuantity(plain, "faygo", "orange", -1, ids()), []);
 });
 
 test("minus never touches a Mix or Each line and returns the same array when nothing manual exists", async () => {

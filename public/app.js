@@ -21,7 +21,7 @@ import {
   watchPhoneLayout,
 } from "./phone-layout.js";
 import * as catalogQuantities from "./catalog-quantities.js";
-import { createPhoneCatalog } from "./phone-catalog.js";
+import { createPhoneCatalog, assertSameDraft } from "./phone-catalog.js";
 const { draftUnits } = catalogQuantities;
 import {
   categoryTrail,
@@ -1194,7 +1194,8 @@ async function refreshInForeground() {
     ];
     const changed = restoreActiveDraft();
     lastDraftRefresh = Date.now();
-    if (changed && view === "build") render();
+    if (changed && (view === "build" || (view === "catalog" && isPhone())))
+      render();
     else updateWorkspaceProtection();
   } catch {
     /* Draft autosave reports its own status; an unavailable background read never discards local edits. */
@@ -1426,6 +1427,7 @@ function changeStore(id) {
       "Your latest notes could not be saved. Retry saving them, or copy or export them before switching stores.",
     );
   storeId = id;
+  phoneCatalogExpanded.clear();
   geminiChat.refreshScope();
   productPhotos.reset();
   resetOrderHistory();
@@ -1473,6 +1475,7 @@ function editDraft(change, { renderPage = true, stay = false } = {}) {
   redo = [];
   draft = saved;
   if (renderPage) render();
+  else updatePhoneOrderBadge();
   announce(draftProtection(draft.id).label);
 }
 function undoDraft(forward = false) {
@@ -2299,7 +2302,9 @@ function renderPhoneHome({ store, orders, drafts, open, pendingPayments, low }) 
   }
   const stamp = (order) =>
     Number(order.submittedAt || order.createdAt || order.updatedAt) || 0;
-  const last = [...orders].sort((a, b) => stamp(b) - stamp(a))[0];
+  const last = orders
+    .filter((order) => !order.deleted && order.status !== "cancelled")
+    .sort((a, b) => stamp(b) - stamp(a))[0];
   if (last)
     append(
       root,
@@ -2685,6 +2690,7 @@ function renderCatalog() {
   toolsButton.setAttribute("aria-haspopup", "dialog");
   const results = el("div", { class: "catalog-results" });
   const selectedStoreId = storeId;
+  let knownDraftId = draft?.id ?? null;
   const phoneCatalog = phone
     ? createPhoneCatalog({
         el,
@@ -2704,6 +2710,13 @@ function renderCatalog() {
             throw new Error(
               "Save or copy your latest order notes before changing quantities.",
             );
+          try {
+            assertSameDraft(knownDraftId, draft?.id);
+          } catch (error) {
+            // Redraw from the order that is active now before reporting it.
+            render();
+            throw error;
+          }
           const before = draft?.lines || [];
           const next = change(before);
           if (next === before) return;
@@ -2713,8 +2726,8 @@ function renderCatalog() {
             },
             { renderPage: false, stay: true },
           );
+          knownDraftId = draft.id;
           updateDraftProtection(draft.id);
-          updatePhoneOrderBadge();
         },
         priceFor: (productId, variant) =>
           linePrice({ productId, variant, unit: "each" }),
@@ -8564,7 +8577,12 @@ function rebaseAfterDeviceWrite(workspace, write) {
 function deviceDatabaseChanged(scope) {
   if (!scopeCurrent(scope)) return;
   draftProtectionCache.clear();
-  if (state && !editorIsActive() && restoreActiveDraft() && view === "build") {
+  if (
+    state &&
+    !editorIsActive() &&
+    restoreActiveDraft() &&
+    (view === "build" || (view === "catalog" && isPhone()))
+  ) {
     render();
     return;
   }
@@ -9155,9 +9173,17 @@ async function boot() {
     );
   }
 }
-watchPhoneLayout(() => {
-  if (state) render();
-});
+// Redraw in the other layout when the screen crosses the phone breakpoint,
+// but never while a field, dialog or unsaved order note is in use.
+function syncPhoneLayout() {
+  if (!state || $("app")?.dataset.phone === String(isPhone())) return;
+  if (editorIsActive()) {
+    setTimeout(syncPhoneLayout, 1500);
+    return;
+  }
+  render();
+}
+watchPhoneLayout(syncPhoneLayout);
 window.addEventListener("popstate", () => {
   const route = location.hash.slice(2);
   if (

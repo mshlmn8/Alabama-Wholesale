@@ -64,9 +64,11 @@ export function stepVariantQuantity(lines, productId, variant, delta, makeId) {
       : lines.findLastIndex(
           (line) => isFor(line, productId, variant) && isManual(line),
         );
-  return target < 0
-    ? lines
-    : withQuantity(lines, target, count(lines[target]) - 1);
+  if (target < 0) return lines;
+  const next = count(lines[target]) - 1;
+  // A line with a note or a case unit is only removed deliberately, in Order.
+  if (next <= 0 && !isPlain(lines[target])) return lines;
+  return withQuantity(lines, target, next);
 }
 
 export function setVariantQuantity(lines, productId, variant, quantity, makeId) {

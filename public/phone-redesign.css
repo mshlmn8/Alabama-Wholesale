@@ -8,7 +8,6 @@
     --ink: #17152b;
     --muted: #5b5a6b;
     --line: #e4e2dc;
-    --gold: #c94712;
     --accent-ink: #241a6b;
     --goldwash: #eeecf8;
     --navy-fill: #241a6b;
@@ -26,6 +25,12 @@
     --goldwash: #2e2a52;
     --navy-fill: #4b3fb5;
     --navy-soft: #d5d1f0;
+  }
+
+  /* The action colour stays the base orange in both themes; only its
+     outline follows it, since the accent ink is navy here. */
+  button.primary {
+    border-color: var(--gold);
   }
 
   /* Shell */
@@ -431,7 +436,15 @@
     gap: 8px;
     min-height: 52px;
   }
-  #app[data-phone="true"] .phone-flavor-row[hidden] {
+  #app[data-phone="true"] .phone-flavor-row[hidden],
+  #app[data-phone="true"] .phone-flavor-row-single {
+    display: none;
+  }
+  /* Dense photo grids: a single product's stepper moves into its panel. */
+  #app[data-phone="true"] .phone-catalog[data-view="grid"]:is([data-columns="3"], [data-columns="4"], [data-columns="5"]) .phone-flavor-row-single:not([hidden]) {
+    display: flex;
+  }
+  #app[data-phone="true"] .phone-catalog[data-view="grid"]:is([data-columns="3"], [data-columns="4"], [data-columns="5"]) .phone-product > .phone-stepper {
     display: none;
   }
   #app[data-phone="true"] .phone-flavor-info {
