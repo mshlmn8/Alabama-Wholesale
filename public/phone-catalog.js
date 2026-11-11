@@ -330,7 +330,8 @@ export function createPhoneCatalog(deps) {
         const count = quantities.variantQuantity(lines, id, control.variant);
         control.value.value = String(count);
         control.root.dataset.active = String(count > 0);
-        control.less.disabled = count === 0;
+        // The shared action wrapper re-enables buttons, so dim instead of disable.
+        control.less.setAttribute("aria-disabled", String(count === 0));
       }
       const total = quantities.productQuantity(lines, id);
       entry.pill.textContent = `${total} in order`;

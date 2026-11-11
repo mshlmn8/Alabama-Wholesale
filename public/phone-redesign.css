@@ -378,7 +378,7 @@
     background: var(--panel2);
     color: var(--ink);
   }
-  #app[data-phone="true"] .phone-step-less:disabled {
+  #app[data-phone="true"] .phone-step-less[aria-disabled="true"] {
     opacity: 0.45;
   }
   #app[data-phone="true"] .phone-step-more {
@@ -834,9 +834,10 @@
     font-weight: 700;
   }
   #app[data-phone="true"] .phone-home-figures {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 10px 16px;
   }
   #app[data-phone="true"] .phone-home-figures div {
     display: grid;
@@ -894,5 +895,27 @@
   }
   #app[data-phone="true"] .phone-home-ai .icon {
     color: var(--gold);
+  }
+
+  /* Small phones */
+  @media (max-width: 359px) {
+    #app[data-phone="true"] .phone-search > .icon {
+      display: none;
+    }
+    #app[data-phone="true"] .phone-catalog[data-view="list"] .phone-product-photo {
+      width: 48px;
+      height: 48px;
+    }
+    #app[data-phone="true"] .phone-catalog[data-view="list"] .phone-product-open {
+      gap: 8px;
+      padding-left: 8px;
+    }
+    #app[data-phone="true"] .phone-step-value,
+    #app[data-phone="true"] .builder-page .builder-stepper input {
+      width: 36px;
+    }
+    #app[data-phone="true"] .phone-home-order strong {
+      font-size: 1.6rem;
+    }
   }
 }
