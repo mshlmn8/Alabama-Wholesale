@@ -60,6 +60,7 @@ for (const file of [
   "public/phone-layout.js",
   "public/phone-catalog.js",
   "public/catalog-quantities.js",
+  "public/catalog-sort.js",
   "public/sw.js",
 ])
   execFileSync(process.execPath, ["--check", path.join(root, file)], {

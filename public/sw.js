@@ -1,4 +1,4 @@
-const VERSION = "aw-v2-20261111-phone-1";
+const VERSION = "aw-v2-20261111-desktop-1";
 const SHELL = [
   "/",
   "/app.js",
@@ -31,6 +31,7 @@ const SHELL = [
   "/phone-layout.js",
   "/phone-catalog.js",
   "/catalog-quantities.js",
+  "/catalog-sort.js",
   "/workspace-chrome.js",
   "/storage.js",
   "/device-storage.js",

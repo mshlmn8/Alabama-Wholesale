@@ -115,7 +115,7 @@ function fixture(role) {
   };
 }
 const common = [
-  "Overview",
+  "Home",
   "Saved items",
   "Saved order lists",
   "Invoices & documents",
@@ -157,7 +157,7 @@ test("grouped menus preserve every tool and the existing role boundaries", () =>
 });
 test("a tool rendered for an earlier session cannot navigate or start an action", () => {
   const f = fixture("master");
-  f.rows.find((row) => row["aria-label"] === "Overview").callback();
+  f.rows.find((row) => row["aria-label"] === "Home").callback();
   assert.deepEqual(f.actions, ["home"]);
   f.scope.current = false;
   for (const row of f.rows) assert.throws(() => row.callback());

@@ -93,3 +93,24 @@ test("minus explains itself when only a noted or case line holds the quantity", 
     /5 are in lines with a note or case unit\. Change them on the Order screen\./,
   );
 });
+
+test("the order panel lists each product then its lines", async () => {
+  const { orderPanelRows } = await mod;
+  assert.deepEqual(
+    orderPanelRows([
+      { name: "Faygo bottles", amount: "$55.50", lines: [
+        { label: "redpop", quantity: 2, amount: "$37.00" },
+        { label: "Mix", quantity: 1, amount: "Check item" },
+      ] },
+      { name: "Baking soda", amount: "$12.00", lines: [{ label: "", quantity: 1, amount: "$12.00" }] },
+    ]),
+    [
+      { kind: "group", text: "Faygo bottles", amount: "$55.50" },
+      { kind: "line", text: "2 × redpop", amount: "$37.00" },
+      { kind: "line", text: "1 × Mix", amount: "Check item" },
+      { kind: "group", text: "Baking soda", amount: "$12.00" },
+      { kind: "line", text: "1", amount: "$12.00" },
+    ],
+  );
+  assert.deepEqual(orderPanelRows(undefined), []);
+});
