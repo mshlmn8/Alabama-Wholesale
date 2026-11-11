@@ -44,6 +44,33 @@ export function heldElsewhereMessage(after, wanted) {
     : `${after} are in lines with a note or case unit. Change them on the Order screen.`;
 }
 
+// Builds the order panel's groups from draft lines grouped by product.
+export function orderGroupsFor(grouped, { productOf, variantsOf, priceOf, labelOf, cash }) {
+  return (grouped || []).map((group) => {
+    const product = productOf(group.productId);
+    const options = product ? variantsOf(product).length : 0;
+    let amount = 0,
+      priced = true;
+    const lines = group.lines.map((line) => {
+      const price = priceOf(line);
+      const total = price == null ? null : price * line.quantity;
+      if (total == null) priced = false;
+      else amount += total;
+      const name = labelOf(line) || (options > 1 ? "Standard" : "");
+      return {
+        label: `${name}${line.unit === "case" ? " (case)" : ""}`.trim(),
+        quantity: line.quantity,
+        amount: total == null ? "Check item" : cash(total),
+      };
+    });
+    return {
+      name: product?.name || "Product unavailable",
+      amount: priced ? cash(amount) : "Check items",
+      lines,
+    };
+  });
+}
+
 // Flattens the order panel's groups into display rows.
 export function orderPanelRows(groups) {
   return (groups || []).flatMap((group) => [

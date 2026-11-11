@@ -120,3 +120,15 @@ test("the palette keeps the base action colour so dark buttons stay readable", (
   assert.equal(/--onaccent\s*:/.test(css), false);
   assert.match(css, /button\.primary\s*\{[^}]*border-color:\s*var\(--gold\)/);
 });
+
+test("a long order scrolls inside the desktop panel so the total and button stay in view", () => {
+  const wide = partition(stylesheet(), "@media (min-width: 1100px) {").inside;
+  assert.match(
+    wide,
+    /#app \.catalog-order-lines\s*\{[^}]*overflow-y:\s*auto/,
+  );
+  assert.equal(
+    /#app \.catalog-order-panel\s*\{[^}]*overflow-y:\s*auto/.test(wide),
+    false,
+  );
+});

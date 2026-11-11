@@ -13,22 +13,37 @@ export function normalizeCatalogSort(value) {
 }
 
 const moment = (value) => {
+  if (value == null || value === "") return null;
   const time = typeof value === "number" ? value : new Date(value).valueOf();
   return Number.isFinite(time) ? time : null;
 };
+
+const submitted = (order, storeId) =>
+  order.storeId === storeId &&
+  !order.deleted &&
+  !["draft", "cancelled"].includes(order.status);
+
+// When an order was placed: its submission, else its creation. Orders brought
+// in from the old system carry their real date separately.
+const placedAt = (order) =>
+  order.legacy
+    ? moment(order.date ?? order.legacy.date) ?? moment(order.createdAt)
+    : moment(order.submittedAt) ?? moment(order.createdAt) ?? moment(order.date);
+
+// This store's newest submitted orders, newest first.
+export function recentSubmittedOrders(orders, storeId, depth) {
+  return (orders || [])
+    .filter((order) => submitted(order, storeId))
+    .sort((left, right) => (placedAt(right) ?? 0) - (placedAt(left) ?? 0))
+    .slice(0, depth);
+}
 
 // productId -> when this store last ordered it, from submitted orders only.
 export function lastOrderedIndex(orders, storeId) {
   const index = new Map();
   for (const order of orders || []) {
-    if (
-      order.storeId !== storeId ||
-      order.deleted ||
-      ["draft", "cancelled"].includes(order.status)
-    )
-      continue;
-    const when =
-      moment(order.date ?? order.legacy?.date) ?? moment(order.createdAt);
+    if (!submitted(order, storeId)) continue;
+    const when = placedAt(order);
     if (when == null) continue;
     for (const line of order.lines || []) {
       const id = line.productId || line.itemId;

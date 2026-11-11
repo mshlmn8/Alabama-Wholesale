@@ -21,11 +21,16 @@ import {
   watchPhoneLayout,
 } from "./phone-layout.js";
 import * as catalogQuantities from "./catalog-quantities.js";
-import { createPhoneCatalog, assertSameDraft } from "./phone-catalog.js";
+import {
+  createPhoneCatalog,
+  assertSameDraft,
+  orderGroupsFor,
+} from "./phone-catalog.js";
 import {
   CATALOG_SORTS,
   normalizeCatalogSort,
   lastOrderedIndex,
+  recentSubmittedOrders,
   sortCatalogProducts,
 } from "./catalog-sort.js";
 const { draftUnits } = catalogQuantities;
@@ -2323,36 +2328,45 @@ function orderList(orders) {
 }
 const phoneCatalogExpanded = new Set();
 const LAST_ORDERED_DEPTH = 12;
-let lastOrderedCache = { key: "", index: null };
-// Order history holds summaries without lines, so "Last ordered" reads the
-// store's most recent submitted orders in full the first time it is chosen.
-function loadLastOrdered(id = storeId) {
-  const stamp = (order) =>
-    Number(order.submittedAt || order.createdAt || order.updatedAt) || 0;
-  const recent = state.orders
-    .filter(
-      (order) =>
-        order.storeId === id &&
-        !order.deleted &&
-        !["draft", "cancelled"].includes(order.status),
-    )
-    .sort((a, b) => stamp(b) - stamp(a))
-    .slice(0, LAST_ORDERED_DEPTH);
-  const key = `${id}|${recent.map((order) => order.id).join(",")}`;
-  if (lastOrderedCache.key !== key) {
-    const index = Promise.all(
+let lastOrderedCache = { storeId: "", loading: null, index: null };
+// Order history holds summaries without lines, and only the newest page across
+// all stores. "Last ordered" therefore asks for this store's history and reads
+// its most recent submitted orders in full, once per store per session.
+function knownLastOrdered(id) {
+  return lastOrderedCache.storeId === id ? lastOrderedCache.index : null;
+}
+function loadLastOrdered(id) {
+  if (lastOrderedCache.storeId === id && (lastOrderedCache.index || lastOrderedCache.loading))
+    return lastOrderedCache.loading || Promise.resolve(lastOrderedCache.index);
+  const loading = (async () => {
+    const page = await api(`/api/orders?storeId=${encodeURIComponent(id)}`);
+    const recent = recentSubmittedOrders(page.orders, id, LAST_ORDERED_DEPTH);
+    const read = await Promise.allSettled(
       recent.map((order) =>
         loadOrderDetails(order, (orderId) =>
           api(`/api/orders/${encodeURIComponent(orderId)}`),
         ),
       ),
-    ).then((orders) => lastOrderedIndex(orders, id));
-    lastOrderedCache = { key, index };
-    index.catch(() => {
-      if (lastOrderedCache.key === key) lastOrderedCache = { key: "", index: null };
-    });
-  }
-  return lastOrderedCache.index;
+    );
+    const orders = read
+      .filter((result) => result.status === "fulfilled")
+      .map((result) => result.value);
+    // One unreadable order should not hide the rest; none readable is a failure.
+    if (recent.length && !orders.length) throw read[0].reason;
+    return lastOrderedIndex(orders, id);
+  })();
+  lastOrderedCache = { storeId: id, loading, index: null };
+  loading.then(
+    (index) => {
+      if (lastOrderedCache.loading === loading)
+        lastOrderedCache = { storeId: id, loading: null, index };
+    },
+    () => {
+      if (lastOrderedCache.loading === loading)
+        lastOrderedCache = { storeId: "", loading: null, index: null };
+    },
+  );
+  return loading;
 }
 function renderCatalog() {
   const scope = operationScope();
@@ -2450,7 +2464,7 @@ function renderCatalog() {
     if (phone) top.prepend(sortField);
   }
   let sortMode = normalizeCatalogSort(ws.preferences().catalogSort);
-  let lastOrdered = null;
+  let lastOrdered = knownLastOrdered(storeId);
   const sortSelect = select(CATALOG_SORTS, sortMode, {
     id: "catalog-sort",
     "aria-label": "Sort catalog",
@@ -2460,29 +2474,44 @@ function renderCatalog() {
         sortMode = normalizeCatalogSort(sortSelect.value);
         scope.workspace.rememberPreferences({ catalogSort: sortMode });
         drawResults();
-        return showLastOrdered();
+        return showLastOrdered(true);
       }),
   });
-  // Draws in catalog order first, then again once the order history is read.
-  async function showLastOrdered() {
+  const current = () =>
+    scopeCurrent(scope) && storeId === selectedStoreId && root.isConnected;
+  // Back to the usual order, so a failed read is reported once, not per render.
+  function resetSort() {
+    sortMode = "catalog";
+    sortSelect.value = sortMode;
+    scope.workspace.rememberPreferences({ catalogSort: sortMode });
+    results.removeAttribute("aria-busy");
+    drawResults();
+  }
+  // The order history is read once; the list waits, dimmed, rather than
+  // reordering under a tap, and never redraws over a field being edited.
+  async function showLastOrdered(asked = false) {
     if (sortMode !== "lastOrdered" || lastOrdered) return;
+    if (!navigator.onLine) {
+      if (!asked) return;
+      resetSort();
+      throw new Error("You’re offline. Last ordered needs your order history; try again when connected.");
+    }
+    results.setAttribute("aria-busy", "true");
     let index;
     try {
       index = await loadLastOrdered(selectedStoreId);
     } catch {
-      if (root.isConnected)
-        throw new Error(
-          "Your order history could not be read, so the catalog is in its usual order. Choose Last ordered again to retry.",
-        );
-      return;
+      if (!current() || sortMode !== "lastOrdered") return;
+      resetSort();
+      throw new Error(
+        "Your order history could not be read, so the catalog is back in its usual order. Choose Last ordered to try again.",
+      );
     }
-    if (
-      !scopeCurrent(scope) ||
-      storeId !== selectedStoreId ||
-      !root.isConnected ||
-      sortMode !== "lastOrdered"
-    )
-      return;
+    while (current() && sortMode === "lastOrdered" && editorIsActive())
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    if (!current()) return;
+    results.removeAttribute("aria-busy");
+    if (sortMode !== "lastOrdered") return;
     lastOrdered = index;
     drawResults();
   }
@@ -2583,25 +2612,12 @@ function renderCatalog() {
   let knownDraftId = draft?.id ?? null;
   const phoneCatalog = createPhoneCatalog({
         orderGroups: () =>
-          groupDraftLines(draft?.lines || []).map((group) => {
-            let amount = 0,
-              priced = true;
-            const lines = group.lines.map((line) => {
-              const price = linePrice(line);
-              const total = price == null ? null : price * line.quantity;
-              if (total == null) priced = false;
-              else amount += total;
-              return {
-                label: assortmentLabel(line),
-                quantity: line.quantity,
-                amount: total == null ? "Check item" : cash(total),
-              };
-            });
-            return {
-              name: productById(group.productId)?.name || "Product unavailable",
-              amount: priced ? cash(amount) : "Check items",
-              lines,
-            };
+          orderGroupsFor(groupDraftLines(draft?.lines || []), {
+            productOf: productById,
+            variantsOf: productVariants,
+            priceOf: (line) => linePrice(line),
+            labelOf: assortmentLabel,
+            cash,
           }),
         el,
         icon,
@@ -2775,7 +2791,7 @@ function renderCatalog() {
   drawCategories();
   applyLayout();
   drawResults();
-  if (sortMode === "lastOrdered") act(showLastOrdered);
+  if (sortMode === "lastOrdered") act(() => showLastOrdered());
   return root;
 }
 async function toggleFavorite(id) {

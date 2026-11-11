@@ -59,7 +59,7 @@ async function fixture(category = "", catalogSort) {
     iconButton: (label, icon, callback) => el("button", { label, callback }),
     heading: (name, subtitle, actions) => el("h1", {}, name, subtitle, actions),
     append: (node, ...children) => node.append(...children),
-    icon: (name) => el("svg", { name }),
+    icon: (name) => el("svg", { name }), knownLastOrdered: () => null,
     cash: (cents) => String(cents), uuid: () => "id", catalogQuantities: {}, phoneCatalogExpanded: new Set(),
     productVariants: (product) => (product.variants?.length ? product.variants : [""]),
     productById: (id) => state.products.find((product) => product.id === id),

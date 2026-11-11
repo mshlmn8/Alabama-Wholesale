@@ -23,7 +23,7 @@ Checked on 2026-11-11 against
 
 ## Results
 
-- **Automated tests:** `npm test` on Node 22: 899 passed, 0 failed, including
+- **Automated tests:** `npm test` on Node 22: 904 passed, 0 failed, including
   new tests for the sort rules, the order panel rows, the remembered sort in
   the catalog page, and the stylesheet's phone and desktop sections.
   `npm run build` passed.
@@ -37,6 +37,12 @@ Checked on 2026-11-11 against
   page's `+` updates the sidebar count; Submit order opens "Review your
   order"; Home is two columns; Reorder brings back the last order's 2 lines
   and $105.84 total; no page errors.
+- **Sort and panel edge cases, 7 checks passed:** while order history loads the
+  list is dimmed and cannot be tapped; it then shows Last ordered; coming back
+  to the catalog re-sorts at once with no new requests; a failed read is
+  reported once and the sort returns to Catalog order, with no repeat on later
+  visits; with 58 rows in the order panel the lines scroll and Review and
+  submit stays on screen.
 - **Phone flow and edge cases, Chromium at 390×844:** the 25 flow checks and
   12 edge-case checks from the phone release pass unchanged, apart from the
   breakpoint check now expecting the sidebar and order panel above 800px.
@@ -51,14 +57,34 @@ seeded with nine real catalog products and their photos. Creation dates,
 prices, stock and order history are synthetic. No production data was read or
 changed and no email was sent.
 
+## Independent review
+
+A separate reviewer found no critical defect and five important ones. Four
+are fixed, each with a failing test first: Last ordered read only the newest
+page of orders across all stores, so it did nothing for a store whose orders
+were not on that page; the list reordered under the user when history arrived
+and dropped a typed quantity; a failed read repeated its error on every
+catalog visit; a long order pushed the total and button out of the desktop
+panel. Also fixed from the same review: empty dates treated as the start of
+time, order dates taken from draft creation instead of submission, one
+unreadable order failing the whole read, and the panel not showing case units
+or the Standard option.
+
+The fifth is not fixed and is listed under Limits (Newest and oldest).
+
 ## Limits
 
-- **Last ordered** reads the store's 12 most recent submitted orders the first
-  time it is chosen, because order history is held as summaries. A product
-  last ordered before those 12 sorts as not ordered. Until the orders load,
-  the list shows in catalog order.
-- **Newest and oldest** use each product's creation date. Products imported
-  together share a date and keep catalog order among themselves.
+- **Last ordered** reads the selected store's 12 most recent submitted orders
+  the first time it is chosen. A product last ordered before those 12 sorts as
+  not ordered.
+- **Newest and oldest** use each product's creation date, and products brought
+  in from the old system have none. They sort after dated products, in catalog
+  order. The first time such a product is edited, the server stamps it with
+  that day's date, so an old product whose price was just changed appears
+  among the newest. Correcting this needs a change to how product edits are
+  saved, or a one-time dating of imported products; neither is in this change.
+- Using the keyboard arrow keys on the closed Sort box changes the sort at
+  each step.
 
 ## Not verified
 

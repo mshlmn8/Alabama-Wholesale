@@ -114,3 +114,42 @@ test("the order panel lists each product then its lines", async () => {
   );
   assert.deepEqual(orderPanelRows(undefined), []);
 });
+
+test("order panel groups name units and options and flag a missing price", async () => {
+  const { orderGroupsFor } = await mod;
+  const products = {
+    faygo: { name: "Faygo bottles", variants: ["grape", "redpop"] },
+    soda: { name: "Baking soda" },
+    multi: { name: "Tea", variants: ["", "green"] },
+  };
+  const prices = { a: 1850, b: 22200, c: null, d: 1200, e: 500 };
+  const groups = orderGroupsFor(
+    [
+      { productId: "faygo", lines: [
+        { id: "a", variant: "redpop", quantity: 2, unit: "each" },
+        { id: "b", variant: "grape", quantity: 1, unit: "case" },
+        { id: "c", variant: "", quantity: 3, unit: "each", selectionMode: "mix" },
+      ] },
+      { productId: "soda", lines: [{ id: "d", variant: "", quantity: 1, unit: "each" }] },
+      { productId: "multi", lines: [{ id: "e", variant: "", quantity: 2, unit: "each" }] },
+      { productId: "gone", lines: [{ id: "c", variant: "x", quantity: 1, unit: "each" }] },
+    ],
+    {
+      productOf: (id) => products[id],
+      variantsOf,
+      priceOf: (line) => prices[line.id],
+      labelOf: (line) => (line.selectionMode === "mix" ? "Mix" : line.variant),
+      cash,
+    },
+  );
+  assert.deepEqual(groups, [
+    { name: "Faygo bottles", amount: "Check items", lines: [
+      { label: "redpop", quantity: 2, amount: "$37.00" },
+      { label: "grape (case)", quantity: 1, amount: "$222.00" },
+      { label: "Mix", quantity: 3, amount: "Check item" },
+    ] },
+    { name: "Baking soda", amount: "$12.00", lines: [{ label: "", quantity: 1, amount: "$12.00" }] },
+    { name: "Tea", amount: "$10.00", lines: [{ label: "Standard", quantity: 2, amount: "$10.00" }] },
+    { name: "Product unavailable", amount: "Check items", lines: [{ label: "x", quantity: 1, amount: "Check item" }] },
+  ]);
+});

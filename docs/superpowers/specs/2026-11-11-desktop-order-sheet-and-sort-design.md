@@ -48,12 +48,18 @@ A **Sort** control in the catalog with five choices:
 - Sorting applies after search, category and Favorites filters.
 - Ties, and products without the needed date, keep catalog order. For Last
   ordered, products never ordered by this store come after those that were.
-- "Last ordered" reads the store's 12 most recent submitted orders (not
-  drafts, cancelled or deleted orders). The app keeps order history as
-  summaries without line items, so those orders are loaded in full the first
-  time the choice is picked; the list shows in catalog order until then, and a
-  failed load says so. Each order's date is its saved order date, else when it
-  was created.
+- "Last ordered" reads the selected store's 12 most recent submitted orders
+  (not drafts, cancelled or deleted orders). The app keeps order history as
+  summaries without line items and only the newest page across all stores, so
+  the store's history is requested and those orders are loaded in full the
+  first time the choice is picked, once per store per session. While they
+  load the list is dimmed and cannot be tapped, and it never redraws over a
+  field being edited. A failed load says so once and returns the sort to
+  Catalog order; one unreadable order does not hide the rest. An order counts
+  from when it was submitted, else created; orders brought in from the old
+  system use their original date.
+- Newest and Oldest use the product's creation date. A product without one
+  sorts after dated products in catalog order.
 - The choice is remembered on the device with the other catalog display
   preferences. An unknown saved value falls back to Catalog order.
 - On desktop the control is beside the view switch; on phones it is the first

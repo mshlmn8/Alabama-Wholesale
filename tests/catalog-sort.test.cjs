@@ -95,7 +95,7 @@ test("the last-ordered index reads only this store's submitted orders", async ()
   const orders = [
     { storeId: "shop", status: "delivered", createdAt: 10, lines: [{ productId: "takis" }, { productId: "arizona" }] },
     { storeId: "shop", status: "submitted", createdAt: 30, lines: [{ productId: "takis" }] },
-    { storeId: "shop", status: "submitted", date: "2026-11-04", createdAt: 5, lines: [{ itemId: "legacy" }] },
+    { storeId: "shop", status: "legacy", legacy: { date: "2026-11-04" }, createdAt: 5, lines: [{ itemId: "legacy" }] },
     { storeId: "shop", status: "draft", createdAt: 99, lines: [{ productId: "draft-only" }] },
     { storeId: "shop", status: "cancelled", createdAt: 99, lines: [{ productId: "cancelled-only" }] },
     { storeId: "shop", status: "submitted", deleted: true, createdAt: 99, lines: [{ productId: "deleted-only" }] },
@@ -112,4 +112,44 @@ test("the last-ordered index reads only this store's submitted orders", async ()
     ],
   );
   assert.equal(lastOrderedIndex(undefined, "shop").size, 0);
+});
+
+test("a missing or empty date is missing, never the start of time", async () => {
+  const { sortCatalogProducts, lastOrderedIndex } = await mod;
+  const list = [product("blank", "Blank", null), product("empty", "Empty", ""), product("old", "Old", 10)];
+  assert.deepEqual(ids(sortCatalogProducts(list, "oldest")), ["old", "blank", "empty"]);
+  assert.deepEqual(ids(sortCatalogProducts(list, "newest")), ["old", "blank", "empty"]);
+  const index = lastOrderedIndex(
+    [{ storeId: "shop", status: "legacy", legacy: { date: null }, createdAt: 70, lines: [{ productId: "old" }] }],
+    "shop",
+  );
+  assert.equal(index.get("old"), 70);
+});
+
+test("an order counts from when it was submitted, not when its draft was started", async () => {
+  const { lastOrderedIndex } = await mod;
+  const index = lastOrderedIndex(
+    [
+      { storeId: "shop", status: "submitted", createdAt: 10, submittedAt: 90, date: "1999-01-01", lines: [{ productId: "slow-draft" }] },
+      { storeId: "shop", status: "submitted", createdAt: 50, submittedAt: 60, lines: [{ productId: "last-week" }] },
+    ],
+    "shop",
+  );
+  assert.deepEqual([...index], [["slow-draft", 90], ["last-week", 60]]);
+});
+
+test("the recent orders for Last ordered are this store's newest submitted ones", async () => {
+  const { recentSubmittedOrders } = await mod;
+  const orders = [
+    { id: "a", storeId: "shop", status: "delivered", createdAt: 10 },
+    { id: "b", storeId: "shop", status: "submitted", createdAt: 5, submittedAt: 40 },
+    { id: "c", storeId: "shop", status: "draft", createdAt: 99 },
+    { id: "d", storeId: "shop", status: "cancelled", createdAt: 98 },
+    { id: "e", storeId: "shop", status: "submitted", deleted: true, createdAt: 97 },
+    { id: "f", storeId: "other", status: "submitted", createdAt: 96 },
+    { id: "g", storeId: "shop", status: "approved", createdAt: 30 },
+  ];
+  assert.deepEqual(recentSubmittedOrders(orders, "shop", 2).map((order) => order.id), ["b", "g"]);
+  assert.deepEqual(recentSubmittedOrders(orders, "shop", 12).map((order) => order.id), ["b", "g", "a"]);
+  assert.deepEqual(recentSubmittedOrders(undefined, "shop", 12), []);
 });
