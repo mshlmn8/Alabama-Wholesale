@@ -2,10 +2,19 @@
 
 Updated November 11, 2026.
 
-## On a phone
+## Ordering from the catalog
 
-These apply on screens up to 800px wide. Larger screens work as described in
-the rest of this guide.
+These apply on every screen. Where older sections below describe adding
+products only through a pop-up, that pop-up is now behind **More options**.
+
+- **Sort.** Use **Sort** in the catalog to choose **Catalog order**, **Newest
+  first**, **Oldest first**, **A–Z** or **Last ordered**. Your choice is
+  remembered on this device. **Last ordered** looks at the selected store's 12
+  most recent orders and takes a moment the first time.
+- **On a computer.** Your order shows in a panel beside the catalog and
+  updates as you change quantities; **Review and submit** opens it. On a
+  narrower window the order bar appears under the list instead. The sidebar
+  reads **Home, Catalog, Order, History**.
 
 - **Order from the catalog.** Tap a product to open its flavors, then use
   **−** and **+** or type a quantity. Each change is added to your order and
@@ -19,7 +28,7 @@ the rest of this guide.
 - **Mix / Each, notes and new flavors.** Open a product and choose **More
   options** to use the full add screen described below. **Favorite** and, for
   owners, **Edit product** are beside it.
-- **Order bar and tabs.** The bar above the tabs shows your item count and
+- **Order bar and tabs (phone).** The bar above the tabs shows your item count and
   estimated total; **Review order** opens your order. The tabs are **Home,
   Catalog, Order, History, More**. **Order** is the Build screen and
   **History** is Orders. **Stores** is under **More**.

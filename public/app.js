@@ -21,7 +21,18 @@ import {
   watchPhoneLayout,
 } from "./phone-layout.js";
 import * as catalogQuantities from "./catalog-quantities.js";
-import { createPhoneCatalog, assertSameDraft } from "./phone-catalog.js";
+import {
+  createPhoneCatalog,
+  assertSameDraft,
+  orderGroupsFor,
+} from "./phone-catalog.js";
+import {
+  CATALOG_SORTS,
+  normalizeCatalogSort,
+  lastOrderedIndex,
+  recentSubmittedOrders,
+  sortCatalogProducts,
+} from "./catalog-sort.js";
 const { draftUnits } = catalogQuantities;
 import {
   categoryTrail,
@@ -1194,8 +1205,7 @@ async function refreshInForeground() {
     ];
     const changed = restoreActiveDraft();
     lastDraftRefresh = Date.now();
-    if (changed && (view === "build" || (view === "catalog" && isPhone())))
-      render();
+    if (changed && (view === "build" || view === "catalog")) render();
     else updateWorkspaceProtection();
   } catch {
     /* Draft autosave reports its own status; an unavailable background read never discards local edits. */
@@ -1475,7 +1485,7 @@ function editDraft(change, { renderPage = true, stay = false } = {}) {
   redo = [];
   draft = saved;
   if (renderPage) render();
-  else updatePhoneOrderBadge();
+  else updateOrderBadge();
   announce(draftProtection(draft.id).label);
 }
 function undoDraft(forward = false) {
@@ -1701,10 +1711,10 @@ function render() {
       getComputedStyle(document.documentElement).getPropertyValue("--bg").trim(),
     );
   const nav = [
-    ["home", "Overview", "home"],
+    ["home", "Home", "home"],
     ["catalog", "Catalog", "catalog"],
-    ["build", "Build order", "cart"],
-    ["orders", "Orders", "orders"],
+    ["build", "Order", "cart"],
+    ["orders", "History", "orders"],
     ["store-inventory", "Store inventory", "box"],
     ["stores", "Stores", "stores"],
     ["more", "More", "more"],
@@ -1761,8 +1771,7 @@ function render() {
     append(notifications, el("span", { class: "badge-count" }, unread()));
   const cart = iconButton("Open current order", "cart", () => setView("build"));
   cart.classList.add("desktop-action");
-  if (draft?.lines.length)
-    append(cart, el("span", { class: "badge-count" }, draft.lines.length));
+  cart.dataset.orderBadge = "true";
   const protection = workspaceProtection();
   const pending = ws.pending().length;
   const refreshButton = iconButton("Refresh workspace", "refresh", () =>
@@ -1884,20 +1893,9 @@ function render() {
   const mobile = el(
     "nav",
     { class: "mobile-nav", "aria-label": "Mobile navigation" },
-    phone
-      ? PHONE_TABS.map(([key, label, symbol]) => {
-          return navLink(key, label, symbol, phoneDestination(view) === key);
-        })
-      : nav
-          .filter(([key]) => !["home", "store-inventory"].includes(key))
-          .map(([key, label, symbol]) =>
-            navLink(
-              key,
-              key === "more" ? "More" : key === "build" ? "Build" : label,
-              symbol,
-              mobileDestination(view) === key,
-            ),
-          ),
+    PHONE_TABS.map(([key, label, symbol]) =>
+      navLink(key, label, symbol, phoneDestination(view) === key),
+    ),
   );
   $("app").dataset.phone = String(phone);
   $("app").dataset.view = view;
@@ -1906,7 +1904,7 @@ function render() {
     el("div", { class: "workspace" }, bar, main),
     mobile,
   );
-  if (phone) updatePhoneOrderBadge();
+  updateOrderBadge();
   workspaceChrome = observeWorkspaceChrome($("app"), {
     header: bar,
     navigation: mobile,
@@ -1921,22 +1919,24 @@ function render() {
   }
   recoverDeviceStorageAutomatically();
 }
-// Shows how many units the working draft holds on the phone Order tab.
-function updatePhoneOrderBadge() {
-  const link = document.querySelector('.mobile-nav a[href="#/build"]');
-  if (!link) return;
+// Shows how many units the working draft holds on every Order entry point.
+function updateOrderBadge() {
   const units = draftUnits(draft?.lines);
-  let badge = link.querySelector(".badge-count");
-  if (!units) {
-    badge?.remove();
-    return;
+  for (const link of document.querySelectorAll(
+    '.mobile-nav a[href="#/build"], .sidebar a[href="#/build"], [data-order-badge]',
+  )) {
+    let badge = link.querySelector(".badge-count");
+    if (!units) {
+      badge?.remove();
+      continue;
+    }
+    if (!badge) {
+      badge = el("span", { class: "badge-count" });
+      append(link, badge);
+    }
+    badge.textContent = units > 999 ? "999+" : String(units);
+    badge.setAttribute("aria-label", `${units} in your order`);
   }
-  if (!badge) {
-    badge = el("span", { class: "badge-count" });
-    append(link, badge);
-  }
-  badge.textContent = units > 999 ? "999+" : String(units);
-  badge.setAttribute("aria-label", `${units} in your order`);
 }
 function brand(extraClass = "") {
   return el(
@@ -2036,16 +2036,6 @@ function renderHome() {
       Number.isFinite(item.onHand) &&
       item.onHand - (item.reserved || 0) <= (item.reorderPoint || 0),
   );
-  const root = el(
-    "div",
-    { class: "stack overview-page" },
-    heading(
-      "Overview",
-      store
-        ? `${store.name} · ${date(Date.now())}`
-        : "Orders, inventory and customer accounts.",
-    ),
-  );
   if (!store)
     return el(
       "div",
@@ -2064,172 +2054,9 @@ function renderHome() {
         ],
       ),
     );
-  if (isPhone())
-    return renderPhoneHome({ store, orders, drafts, open, pendingPayments, low });
-  append(
-    root,
-    el(
-      "section",
-      { class: "welcome" },
-      el("div", { class: "eyebrow" }, "Ready for the next delivery"),
-      el(
-        "h2",
-        {},
-        draft?.lines.length
-          ? "Pick up where you left off."
-          : "Keep your shelves moving.",
-      ),
-      el(
-        "p",
-        {},
-        draft?.lines.length
-          ? `${draft.lines.length} lines in your current draft. Review quantities and pricing before submitting.`
-          : "Start a fresh order, reorder your regulars, and follow every delivery from one place.",
-      ),
-      el(
-        "div",
-        { class: "actions" },
-        button(
-          draft?.lines.length ? "Continue current order" : "Start an order",
-          () => (draft ? setView("build") : beginDraft()),
-          "primary",
-          "arrow",
-        ),
-        button("Browse catalog", () => setView("catalog"), "", "catalog"),
-      ),
-    ),
-  );
-  const metrics = [
-    [
-      "Account balance",
-      store.migrationBlocked
-        ? "Review required"
-        : cash(store.balanceCents ?? balance(storeId)),
-      "Verified charges, credits and payments",
-      "payments",
-    ],
-    ["Orders in progress", open.length, "Submitted through picking", "orders"],
-    [
-      "Working drafts",
-      drafts.length,
-      "Continue your incomplete orders",
-      "build",
-    ],
-    staff()
-      ? [
-          "Stock to review",
-          low.length,
-          "At or below reorder point",
-          "inventory",
-        ]
-      : [
-          "Pending payments",
-          pendingPayments.length,
-          "Awaiting staff verification",
-          "payments",
-        ],
-  ];
-  append(
-    root,
-    el(
-      "section",
-      { class: "grid overview-metrics", "aria-label": "Account overview" },
-      metrics.map(([label, value, note, target]) =>
-        el(
-          "div",
-          { class: "panel" },
-          el("div", { class: "metric-label" }, label),
-          el("div", { class: "metric" }, value),
-          el("p", { class: "metric-note" }, note),
-          button(({payments: label === "Account balance" ? "View balance" : "View payments", orders: "View orders", build: "Continue drafts", inventory: "Review stock"})[target], () => setView(target), "text-button"),
-        ),
-      ),
-    ),
-  );
-  if (store.migrationBlocked || store.reconciliationRequired)
-    append(
-      root,
-      notice(
-        el(
-          "div",
-          {},
-          "This account’s imported balance needs owner review before new charges.",
-          master()
-            ? button(
-                "Review opening balance",
-                () => showReconcile(store),
-                "text-button",
-              )
-            : null,
-        ),
-      ),
-    );
-  append(
-    root,
-    el(
-      "div",
-      { class: "two-column" },
-      el(
-        "section",
-        { class: "panel" },
-        el(
-          "div",
-          { class: "split" },
-          el("h2", {}, "Recent orders"),
-          button("View all", () => setView("orders"), "text-button"),
-        ),
-        orders.length
-          ? orderList(orders.slice(0, 5))
-          : empty(
-              "Your first order starts here",
-              "Submitted orders will appear with saved dates, invoice totals and delivery progress.",
-              [button("Browse catalog", () => setView("catalog"), "primary")],
-            ),
-      ),
-      el(
-        "aside",
-        { class: "panel" },
-        el("h2", {}, "Your account"),
-        el(
-          "div",
-          { class: "detail-list" },
-          el(
-            "div",
-            {},
-            el("span", {}, "Payment terms"),
-            el("span", {}, store.terms || "Not set"),
-          ),
-          el(
-            "div",
-            {},
-            el("span", {}, "Credit limit"),
-            el(
-              "span",
-              {},
-              store.creditLimitCents == null
-                ? "Not set"
-                : cash(store.creditLimitCents),
-            ),
-          ),
-          el(
-            "div",
-            {},
-            el("span", {}, "Phone"),
-            el("span", {}, store.phone || "Not set"),
-          ),
-        ),
-        el(
-          "div",
-          { class: "actions" },
-          button("Report a payment", () => showPaymentReport(), "", "wallet"),
-          button("Draft from a note", showAssistant, "", "spark"),
-        ),
-      ),
-    ),
-  );
-  return root;
+  return renderPhoneHome({ store, orders, drafts, open, pendingPayments, low });
 }
-// Phone home: the next action first, then account and history.
+// Home: the next action first, then account and history.
 function renderPhoneHome({ store, orders, drafts, open, pendingPayments, low }) {
   const scope = operationScope();
   const title = heading("Home", store.name);
@@ -2339,8 +2166,11 @@ function renderPhoneHome({ store, orders, drafts, open, pendingPayments, low }) 
               ))
             )
               return;
+            const complete = await loadOrderDetails(last, (id) =>
+              api(`/api/orders/${encodeURIComponent(id)}`),
+            );
             if (!scopeCurrent(scope)) throw new SessionChanged();
-            newDraftFromOrder(last);
+            newDraftFromOrder(complete);
           },
           "phone-soft",
           "refresh",
@@ -2497,6 +2327,47 @@ function orderList(orders) {
   );
 }
 const phoneCatalogExpanded = new Set();
+const LAST_ORDERED_DEPTH = 12;
+let lastOrderedCache = { storeId: "", loading: null, index: null };
+// Order history holds summaries without lines, and only the newest page across
+// all stores. "Last ordered" therefore asks for this store's history and reads
+// its most recent submitted orders in full, once per store per session.
+function knownLastOrdered(id) {
+  return lastOrderedCache.storeId === id ? lastOrderedCache.index : null;
+}
+function loadLastOrdered(id) {
+  if (lastOrderedCache.storeId === id && (lastOrderedCache.index || lastOrderedCache.loading))
+    return lastOrderedCache.loading || Promise.resolve(lastOrderedCache.index);
+  const loading = (async () => {
+    const page = await api(`/api/orders?storeId=${encodeURIComponent(id)}`);
+    const recent = recentSubmittedOrders(page.orders, id, LAST_ORDERED_DEPTH);
+    const read = await Promise.allSettled(
+      recent.map((order) =>
+        loadOrderDetails(order, (orderId) =>
+          api(`/api/orders/${encodeURIComponent(orderId)}`),
+        ),
+      ),
+    );
+    const orders = read
+      .filter((result) => result.status === "fulfilled")
+      .map((result) => result.value);
+    // One unreadable order should not hide the rest; none readable is a failure.
+    if (recent.length && !orders.length) throw read[0].reason;
+    return lastOrderedIndex(orders, id);
+  })();
+  lastOrderedCache = { storeId: id, loading, index: null };
+  loading.then(
+    (index) => {
+      if (lastOrderedCache.loading === loading)
+        lastOrderedCache = { storeId: id, loading: null, index };
+    },
+    () => {
+      if (lastOrderedCache.loading === loading)
+        lastOrderedCache = { storeId: "", loading: null, index: null };
+    },
+  );
+  return loading;
+}
 function renderCatalog() {
   const scope = operationScope();
   const phone = isPhone();
@@ -2506,7 +2377,6 @@ function renderCatalog() {
     [];
   const hierarchy = catalogCategoryHierarchy(state.categories, state.products);
   const catalogCategories = hierarchy.categories;
-  const cardCache = new Map();
   const candidates = indexCatalogProducts(
     state.products.filter((product) => product.active !== false),
   );
@@ -2541,10 +2411,7 @@ function renderCatalog() {
     const trail = categoryTrail(all, category);
     const row = (items, parent = null) => {
       const choices = [
-        [
-          parent?.id || "",
-          parent ? `All ${parent.name}` : phone ? "All" : "All categories",
-        ],
+        [parent?.id || "", parent ? `All ${parent.name}` : "All"],
         ...items.map((item) => [item.id, item.name]),
       ];
       return el(
@@ -2591,12 +2458,69 @@ function renderCatalog() {
       const children = all.filter((item) => item.parentId === parent.id);
       if (children.length) append(categoryNavigation, row(children, parent));
     }
-    if (phone) {
-      const top = categoryNavigation.firstElementChild;
-      top.firstElementChild.after(favoritesButton);
-      append(top, toolsButton, displayButton);
-    }
+    const top = categoryNavigation.firstElementChild;
+    top.firstElementChild.after(favoritesButton);
+    append(top, toolsButton, displayButton);
+    if (phone) top.prepend(sortField);
   }
+  let sortMode = normalizeCatalogSort(ws.preferences().catalogSort);
+  let lastOrdered = knownLastOrdered(storeId);
+  const sortSelect = select(CATALOG_SORTS, sortMode, {
+    id: "catalog-sort",
+    "aria-label": "Sort catalog",
+    onChange: () =>
+      act(() => {
+        if (!scopeCurrent(scope)) throw new SessionChanged();
+        sortMode = normalizeCatalogSort(sortSelect.value);
+        scope.workspace.rememberPreferences({ catalogSort: sortMode });
+        drawResults();
+        return showLastOrdered(true);
+      }),
+  });
+  const current = () =>
+    scopeCurrent(scope) && storeId === selectedStoreId && root.isConnected;
+  // Back to the usual order, so a failed read is reported once, not per render.
+  function resetSort() {
+    sortMode = "catalog";
+    sortSelect.value = sortMode;
+    scope.workspace.rememberPreferences({ catalogSort: sortMode });
+    results.removeAttribute("aria-busy");
+    drawResults();
+  }
+  // The order history is read once; the list waits, dimmed, rather than
+  // reordering under a tap, and never redraws over a field being edited.
+  async function showLastOrdered(asked = false) {
+    if (sortMode !== "lastOrdered" || lastOrdered) return;
+    if (!navigator.onLine) {
+      if (!asked) return;
+      resetSort();
+      throw new Error("You’re offline. Last ordered needs your order history; try again when connected.");
+    }
+    results.setAttribute("aria-busy", "true");
+    let index;
+    try {
+      index = await loadLastOrdered(selectedStoreId);
+    } catch {
+      if (!current() || sortMode !== "lastOrdered") return;
+      resetSort();
+      throw new Error(
+        "Your order history could not be read, so the catalog is back in its usual order. Choose Last ordered to try again.",
+      );
+    }
+    while (current() && sortMode === "lastOrdered" && editorIsActive())
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    if (!current()) return;
+    results.removeAttribute("aria-busy");
+    if (sortMode !== "lastOrdered") return;
+    lastOrdered = index;
+    drawResults();
+  }
+  const sortField = el(
+    "label",
+    { class: "catalog-sort", for: "catalog-sort" },
+    el("span", {}, "Sort"),
+    sortSelect,
+  );
   const favoritesButton = button(
     "",
     () => {
@@ -2605,10 +2529,7 @@ function renderCatalog() {
     },
     "pill",
   );
-  const scanButton = phone
-    ? iconButton("Scan barcode", "scan", showScanner)
-    : button("Scan", showScanner, "", "scan");
-  scanButton.setAttribute("aria-label", "Scan barcode");
+  const scanButton = iconButton("Scan barcode", "scan", showScanner);
   const columns = select(
     [1, 2, 3, 4, 5].map((value) => [String(value), String(value)]),
     String(layout.columns),
@@ -2622,12 +2543,10 @@ function renderCatalog() {
     checked: layout.compact,
     onChange: () => act(updateLayout),
   });
-  const listButton = phone
-    ? iconButton("List view", "list", () => updateLayout("list"))
-    : button("List", () => updateLayout("list"), "", "orders");
-  const gridButton = phone
-    ? iconButton("Photo view", "catalog", () => updateLayout("grid"))
-    : button("Grid", () => updateLayout("grid"), "", "catalog");
+  const listButton = iconButton("List view", "list", () => updateLayout("list"));
+  const gridButton = iconButton("Photo view", "catalog", () =>
+    updateLayout("grid"),
+  );
   const gridOptions = el(
     "div",
     {
@@ -2691,8 +2610,15 @@ function renderCatalog() {
   const results = el("div", { class: "catalog-results" });
   const selectedStoreId = storeId;
   let knownDraftId = draft?.id ?? null;
-  const phoneCatalog = phone
-    ? createPhoneCatalog({
+  const phoneCatalog = createPhoneCatalog({
+        orderGroups: () =>
+          orderGroupsFor(groupDraftLines(draft?.lines || []), {
+            productOf: productById,
+            variantsOf: productVariants,
+            priceOf: (line) => linePrice(line),
+            labelOf: assortmentLabel,
+            cash,
+          }),
         el,
         icon,
         button,
@@ -2760,101 +2686,39 @@ function renderCatalog() {
           showAddProduct(product);
         },
         onReview: () => setView("build"),
-      })
-    : null;
-  if (phone) toolsButton.className = "pill phone-tools-chip";
-  const phoneHeading = phone
-    ? heading("Catalog", `${candidates.length} products`)
-    : null;
-  phoneHeading?.classList.add("sr-only");
-  const root = phone
-    ? el(
-        "div",
-        { class: "catalog-page phone-catalog", "data-view": layout.view },
-        phoneHeading,
-        el(
-          "div",
-          { class: "phone-catalog-head" },
-          el("div", { class: "phone-search" }, icon("search"), searchField, scanButton),
-          el(
-            "div",
-            {
-              class: "phone-view-switch",
-              role: "group",
-              "aria-label": "Catalog view",
-            },
-            listButton,
-            gridButton,
-          ),
-        ),
-        categoryNavigation,
-        results,
-        phoneCatalog.orderBar,
-      )
-    : el(
+      });
+  toolsButton.className = "pill phone-tools-chip";
+  const pageHeading = heading("Catalog", `${candidates.length} products`);
+  pageHeading.classList.add("sr-only");
+  const root = el(
     "div",
-    {
-      class: "catalog-page",
-      "data-view": layout.view,
-    },
-    heading("Catalog", `${candidates.length} products`, [toolsButton]),
+    { class: "catalog-page phone-catalog", "data-view": layout.view },
+    pageHeading,
     el(
       "div",
-      { class: "filters catalog-filters" },
-      el("div", { class: "search" }, searchField),
-      scanButton,
-    ),
-    categoryNavigation,
-    el(
-      "div",
-      { class: "catalog-view-controls" },
+      { class: "catalog-main" },
       el(
         "div",
-        { class: "catalog-presentation-controls" },
-        favoritesButton,
+        { class: "phone-catalog-head" },
+        el("div", { class: "phone-search" }, icon("search"), searchField, scanButton),
+        phone ? null : sortField,
         el(
           "div",
           {
-            class: "catalog-view-switch",
+            class: "phone-view-switch",
             role: "group",
             "aria-label": "Catalog view",
           },
           listButton,
           gridButton,
         ),
-        displayButton,
       ),
+      categoryNavigation,
+      results,
     ),
-        results,
-      );
-  if (!phone && draft?.lines.length) {
-    const totals = draftTotals();
-    const estimate = totals.missing.length ? "Check items" : cash(totals.total);
-    append(
-      root,
-      el(
-        "div",
-        { class: "catalog-order-dock", "aria-label": "Current order summary" },
-        el(
-          "div",
-          { class: "catalog-order-summary" },
-          el("small", {}, "Current order"),
-          el(
-            "strong",
-            {},
-            `${draft.lines.length} line${draft.lines.length === 1 ? "" : "s"}`,
-          ),
-        ),
-        el(
-          "div",
-          { class: "catalog-order-total" },
-          el("small", {}, "Estimated total"),
-          el("strong", {}, estimate),
-        ),
-        button("Review order", () => setView("build"), "primary", "arrow"),
-      ),
-    );
-  }
+    phoneCatalog.orderPanel,
+    phoneCatalog.orderBar,
+  );
   function applyLayout() {
     const isGrid = layout.view === "grid";
     root.dataset.view = layout.view;
@@ -2880,11 +2744,17 @@ function renderCatalog() {
     const categoryIds = category
       ? categoryFilterIds(catalogCategories, category)
       : null;
-    const products = rankCatalogProducts(candidates, search).filter(
-      (product) =>
-        (!categoryIds ||
-          hierarchy.productCategoryIds.get(product.id)?.some((id) => categoryIds.has(id))) &&
-        (!favoritesOnly || fav.includes(product.id)),
+    const products = sortCatalogProducts(
+      rankCatalogProducts(candidates, search).filter(
+        (product) =>
+          (!categoryIds ||
+            hierarchy.productCategoryIds
+              .get(product.id)
+              ?.some((id) => categoryIds.has(id))) &&
+          (!favoritesOnly || fav.includes(product.id)),
+      ),
+      sortMode,
+      lastOrdered || undefined,
     );
     favoritesButton.textContent = favoritesOnly ? "★ Favorites" : "☆ Favorites";
     favoritesButton.className = favoritesOnly ? "pill active" : "pill";
@@ -2910,119 +2780,20 @@ function renderCatalog() {
       );
       return;
     }
-    if (phone) {
-      results.replaceChildren(
-        el(
-          "div",
-          { class: "catalog-grid phone-catalog-grid" },
-          phoneCatalog.nodes(products),
-        ),
-      );
-      return;
-    }
-    const cards = products.map((product) => {
-      if (!cardCache.has(product.id))
-        cardCache.set(product.id, renderProductCard(product, fav));
-      return cardCache.get(product.id);
-    });
-    results.replaceChildren(el("div", { class: "catalog-grid" }, cards));
+    results.replaceChildren(
+      el(
+        "div",
+        { class: "catalog-grid phone-catalog-grid" },
+        phoneCatalog.nodes(products),
+      ),
+    );
   }
   drawCategories();
   applyLayout();
   drawResults();
+  if (sortMode === "lastOrdered") act(() => showLastOrdered());
   return root;
 }
-function renderProductCard(product, fav) {
-  const image = safeImage(product.image || product.imageUrl);
-  const thumbnail = image
-    ? el("img", {
-        src: image,
-        width: 180,
-        height: 145,
-        alt: product.name,
-        loading: "lazy",
-        decoding: "async",
-        onError: (event) =>
-          event.target.replaceWith(
-            el(
-              "span",
-              { class: "no-image", "aria-label": "Image unavailable" },
-              icon("box"),
-            ),
-          ),
-      })
-    : el(
-        "span",
-        { class: "no-image", "aria-label": "No product image" },
-        icon("box"),
-      );
-  const favorite = iconButton(`Favorite ${product.name}`, "star", () =>
-    toggleFavorite(product.id),
-  );
-  favorite.className = "favorite";
-  favorite.setAttribute("aria-pressed", fav.includes(product.id));
-  const base = linePrice({
-    productId: product.id,
-    variant: "",
-    unit: "each",
-  });
-  const add = button(
-    "Add",
-    () => showAddProduct(product),
-    "primary product-add",
-    "plus",
-  );
-  add.setAttribute("aria-label", `Add ${product.name} to order`);
-  const edit = master()
-    ? iconButton(`Edit ${product.name}`, "edit", () =>
-        showProductEditor(product),
-      )
-    : null;
-  edit?.classList.add("product-edit");
-  return el(
-    "article",
-    { class: "product-card", "data-product-id": product.id },
-    el("div", { class: "product-tools" }, favorite, edit),
-    el("div", { class: "product-image" }, thumbnail),
-    el(
-      "div",
-      { class: "product-content" },
-      el("h3", { class: "product-name", title: product.name }, product.name),
-      el(
-        "p",
-        { class: "product-meta" },
-        product.variants?.length
-          ? `${productVariants(product).length} ${
-              product.standardVariantEnabled ? "options" : "variants"
-            }`
-          : "Single product",
-        product.packSize ? ` · ${product.packSize} per case` : "",
-      ),
-      el(
-        "div",
-        { class: "product-bottom" },
-        el(
-          "strong",
-          { class: `product-price${base == null ? " muted" : ""}` },
-          base == null ? "Choose variant / price" : cash(base),
-        ),
-        add,
-      ),
-    ),
-    el(
-      "button",
-      {
-        type: "button",
-        class: "product-tile-open",
-        "aria-label": `View ${product.name}`,
-        title: product.name,
-        onClick: () => act(() => showAddProduct(product)),
-      },
-      el("span", { class: "sr-only" }, `View ${product.name}`),
-    ),
-  );
-}
-
 async function toggleFavorite(id) {
   const fav = { ...preferences().favorites };
   const set = new Set(fav[storeId] ?? currentStore()?.favoriteProductIds ?? []);
@@ -3226,7 +2997,7 @@ function showAddProduct(product, initialVariant) {
         (d) => {
           d.lines = nextLines;
         },
-        { stay: isPhone() },
+        { stay: true },
       );
       m.close();
       toast(
@@ -3398,7 +3169,7 @@ function showAddProduct(product, initialVariant) {
     const current=productById(product.id);
     if(!current||current.active===false||current.deleted||lines.some(line=>(line.allowedVariants||[line.variant]).some(v=>!productVariants(current).includes(v))))throw new Error("The available flavors changed. Reopen the product.");
     const nextLines=addSelectedProductLines(draft?.lines||[],lines,uuid);
-    editDraft(d=>{d.lines=nextLines;},{stay:isPhone()});m.close();toast("Assortment added to your order.");
+    editDraft(d=>{d.lines=nextLines;},{stay:true});m.close();toast("Assortment added to your order.");
   }}); }
   let assortmentPanel = makeAssortmentPanel();
   flavorActions.append(assortmentPanel.addButton);
@@ -3725,7 +3496,7 @@ function productThumbnail(product) {
       : missing("No product image"),
   );
 }
-// Phone − / + around an order line's quantity field. They reuse the field's
+// − / + around an order line's quantity field. They reuse the field's
 // own input handler, so validation and saving stay in one place.
 function builderStepper(quantity, label) {
   const step = (delta) => {
@@ -3805,12 +3576,7 @@ function renderBuilder() {
     builderStoreId = storeId;
   const checkDraft = () =>
     assertBuilderDraft(builderScope, builderDraftId, builderStoreId);
-  const review = button(
-    isPhone() ? "Submit order" : "Review & submit",
-    showSubmit,
-    "primary",
-    "check",
-  );
+  const review = button("Submit order", showSubmit, "primary", "check");
   const totalValue = el(
     "strong",
     { "data-builder-total": "true", "aria-live": "polite" },
@@ -3913,7 +3679,7 @@ function renderBuilder() {
         el(
           "div",
           { class: "builder-product-head" },
-          isPhone() ? productThumbnail(product) : null,
+          productThumbnail(product),
           el("h2", { id: groupLabel }, options),
           el("div", { class: "builder-product-actions" }, add),
         ),
@@ -3999,7 +3765,7 @@ function renderBuilder() {
                   ? el("small", {}, savedCaseQuantityHint(line, product))
                   : null,
               ),
-              isPhone() ? builderStepper(quantity, label) : quantity,
+              builderStepper(quantity, label),
               amount,
               iconButton(`Options for ${label}`, "more", () => {
                 checkDraft();
@@ -6733,7 +6499,7 @@ function renderMore() {
     ["Quick access", [
       isPhone()
         ? ["Stores", "Store details, contacts and pricing", "stores", () => setView("stores")]
-        : ["Overview", "Store summary and current drafts", "home", () => setView("home")],
+        : ["Home", "Store summary and current drafts", "home", () => setView("home")],
       ["Saved items", "Your favorite catalog products", "star", () => {favoritesOnly = true; setView("catalog");}],
     ]],
     ["Orders & account", [
@@ -8581,7 +8347,7 @@ function deviceDatabaseChanged(scope) {
     state &&
     !editorIsActive() &&
     restoreActiveDraft() &&
-    (view === "build" || (view === "catalog" && isPhone()))
+    (view === "build" || view === "catalog")
   ) {
     render();
     return;

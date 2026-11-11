@@ -1,4 +1,5 @@
-// Phone catalog: set quantities in place instead of through a dialog.
+// Order-sheet catalog, used at every width: set quantities in place instead of
+// through a dialog. (The phone- prefix is historical.)
 // Presentation only. Draft changes go through the injected changeLines, which
 // owns session checks and saving. No imports, so helpers stay unit-testable.
 const OPTIONS_CHANGED =
@@ -43,6 +44,45 @@ export function heldElsewhereMessage(after, wanted) {
     : `${after} are in lines with a note or case unit. Change them on the Order screen.`;
 }
 
+// Builds the order panel's groups from draft lines grouped by product.
+export function orderGroupsFor(grouped, { productOf, variantsOf, priceOf, labelOf, cash }) {
+  return (grouped || []).map((group) => {
+    const product = productOf(group.productId);
+    const options = product ? variantsOf(product).length : 0;
+    let amount = 0,
+      priced = true;
+    const lines = group.lines.map((line) => {
+      const price = priceOf(line);
+      const total = price == null ? null : price * line.quantity;
+      if (total == null) priced = false;
+      else amount += total;
+      const name = labelOf(line) || (options > 1 ? "Standard" : "");
+      return {
+        label: `${name}${line.unit === "case" ? " (case)" : ""}`.trim(),
+        quantity: line.quantity,
+        amount: total == null ? "Check item" : cash(total),
+      };
+    });
+    return {
+      name: product?.name || "Product unavailable",
+      amount: priced ? cash(amount) : "Check items",
+      lines,
+    };
+  });
+}
+
+// Flattens the order panel's groups into display rows.
+export function orderPanelRows(groups) {
+  return (groups || []).flatMap((group) => [
+    { kind: "group", text: group.name, amount: group.amount },
+    ...group.lines.map((line) => ({
+      kind: "line",
+      text: line.label ? `${line.quantity} × ${line.label}` : `${line.quantity}`,
+      amount: line.amount,
+    })),
+  ]);
+}
+
 export function productSummary(product, variantsOf) {
   const count = variantsOf(product).filter(Boolean).length;
   return `${
@@ -74,6 +114,7 @@ export function createPhoneCatalog(deps) {
     onMoreOptions,
     onReview,
     expanded,
+    orderGroups = () => [],
   } = deps;
   const entries = new Map();
 
@@ -90,12 +131,75 @@ export function createPhoneCatalog(deps) {
     button("Review order", onReview, "primary", "arrow"),
   );
 
+  // Desktop: the same order, itemised, beside the catalog.
+  const panelLines = el("div", { class: "catalog-order-lines" });
+  const panelSubtotalLabel = el("dt", {}, "Subtotal");
+  const panelSubtotal = el("dd", {});
+  const panelTax = el("dd", {});
+  const panelTotal = el("dd", {});
+  const panelTotals = el(
+    "dl",
+    { class: "catalog-order-totals" },
+    el("div", {}, panelSubtotalLabel, panelSubtotal),
+    el("div", {}, el("dt", {}, "Estimated tax"), panelTax),
+    el(
+      "div",
+      { class: "catalog-order-total" },
+      el("dt", {}, "Estimated total"),
+      panelTotal,
+    ),
+  );
+  const panelReview = button("Review and submit", onReview, "primary");
+  const panelNote = el(
+    "p",
+    { class: "catalog-order-note" },
+    "The total is an estimate until the order is confirmed.",
+  );
+  const orderPanel = el(
+    "aside",
+    { class: "catalog-order-panel", "aria-label": "Your order" },
+    el("h2", {}, "Your order"),
+    panelLines,
+    panelTotals,
+    panelReview,
+    panelNote,
+  );
+
   function updateBar() {
     const units = quantities.draftUnits(getLines());
-    const label = orderBarLabel(totals(), units, cash);
+    const sums = totals();
+    const label = orderBarLabel(sums, units, cash);
     orderBar.hidden = !units;
     barUnits.textContent = label.units;
     barTotal.textContent = label.total;
+    const rows = orderPanelRows(orderGroups());
+    orderPanel.dataset.empty = String(!rows.length);
+    panelTotals.hidden = panelReview.hidden = panelNote.hidden = !rows.length;
+    panelLines.replaceChildren(
+      ...(rows.length
+        ? rows.map((row) =>
+            el(
+              "div",
+              { class: `catalog-order-row catalog-order-${row.kind}` },
+              el("span", {}, row.text),
+              el("span", {}, row.amount),
+            ),
+          )
+        : [
+            el(
+              "p",
+              { class: "catalog-order-empty" },
+              "Nothing yet. Set quantities in the catalog and they appear here.",
+            ),
+          ]),
+    );
+    panelSubtotalLabel.textContent = `Subtotal, ${units} ${
+      units === 1 ? "item" : "items"
+    }`;
+    const unknown = !!sums.missing?.length;
+    panelSubtotal.textContent = unknown ? "Check items" : cash(sums.subtotal);
+    panelTax.textContent = unknown ? "—" : cash(sums.tax);
+    panelTotal.textContent = label.total;
   }
 
   function stepper(product, variant, label, entry) {
@@ -395,5 +499,5 @@ export function createPhoneCatalog(deps) {
   }
 
   updateBar();
-  return { nodes, orderBar, refresh };
+  return { nodes, orderBar, orderPanel, refresh };
 }
